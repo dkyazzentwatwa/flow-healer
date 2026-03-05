@@ -1,0 +1,72 @@
+Metadata-Version: 2.4
+Name: flow-healer
+Version: 0.1.0
+Summary: Standalone multi-repo autonomous healing service for GitHub repositories
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PyYAML>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+
+# Flow Healer
+
+Flow Healer is a standalone autonomous healing service for GitHub repos. It watches labeled issues, creates isolated worktrees, proposes fixes with an AI connector, runs Docker test gates, verifies the result, and opens a PR when the change is safe enough to review.
+
+## What ships in v0
+
+- Standalone CLI: `flow-healer`
+- Multi-repo config in `~/.flow-healer/config.yaml`
+- One SQLite state database per managed repo
+- Per-issue git worktrees
+- Docker-based pytest gates
+- GitHub issue + PR loop
+- Scan pipeline with dry-run support
+
+## Quickstart
+
+```bash
+cd /Users/cypher-server/Documents/code/flow-healer
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+Create `~/.flow-healer/config.yaml`:
+
+```yaml
+service:
+  github_token_env: GITHUB_TOKEN
+  poll_interval_seconds: 60
+  state_root: ~/.flow-healer
+repos:
+  - name: demo
+    path: /absolute/path/to/repo
+    repo_slug: owner/repo
+    default_branch: main
+    issue_required_labels: [healer:ready]
+    pr_required_label: healer:pr-approved
+    healer_mode: guarded_pr
+```
+
+Then run:
+
+```bash
+flow-healer doctor
+flow-healer status
+flow-healer start --once
+```
+
+## Commands
+
+- `flow-healer start [--repo NAME] [--once]`
+- `flow-healer status [--repo NAME]`
+- `flow-healer pause [--repo NAME]`
+- `flow-healer resume [--repo NAME]`
+- `flow-healer scan [--repo NAME] [--dry-run]`
+- `flow-healer doctor [--repo NAME]`
+
+## Notes
+
+- The default connector is `codex exec`.
+- Docker is used for the test gate, not for git push or PR creation.
+- Each managed repo stores state under `~/.flow-healer/repos/<repo-name>/state.db`.

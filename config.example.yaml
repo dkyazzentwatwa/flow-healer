@@ -1,0 +1,35 @@
+service:
+  github_token_env: GITHUB_TOKEN
+  poll_interval_seconds: 60
+  state_root: ~/.flow-healer
+  connector_command: codex
+  connector_model: ""
+  connector_timeout_seconds: 300
+
+repos:
+  - name: demo
+    path: /absolute/path/to/target-repo
+    repo_slug: owner/repo
+    default_branch: main
+    enable_autonomous_healer: true
+    healer_mode: guarded_pr
+    issue_required_labels:
+      - healer:ready
+    pr_actions_require_approval: true
+    pr_required_label: healer:pr-approved
+    trusted_actors: []
+    max_concurrent_issues: 1
+    retry_budget: 2
+    backoff_initial_seconds: 60
+    backoff_max_seconds: 3600
+    circuit_breaker_window: 5
+    circuit_breaker_failure_rate: 0.5
+    learning_enabled: true
+    max_diff_files: 8
+    max_diff_lines: 400
+    max_failed_tests_allowed: 0
+    scan_enable_issue_creation: false
+    scan_severity_threshold: medium
+    scan_max_issues_per_run: 5
+    scan_default_labels:
+      - kind:scan

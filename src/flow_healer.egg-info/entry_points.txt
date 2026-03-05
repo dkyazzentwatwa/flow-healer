@@ -1,0 +1,2 @@
+[console_scripts]
+flow-healer = flow_healer.cli:main
