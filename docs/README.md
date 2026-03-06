@@ -2,6 +2,8 @@
 
 Flow Healer is a Python CLI tool for autonomous GitHub maintenance. It watches issues, creates isolated worktrees, runs guarded fixes through an AI connector, verifies the result with pytest in Docker, and stores durable state in SQLite.
 
+Flow Healer includes an autonomous PR feedback loop that monitors GitHub comments on open PRs and incorporates them as feedback for iterative healing attempts.
+
 ## Quick Start
 
 ~~~bash
@@ -18,6 +20,7 @@ flow-healer start --once
 - [installation.md](installation.md): local environment setup and config
 - [usage.md](usage.md): CLI flows and examples
 - [architecture.md](architecture.md): control loop and module map
+- [operations.md](operations.md): common maintenance tasks and troubleshooting
 - [contributing.md](contributing.md): development and review expectations
 
 ## Notes
@@ -25,5 +28,4 @@ flow-healer start --once
 - Project type: CLI automation service
 - Tech stack: Python 3.11+, SQLite, GitHub, Docker, pytest
 - Target audience: repository maintainers and contributors
-- [TODO: Verify] Whether future docs should include a dedicated operations runbook
 - Review feedback addressed: this initial docs scaffold is intended as a starting point for iterative refinement.
