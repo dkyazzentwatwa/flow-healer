@@ -16,6 +16,7 @@ src/flow_healer/healer_scan.py
 src/flow_healer/healer_tracker.py
 src/flow_healer/healer_verifier.py
 src/flow_healer/healer_workspace.py
+src/flow_healer/operator_api.py
 src/flow_healer/protocols.py
 src/flow_healer/service.py
 src/flow_healer/store.py
@@ -25,6 +26,9 @@ src/flow_healer.egg-info/dependency_links.txt
 src/flow_healer.egg-info/entry_points.txt
 src/flow_healer.egg-info/requires.txt
 src/flow_healer.egg-info/top_level.txt
+src/flow_healer/tui/__init__.py
+src/flow_healer/tui/app.py
+src/flow_healer/tui/state.py
 tests/test_healer_locks.py
 tests/test_healer_loop.py
 tests/test_healer_memory.py
@@ -32,3 +36,6 @@ tests/test_healer_reviewer.py
 tests/test_healer_runner.py
 tests/test_healer_scan.py
 tests/test_healer_tracker.py
+tests/test_operator_api.py
+tests/test_store_observability.py
+tests/test_tui_app.py

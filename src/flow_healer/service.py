@@ -76,6 +76,7 @@ class FlowHealerService:
                     "repo": repo.repo_name,
                     "path": repo.healer_repo_path,
                     "paused": runtime.store.get_state("healer_paused") == "true",
+                    "runtime": runtime.store.get_runtime_status() or {},
                     "issues_total": len(issues),
                     "state_counts": counts,
                     "recent_attempts": runtime.store.list_recent_healer_attempts(limit=5),
@@ -88,12 +89,23 @@ class FlowHealerService:
         for repo in self.config.select_repos(repo_name):
             runtime = self.build_runtime(repo)
             runtime.store.set_state("healer_paused", "true" if paused else "false")
+            runtime.store.update_runtime_status(status="paused" if paused else "idle", touch_heartbeat=True)
+            runtime.store.create_healer_event(
+                event_type="pause_changed",
+                message="Autonomous healer paused." if paused else "Autonomous healer resumed.",
+                payload={"paused": paused},
+            )
             runtime.store.close()
 
     def run_scan(self, repo_name: str | None = None, *, dry_run: bool) -> list[dict[str, object]]:
         results: list[dict[str, object]] = []
         for repo in self.config.select_repos(repo_name):
             runtime = self.build_runtime(repo)
+            runtime.store.create_healer_event(
+                event_type="scan_started",
+                message="Scan started.",
+                payload={"dry_run": dry_run},
+            )
             scanner = FlowHealerScanner(
                 repo_path=Path(repo.healer_repo_path),
                 store=runtime.store,
@@ -103,7 +115,13 @@ class FlowHealerService:
                 default_labels=repo.healer_scan_default_labels,
                 enable_issue_creation=repo.healer_scan_enable_issue_creation,
             )
-            results.append({"repo": repo.repo_name, "summary": scanner.run_scan(dry_run=dry_run)})
+            summary = scanner.run_scan(dry_run=dry_run)
+            runtime.store.create_healer_event(
+                event_type="scan_finished",
+                message="Scan finished.",
+                payload={"dry_run": dry_run, "summary": summary},
+            )
+            results.append({"repo": repo.repo_name, "summary": summary})
             runtime.store.close()
         return results
 
@@ -130,6 +148,13 @@ class FlowHealerService:
                     "github_token_present": token_present,
                 }
             )
+            runtime = self.build_runtime(repo)
+            runtime.store.create_healer_event(
+                event_type="doctor_run",
+                message="Doctor checks completed.",
+                payload=rows[-1],
+            )
+            runtime.store.close()
         return rows
 
 

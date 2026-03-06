@@ -5,6 +5,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 class SQLiteStore:
@@ -134,11 +135,35 @@ class SQLiteStore:
                     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS healer_events (
+                    event_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    level TEXT NOT NULL DEFAULT 'info',
+                    message TEXT NOT NULL,
+                    issue_id TEXT NOT NULL DEFAULT '',
+                    attempt_id TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS healer_runtime (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    heartbeat_at TEXT DEFAULT NULL,
+                    last_tick_started_at TEXT DEFAULT NULL,
+                    last_tick_finished_at TEXT DEFAULT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_healer_issues_state_backoff ON healer_issues(state, backoff_until, priority, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_attempts_started ON healer_attempts(started_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_healer_events_issue_created ON healer_events(issue_id, created_at DESC);
                 """
             )
+            conn.execute("INSERT OR IGNORE INTO healer_runtime(singleton, status) VALUES(1, 'idle')")
             conn.commit()
             self._migrate(conn)
 
@@ -181,6 +206,13 @@ class SQLiteStore:
         if data is None:
             return None
         data["guardrail"] = _json_loads(data.pop("guardrail_json", "{}"), {})
+        return data
+
+    @staticmethod
+    def _decode_healer_event_row(data: dict[str, Any] | None) -> dict[str, Any] | None:
+        if data is None:
+            return None
+        data["payload"] = _json_loads(data.pop("payload_json", "{}"), {})
         return data
 
     def upsert_healer_issue(
@@ -490,6 +522,20 @@ class SQLiteStore:
             ).fetchall()
         return [lesson for row in rows if (lesson := self._decode_healer_lesson_row(self._row_to_dict(row))) is not None]
 
+    def list_healer_lessons_for_issue(self, *, issue_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        conn = self._connect()
+        with self._lock:
+            rows = conn.execute(
+                """
+                SELECT * FROM healer_lessons
+                WHERE issue_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (issue_id, int(limit)),
+            ).fetchall()
+        return [lesson for row in rows if (lesson := self._decode_healer_lesson_row(self._row_to_dict(row))) is not None]
+
     def mark_healer_lessons_used(self, lesson_ids: list[str]) -> int:
         lesson_ids = [lesson_id for lesson_id in dict.fromkeys(lesson_ids) if str(lesson_id).strip()]
         if not lesson_ids:
@@ -575,6 +621,94 @@ class SQLiteStore:
                 rows = conn.execute("SELECT * FROM healer_locks ORDER BY lock_key ASC").fetchall()
         return [entry for row in rows if (entry := self._row_to_dict(row)) is not None]
 
+    def create_healer_event(
+        self,
+        *,
+        event_type: str,
+        message: str,
+        level: str = "info",
+        issue_id: str = "",
+        attempt_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        conn = self._connect()
+        event_id = f"hev_{uuid4().hex[:12]}"
+        with self._lock:
+            conn.execute(
+                """
+                INSERT INTO healer_events(event_id, event_type, level, message, issue_id, attempt_id, payload_json)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event_type.strip()[:80],
+                    level.strip()[:20] or "info",
+                    message[:500],
+                    issue_id.strip(),
+                    attempt_id.strip(),
+                    json.dumps(payload or {}, ensure_ascii=True),
+                ),
+            )
+            conn.commit()
+        return event_id
+
+    def list_healer_events(
+        self,
+        *,
+        issue_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        conn = self._connect()
+        with self._lock:
+            if issue_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM healer_events
+                    WHERE issue_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (issue_id, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM healer_events ORDER BY created_at DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+        return [event for row in rows if (event := self._decode_healer_event_row(self._row_to_dict(row))) is not None]
+
+    def update_runtime_status(
+        self,
+        *,
+        status: str,
+        last_error: str | None = None,
+        touch_heartbeat: bool = False,
+        touch_tick_started: bool = False,
+        touch_tick_finished: bool = False,
+    ) -> None:
+        conn = self._connect()
+        with self._lock:
+            updates = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+            params: list[Any] = [status.strip()[:40] or "idle"]
+            if last_error is not None:
+                updates.append("last_error = ?")
+                params.append(last_error[:500])
+            if touch_heartbeat:
+                updates.append("heartbeat_at = CURRENT_TIMESTAMP")
+            if touch_tick_started:
+                updates.append("last_tick_started_at = CURRENT_TIMESTAMP")
+            if touch_tick_finished:
+                updates.append("last_tick_finished_at = CURRENT_TIMESTAMP")
+            params.append(1)
+            conn.execute(f"UPDATE healer_runtime SET {', '.join(updates)} WHERE singleton = ?", params)
+            conn.commit()
+
+    def get_runtime_status(self) -> dict[str, Any] | None:
+        conn = self._connect()
+        with self._lock:
+            row = conn.execute("SELECT * FROM healer_runtime WHERE singleton = 1").fetchone()
+        return self._row_to_dict(row)
+
     def create_scan_run(self, *, run_id: str, dry_run: bool) -> None:
         conn = self._connect()
         with self._lock:
@@ -600,6 +734,59 @@ class SQLiteStore:
             return None
         data["payload"] = _json_loads(data.pop("payload_json", "{}"), {})
         return data
+
+    def list_scan_runs(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        conn = self._connect()
+        with self._lock:
+            rows = conn.execute(
+                "SELECT * FROM scan_runs ORDER BY created_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        decoded: list[dict[str, Any]] = []
+        for row in rows:
+            data = self._row_to_dict(row)
+            if data is None:
+                continue
+            data["summary"] = _json_loads(data.pop("summary_json", "{}"), {})
+            decoded.append(data)
+        return decoded
+
+    def list_scan_findings(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        conn = self._connect()
+        with self._lock:
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM scan_findings
+                    WHERE status IN ({placeholders})
+                    ORDER BY last_seen_at DESC, severity DESC, title ASC
+                    LIMIT ?
+                    """,
+                    [*statuses, int(limit)],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM scan_findings
+                    ORDER BY last_seen_at DESC, severity DESC, title ASC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+        findings: list[dict[str, Any]] = []
+        for row in rows:
+            data = self._row_to_dict(row)
+            if data is None:
+                continue
+            data["payload"] = _json_loads(data.pop("payload_json", "{}"), {})
+            findings.append(data)
+        return findings
 
     def upsert_scan_finding(
         self,

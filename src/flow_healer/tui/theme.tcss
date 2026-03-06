@@ -1,0 +1,103 @@
+Screen {
+    background: #0d1117;
+    color: #e6edf3;
+}
+
+Header {
+    background: #111a22;
+    color: #6ae3ff;
+}
+
+Footer {
+    background: #111a22;
+    color: #7ee787;
+}
+
+#status-bar {
+    height: 1;
+    padding: 0 1;
+    background: #13202b;
+    color: #f0b72f;
+}
+
+#command-input {
+    margin: 0 1 1 1;
+    background: #111a22;
+    color: #e6edf3;
+    border: round #6ae3ff;
+}
+
+#command-input.hidden {
+    display: none;
+}
+
+TabbedContent {
+    border: round #6ae3ff;
+    background: #0d1117;
+}
+
+TabPane {
+    padding: 1 2;
+}
+
+.toolbar {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.toolbar > * {
+    margin-right: 1;
+}
+
+.toolbar-label {
+    color: #8b949e;
+    min-width: 12;
+}
+
+.panel {
+    padding: 1;
+    margin: 1 0;
+    border: round #2f81f7;
+    background: #111a22;
+    color: #e6edf3;
+}
+
+.hero {
+    border: round #f0b72f;
+}
+
+.section-title {
+    margin-top: 1;
+    color: #7ee787;
+    text-style: bold;
+}
+
+.badge {
+    padding: 0 1;
+    background: #13202b;
+    color: #6ae3ff;
+    border: round #6ae3ff;
+    min-width: 20;
+}
+
+Input {
+    min-width: 20;
+    background: #111a22;
+    color: #e6edf3;
+    border: round #2f81f7;
+}
+
+Button {
+    min-width: 12;
+}
+
+DataTable {
+    height: 14;
+    margin-bottom: 1;
+    background: #111a22;
+    border: round #2f81f7;
+}
+
+#fleet-repos, #issues-table, #attempts-table, #scan-findings-table, #audit-events-table {
+    height: 18;
+}

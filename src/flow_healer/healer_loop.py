@@ -78,7 +78,10 @@ class AutonomousHealerLoop:
 
     async def run_forever(self, is_shutdown: Callable[[], bool]) -> None:
         if not self.enabled:
+            self.store.update_runtime_status(status="disabled", touch_heartbeat=True)
             return
+        self.store.update_runtime_status(status="idle", touch_heartbeat=True)
+        self._record_event("loop_started", "Autonomous healer loop started.", payload={"mode": self.settings.healer_mode})
         logger.info(
             "Autonomous healer loop enabled (repo=%s, mode=%s, poll=%.0fs)",
             self.repo_path,
@@ -89,26 +92,46 @@ class AutonomousHealerLoop:
             try:
                 await asyncio.to_thread(self._tick_once)
             except Exception as exc:
+                self.store.update_runtime_status(
+                    status="error",
+                    last_error=str(exc),
+                    touch_heartbeat=True,
+                )
+                self._record_event("runtime_exception", f"Autonomous healer tick failed: {exc}", level="error")
                 logger.exception("Autonomous healer tick failed: %s", exc)
             await asyncio.sleep(max(5.0, self.settings.healer_poll_interval_seconds))
 
     def _tick_once(self) -> None:
+        self.store.update_runtime_status(status="running", touch_heartbeat=True, touch_tick_started=True)
         if self.store.get_state("healer_paused") == "true":
+            self.store.update_runtime_status(status="paused", touch_heartbeat=True, touch_tick_finished=True)
             logger.info("Autonomous healer paused via system command; skipping cycle.")
+            self._record_event("tick_paused", "Tick skipped because healer is paused.")
             return
-        self.reconciler.reconcile()
+        reconcile_summary = self.reconciler.reconcile()
+        if any(int(value or 0) > 0 for value in reconcile_summary.values()):
+            self._record_event("reconcile", "Reconciler cleaned up stale state.", payload=reconcile_summary)
         self._ingest_ready_issues()
         self._ingest_pr_feedback()
         if self._circuit_breaker_open():
+            self.store.update_runtime_status(status="idle", touch_heartbeat=True, touch_tick_finished=True)
             logger.warning("Healer circuit breaker open; skipping this cycle.")
+            self._record_event("circuit_breaker", "Healer circuit breaker open; skipping tick.", level="warning")
             return
         processed = 0
         while processed < max(1, self.settings.healer_max_concurrent_issues):
             issue = self.dispatcher.claim_next_issue()
             if not issue:
                 break
+            self._record_event(
+                "issue_claimed",
+                f"Claimed issue #{issue.get('issue_id')}.",
+                issue_id=str(issue.get("issue_id") or ""),
+                payload={"title": issue.get("title", ""), "priority": issue.get("priority", 0)},
+            )
             self._process_claimed_issue(issue)
             processed += 1
+        self.store.update_runtime_status(status="idle", touch_heartbeat=True, touch_tick_finished=True)
 
     def _ingest_pr_feedback(self) -> None:
         active_prs = self.store.list_healer_issues(states=["pr_open", "pr_pending_approval"], limit=100)
@@ -154,6 +177,12 @@ class AutonomousHealerLoop:
                 logger.info("Detected new feedback for PR #%d (Issue #%s)", pr_number, issue_id)
                 existing_feedback = str(row.get("feedback_context") or "")
                 combined_feedback = (existing_feedback + "\n\n" + "\n".join(new_feedback)).strip()
+                self._record_event(
+                    "pr_feedback",
+                    f"New PR feedback detected for issue #{issue_id}.",
+                    issue_id=issue_id,
+                    payload={"pr_number": pr_number, "comments": new_feedback},
+                )
 
                 # Re-queue the issue for a new attempt
                 self.store.set_healer_issue_state(
@@ -202,6 +231,13 @@ class AutonomousHealerLoop:
         prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
         lock_result = self.dispatcher.acquire_prediction_locks(issue_id=issue.issue_id, lock_keys=prediction.keys)
         if not lock_result.acquired:
+            self._record_event(
+                "lock_conflict",
+                f"Predicted lock acquisition failed for issue #{issue.issue_id}.",
+                level="warning",
+                issue_id=issue.issue_id,
+                payload={"reason": lock_result.reason, "lock_keys": prediction.keys},
+            )
             self._backoff_or_fail(
                 issue_id=issue.issue_id,
                 attempt_no=attempt_no,
@@ -218,6 +254,13 @@ class AutonomousHealerLoop:
             state="running",
             prediction_source=prediction.source,
             predicted_lock_set=prediction.keys,
+        )
+        self._record_event(
+            "attempt_started",
+            f"Attempt {attempt_no} started for issue #{issue.issue_id}.",
+            issue_id=issue.issue_id,
+            attempt_id=attempt_id,
+            payload={"prediction_source": prediction.source, "predicted_lock_set": prediction.keys},
         )
         actual_diff: list[str] = []
         test_summary: dict[str, object] = {}
@@ -260,6 +303,14 @@ class AutonomousHealerLoop:
             if not run_result.success:
                 failure_class = run_result.failure_class
                 failure_reason = run_result.failure_reason
+                self._record_event(
+                    "attempt_failed",
+                    f"Attempt {attempt_no} failed for issue #{issue.issue_id}.",
+                    level="warning",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    payload={"failure_class": failure_class, "failure_reason": failure_reason},
+                )
                 self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
@@ -276,6 +327,14 @@ class AutonomousHealerLoop:
             if not upgrade.acquired:
                 failure_class = "lock_upgrade_conflict"
                 failure_reason = upgrade.reason
+                self._record_event(
+                    "lock_upgrade_conflict",
+                    f"Lock upgrade failed for issue #{issue.issue_id}.",
+                    level="warning",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    payload={"reason": upgrade.reason, "lock_keys": run_result.diff_paths},
+                )
                 self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
@@ -298,6 +357,14 @@ class AutonomousHealerLoop:
             if not verification.passed:
                 failure_class = "verifier_failed"
                 failure_reason = verification.summary
+                self._record_event(
+                    "verifier_failed",
+                    f"Verifier rejected attempt {attempt_no} for issue #{issue.issue_id}.",
+                    level="warning",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    payload={"summary": verification.summary},
+                )
                 self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
@@ -319,6 +386,13 @@ class AutonomousHealerLoop:
                     state="pr_pending_approval",
                     clear_lease=True,
                 )
+                self._record_event(
+                    "pr_pending_approval",
+                    f"Issue #{issue.issue_id} is waiting for PR approval label.",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    payload={"required_label": self.settings.healer_pr_required_label},
+                )
                 final_state = "pr_pending_approval"
                 return
 
@@ -326,6 +400,14 @@ class AutonomousHealerLoop:
             if not commit_ok:
                 failure_class = "push_failed"
                 failure_reason = commit_reason
+                self._record_event(
+                    "push_failed",
+                    f"Commit/push failed for issue #{issue.issue_id}.",
+                    level="error",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    payload={"reason": commit_reason},
+                )
                 self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
@@ -349,6 +431,13 @@ class AutonomousHealerLoop:
             if pr is None:
                 failure_class = "pr_open_failed"
                 failure_reason = "Failed to create/update pull request."
+                self._record_event(
+                    "pr_open_failed",
+                    f"PR open failed for issue #{issue.issue_id}.",
+                    level="error",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                )
                 self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
@@ -364,6 +453,13 @@ class AutonomousHealerLoop:
                 pr_number=pr.number,
                 pr_state=pr.state,
                 clear_lease=True,
+            )
+            self._record_event(
+                "pr_opened",
+                f"PR #{pr.number} opened for issue #{issue.issue_id}.",
+                issue_id=issue.issue_id,
+                attempt_id=attempt_id,
+                payload={"pr_number": pr.number, "pr_state": pr.state, "html_url": pr.html_url},
             )
             final_state = "pr_open"
 
@@ -392,6 +488,13 @@ class AutonomousHealerLoop:
                 verifier_summary=verifier_summary,
                 failure_class=failure_class,
                 failure_reason=failure_reason,
+            )
+            self._record_event(
+                "attempt_finished",
+                f"Attempt {attempt_no} finished for issue #{issue.issue_id} with state {final_state}.",
+                issue_id=issue.issue_id,
+                attempt_id=attempt_id,
+                payload={"state": final_state, "failure_class": failure_class, "actual_diff_set": actual_diff},
             )
             self.memory.maybe_record_lesson(
                 issue=issue,
@@ -422,6 +525,13 @@ class AutonomousHealerLoop:
                 last_failure_reason=failure_reason[:500],
                 clear_lease=True,
             )
+            self._record_event(
+                "issue_failed",
+                f"Issue #{issue_id} hit retry budget and was marked failed.",
+                level="error",
+                issue_id=issue_id,
+                payload={"failure_class": failure_class, "failure_reason": failure_reason[:500]},
+            )
             return
 
         delay = min(
@@ -436,6 +546,13 @@ class AutonomousHealerLoop:
             last_failure_class=failure_class,
             last_failure_reason=failure_reason[:500],
             clear_lease=True,
+        )
+        self._record_event(
+            "issue_backoff",
+            f"Issue #{issue_id} re-queued with backoff.",
+            level="warning",
+            issue_id=issue_id,
+            payload={"failure_class": failure_class, "failure_reason": failure_reason[:500], "backoff_until": backoff_until},
         )
 
     def _circuit_breaker_open(self) -> bool:
@@ -493,3 +610,22 @@ class AutonomousHealerLoop:
         if push.returncode != 0:
             return False, (push.stderr or push.stdout or "git push failed").strip()
         return True, ""
+
+    def _record_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        level: str = "info",
+        issue_id: str = "",
+        attempt_id: str = "",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        self.store.create_healer_event(
+            event_type=event_type,
+            message=message,
+            level=level,
+            issue_id=issue_id,
+            attempt_id=attempt_id,
+            payload=payload or {},
+        )

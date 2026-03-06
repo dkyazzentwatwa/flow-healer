@@ -5,6 +5,7 @@ Summary: Standalone multi-repo autonomous healing service for GitHub repositorie
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: PyYAML>=6.0
+Requires-Dist: textual<1,>=0.86
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 

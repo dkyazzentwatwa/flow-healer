@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .config import AppConfig
 from .service import FlowHealerService
+from .tui import run_tui
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,7 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="~/.flow-healer/config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("start", "status", "pause", "resume", "scan", "doctor"):
+    for name in ("start", "status", "pause", "resume", "scan", "doctor", "tui"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--repo")
         if name == "start":
@@ -49,6 +50,9 @@ def main() -> None:
     if args.command == "doctor":
         for row in service.doctor_rows(args.repo):
             print(json.dumps(row, indent=2, default=str))
+        return
+    if args.command == "tui":
+        run_tui(config, selected_repo=args.repo)
         return
 
 
