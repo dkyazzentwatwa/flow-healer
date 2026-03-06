@@ -41,3 +41,9 @@ config.yaml
 *.db
 *.sqlite
 *.sqlite3
+
+# Flow Healer local artifacts
+.apple-flow-healer/
+*.patch
+*.orig
+*.rej
