@@ -19,9 +19,28 @@ flow-healer start --once
 
 - [installation.md](installation.md): local environment setup and config
 - [usage.md](usage.md): CLI flows and examples
+- [usage.md - Failure Recovery](usage.md#failure-recovery): handling `no_patch` and `verifier_failed` retries
 - [architecture.md](architecture.md): control loop and module map
 - [operations.md](operations.md): common maintenance tasks and troubleshooting
+- [operations.md - Failure Recovery](operations.md#failure-recovery): incident response for failed healing attempts
 - [contributing.md](contributing.md): development and review expectations
+
+## Failure Recovery
+
+For production runs, use the dedicated recovery sections when a healing attempt ends with `no_patch` or `verifier_failed`:
+
+- [Usage Failure Recovery](usage.md#failure-recovery)
+- [Operations Failure Recovery](operations.md#failure-recovery)
+
+~~~bash
+flow-healer start --repo demo --once
+~~~
+
+## E2E Reliability
+
+- [reliability-retest-plan.md](e2e/reliability-retest-plan.md): retest scope, acceptance criteria, and completion check
+- [reliability-risk-review.md](e2e/reliability-risk-review.md): eight-point reliability risk review for artifact completeness
+- [reliability-runbook.md](e2e/reliability-runbook.md): operator validation sequence for the artifact pack
 
 ## Notes
 
