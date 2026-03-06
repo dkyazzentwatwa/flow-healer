@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,9 +28,16 @@ class HealerRunResult:
 
 
 class HealerRunner:
-    def __init__(self, connector: ConnectorProtocol, *, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        connector: ConnectorProtocol,
+        *,
+        timeout_seconds: int,
+        test_gate_mode: str = "local_then_docker",
+    ) -> None:
         self.connector = connector
         self.timeout_seconds = max(30, int(timeout_seconds))
+        self.test_gate_mode = _normalize_test_gate_mode(test_gate_mode)
 
     def run_attempt(
         self,
@@ -104,7 +113,12 @@ class HealerRunner:
                 test_summary={},
             )
 
-        test_summary = _run_test_gates(workspace, targeted_tests=targeted_tests, timeout_seconds=self.timeout_seconds)
+        test_summary = _run_test_gates(
+            workspace,
+            targeted_tests=targeted_tests,
+            timeout_seconds=self.timeout_seconds,
+            mode=self.test_gate_mode,
+        )
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
             return HealerRunResult(
@@ -178,28 +192,57 @@ def _diff_stats(workspace: Path) -> tuple[int, int]:
     return files, lines
 
 
-def _run_test_gates(workspace: Path, *, targeted_tests: list[str], timeout_seconds: int) -> dict[str, Any]:
+def _run_test_gates(
+    workspace: Path,
+    *,
+    targeted_tests: list[str],
+    timeout_seconds: int,
+    mode: str,
+) -> dict[str, Any]:
     summary: dict[str, Any] = {
-        "targeted_exit_code": 0,
-        "full_exit_code": 0,
+        "mode": mode,
         "failed_tests": 0,
         "targeted_tests": targeted_tests,
     }
+    runners = _gate_runners_for_mode(mode)
 
     if targeted_tests:
         targeted_cmd = ["pytest", "-q", *targeted_tests]
-        targeted = _run_pytest_in_docker(workspace, targeted_cmd, timeout_seconds)
-        summary["targeted_exit_code"] = targeted["exit_code"]
-        summary["targeted_output_tail"] = targeted["output_tail"]
-        if targeted["exit_code"] != 0:
-            summary["failed_tests"] += 1
+        for runner_name, runner in runners:
+            targeted = runner(workspace, targeted_cmd, timeout_seconds)
+            summary[f"{runner_name}_targeted_exit_code"] = targeted["exit_code"]
+            summary[f"{runner_name}_targeted_output_tail"] = targeted["output_tail"]
+            if targeted["exit_code"] != 0:
+                summary["failed_tests"] += 1
 
-    full = _run_pytest_in_docker(workspace, ["pytest", "-q"], timeout_seconds)
-    summary["full_exit_code"] = full["exit_code"]
-    summary["full_output_tail"] = full["output_tail"]
-    if full["exit_code"] != 0:
-        summary["failed_tests"] += 1
+    full_cmd = ["pytest", "-q"]
+    for runner_name, runner in runners:
+        full = runner(workspace, full_cmd, timeout_seconds)
+        summary[f"{runner_name}_full_exit_code"] = full["exit_code"]
+        summary[f"{runner_name}_full_output_tail"] = full["output_tail"]
+        if full["exit_code"] != 0:
+            summary["failed_tests"] += 1
     return summary
+
+
+def _run_pytest_locally(workspace: Path, command: list[str], timeout_seconds: int) -> dict[str, Any]:
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(workspace) if not existing else f"{workspace}{os.pathsep}{existing}"
+    proc = subprocess.run(
+        [sys.executable, "-m", *command],
+        cwd=str(workspace),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=max(30, timeout_seconds),
+    )
+    output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    return {
+        "exit_code": int(proc.returncode),
+        "output_tail": output[-2000:],
+    }
 
 
 def _run_pytest_in_docker(workspace: Path, command: list[str], timeout_seconds: int) -> dict[str, Any]:
@@ -245,3 +288,21 @@ def _build_docker_test_script(command: list[str]) -> str:
 
 def _shell_quote(value: str) -> str:
     return json.dumps(value)
+
+
+def _normalize_test_gate_mode(mode: str) -> str:
+    candidate = str(mode or "").strip().lower().replace("-", "_")
+    if candidate in {"docker_only", "local_only", "local_then_docker"}:
+        return candidate
+    return "local_then_docker"
+
+
+def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:
+    if mode == "local_only":
+        return [("local", _run_pytest_locally)]
+    if mode == "docker_only":
+        return [("docker", _run_pytest_in_docker)]
+    return [
+        ("local", _run_pytest_locally),
+        ("docker", _run_pytest_in_docker),
+    ]

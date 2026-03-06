@@ -24,6 +24,10 @@ from .store import SQLiteStore
 logger = logging.getLogger("apple_flow.healer_loop")
 
 _TARGETED_TEST_RE = re.compile(r"\btests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py\b")
+_FLOW_COMMENT_PERSONA = (
+    "Laid-back tech bro vibes, light emoji use, concise status updates, "
+    "and always sign off with '-- Flow 🌊'."
+)
 
 
 class AutonomousHealerLoop:
@@ -53,6 +57,7 @@ class AutonomousHealerLoop:
         self.runner = HealerRunner(
             connector=connector,
             timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
+            test_gate_mode=settings.healer_test_gate_mode,
         )
         self.verifier = HealerVerifier(connector=connector)
         self.reviewer = HealerReviewer(connector=connector)
@@ -210,6 +215,7 @@ class AutonomousHealerLoop:
             limit=max(10, self.settings.healer_max_concurrent_issues * 5),
         )
         for issue in issues:
+            existing_issue = self.store.get_healer_issue(issue.issue_id)
             self.store.upsert_healer_issue(
                 issue_id=issue.issue_id,
                 repo=issue.repo,
@@ -219,6 +225,11 @@ class AutonomousHealerLoop:
                 labels=issue.labels,
                 priority=issue.priority,
             )
+            if existing_issue is None:
+                try:
+                    self.tracker.add_issue_reaction(issue_id=issue.issue_id, reaction="eyes")
+                except Exception as exc:
+                    logger.warning("Failed to add reaction for issue #%s: %s", issue.issue_id, exc)
 
     def _process_claimed_issue(self, row: dict[str, object]) -> None:
         issue = HealerIssue(
@@ -273,6 +284,18 @@ class AutonomousHealerLoop:
                 state="running",
                 workspace_path=str(workspace.path),
                 branch_name=workspace.branch,
+            )
+            self._post_issue_status(
+                issue_id=issue.issue_id,
+                body=self._format_flow_status_comment(
+                    "Yo, Flow's on it 👀",
+                    "Kicking off a fresh pass now.",
+                    [
+                        f"Attempt: `{attempt_no}`",
+                        f"Branch: `{workspace.branch}`",
+                        f"Test gate mode: `{self.runner.test_gate_mode}`",
+                    ],
+                ),
             )
             targeted_tests = sorted(set(_TARGETED_TEST_RE.findall(issue.body or "")))
             learned_context = self.memory.build_prompt_context(
@@ -357,6 +380,20 @@ class AutonomousHealerLoop:
                     state="pr_pending_approval",
                     clear_lease=True,
                 )
+                self._post_issue_status(
+                    issue_id=issue.issue_id,
+                    body=self._format_flow_status_comment(
+                        "Nice, this one's looking clean ✅",
+                        "Patch is in, checks passed, and I'm ready to keep it moving.",
+                        [
+                            "Status: `pr_pending_approval`",
+                            f"Required label to continue: `{self.settings.healer_pr_required_label}`",
+                            f"Test summary: `{run_result.test_summary}`",
+                            f"Verifier: {verification.summary}",
+                        ],
+                        outro="Drop that approval label on here and I'll take it the rest of the way.",
+                    ),
+                )
                 final_state = "pr_pending_approval"
                 return
 
@@ -403,6 +440,18 @@ class AutonomousHealerLoop:
                 pr_state=pr.state,
                 clear_lease=True,
             )
+            self._post_issue_status(
+                issue_id=issue.issue_id,
+                body=self._format_flow_status_comment(
+                    "PR is up and cruising 🚀",
+                    "I opened or updated the PR for this issue.",
+                    [
+                        f"PR: #{pr.number}",
+                        f"URL: {pr.html_url}",
+                        f"Test summary: `{run_result.test_summary}`",
+                    ],
+                ),
+            )
             final_state = "pr_open"
             if self.settings.healer_enable_review:
                 try:
@@ -441,6 +490,20 @@ class AutonomousHealerLoop:
                 failure_reason=failure_reason,
             )
             self.store.release_healer_locks(issue_id=issue.issue_id)
+            if final_state == "failed" and failure_class:
+                self._post_issue_status(
+                    issue_id=issue.issue_id,
+                    body=self._format_flow_status_comment(
+                        "Quick heads-up: this pass hit a snag ⚠️",
+                        None,
+                        [
+                            f"Attempt state: `{final_state}`",
+                            f"Failure class: `{failure_class}`",
+                            f"Reason: {failure_reason}",
+                        ],
+                        outro="I saved the failure details so the next pass has better context.",
+                    ),
+                )
 
     def _backoff_or_fail(
         self,
@@ -486,6 +549,29 @@ class AutonomousHealerLoop:
                 failures += 1
         failure_rate = failures / float(max(1, len(attempts)))
         return failure_rate >= self.settings.healer_circuit_breaker_failure_rate
+
+    def _post_issue_status(self, *, issue_id: str, body: str) -> None:
+        try:
+            self.tracker.add_issue_comment(issue_id=issue_id, body=body)
+        except Exception as exc:
+            logger.warning("Failed to post issue comment for issue #%s: %s", issue_id, exc)
+
+    @staticmethod
+    def _format_flow_status_comment(
+        title: str,
+        intro: str | None,
+        bullets: list[str],
+        *,
+        outro: str | None = None,
+    ) -> str:
+        lines = [title.strip(), ""]
+        if intro:
+            lines.extend([intro.strip(), ""])
+        lines.extend(f"- {item}" for item in bullets if item.strip())
+        if outro:
+            lines.extend(["", outro.strip()])
+        lines.extend(["", "-- Flow 🌊"])
+        return "\n".join(lines)
 
     @staticmethod
     def _commit_and_push(workspace: Path, *, issue_id: str, branch: str) -> tuple[bool, str]:

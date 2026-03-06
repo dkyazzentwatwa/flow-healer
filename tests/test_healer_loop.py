@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from flow_healer.healer_loop import AutonomousHealerLoop
+from flow_healer.healer_tracker import HealerIssue
 from flow_healer.store import SQLiteStore
 
 
@@ -100,6 +101,63 @@ def test_ingest_pr_feedback_ignores_healer_comments(tmp_path):
     assert issue["state"] == "pr_open"
     assert issue["feedback_context"] == ""
     assert issue["last_issue_comment_id"] == 2001
+
+
+def test_ingest_ready_issues_adds_eyes_reaction_for_new_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="501",
+            repo="owner/repo",
+            title="Issue 501",
+            body="",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/501",
+        )
+    ]
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("501")
+    assert issue is not None
+    loop.tracker.add_issue_reaction.assert_called_once_with(issue_id="501", reaction="eyes")
+
+
+def test_ingest_ready_issues_skips_duplicate_eyes_reaction(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="502",
+        repo="owner/repo",
+        title="Issue 502",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="502",
+            repo="owner/repo",
+            title="Issue 502 updated",
+            body="new body",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/502",
+        )
+    ]
+
+    loop._ingest_ready_issues()
+
+    loop.tracker.add_issue_reaction.assert_not_called()
 
 
 def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):

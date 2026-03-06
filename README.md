@@ -102,6 +102,7 @@ repos:
     issue_required_labels:
       - healer:ready
     pr_required_label: healer:pr-approved
+    test_gate_mode: local_then_docker
 ```
 
 Export your GitHub token before running:

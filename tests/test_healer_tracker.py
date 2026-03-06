@@ -64,6 +64,36 @@ def test_add_pr_comment(monkeypatch):
     assert ok is True
 
 
+def test_add_issue_reaction(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123/reactions"
+        assert method == "POST"
+        assert body == {"content": "eyes"}
+        return {"id": 555}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.add_issue_reaction(issue_id="123")
+    assert ok is True
+
+
+def test_add_issue_comment(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123/comments"
+        assert method == "POST"
+        assert body == {"body": "ready for approval"}
+        return {"id": 556}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.add_issue_comment(issue_id="123", body="ready for approval")
+    assert ok is True
+
+
 def test_list_pr_comments(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

@@ -159,6 +159,26 @@ class GitHubHealerTracker:
             "state": str(payload.get("state") or "open"),
         }
 
+    def add_issue_reaction(self, *, issue_id: str, reaction: str = "eyes") -> bool:
+        if not self.enabled or not issue_id.strip() or not reaction.strip():
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/issues/{quote(issue_id.strip())}/reactions",
+            method="POST",
+            body={"content": reaction.strip()},
+        )
+        return isinstance(payload, dict) and "id" in payload
+
+    def add_issue_comment(self, *, issue_id: str, body: str) -> bool:
+        if not self.enabled or not issue_id.strip() or not body.strip():
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/issues/{quote(issue_id.strip())}/comments",
+            method="POST",
+            body={"body": body},
+        )
+        return isinstance(payload, dict) and "id" in payload
+
     def open_or_update_pr(
         self,
         *,

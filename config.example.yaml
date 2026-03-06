@@ -28,6 +28,7 @@ repos:
     circuit_breaker_failure_rate: 0.5
     learning_enabled: true
     enable_review: true
+    test_gate_mode: local_then_docker
     max_diff_files: 8
     max_diff_lines: 400
     max_failed_tests_allowed: 0

@@ -271,6 +271,9 @@ class FakeGitHubAPI:
                 )
                 return {"id": comment_id}
 
+            if parts[3] == "issues" and len(parts) == 6 and parts[5] == "reactions":
+                return {"id": 9999}
+
             if parts[3] == "pulls" and len(parts) == 4:
                 with self.state._lock:
                     self.state._pr_counter += 1
@@ -379,6 +382,10 @@ def _clear_backoff(db_path: Path, *, issue_id: str) -> None:
 def portable_pytest_gates(monkeypatch):
     monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: None)
     monkeypatch.setattr(
+        "flow_healer.healer_runner._run_pytest_locally",
+        lambda workspace, command, timeout_seconds: _run_pytest_locally(workspace, command, timeout_seconds),
+    )
+    monkeypatch.setattr(
         "flow_healer.healer_runner._run_pytest_in_docker",
         lambda workspace, command, timeout_seconds: _run_pytest_locally(workspace, command, timeout_seconds),
     )
@@ -437,6 +444,8 @@ def test_e2e_issue_ingestion_to_pr_open(tmp_path: Path, monkeypatch, portable_py
     assert len(state.pulls) == 1
     pr_number = next(iter(state.pulls))
     assert state.issue_comments[pr_number][-1]["body"] == "LGTM from reviewer agent."
+    assert any("Flow's on it" in comment["body"] for comment in state.issue_comments[issue_number])
+    assert any("PR is up and cruising" in comment["body"] for comment in state.issue_comments[issue_number])
     assert rows[0]["state_counts"]["pr_open"] == 1
     assert doctor[0]["github_token_present"] is True
 
@@ -567,3 +576,44 @@ def test_e2e_scan_creates_and_dedupes_issue(tmp_path: Path, monkeypatch, fake_gi
     assert len(first[0]["summary"]["created_issues"]) == 1
     assert second[0]["summary"]["deduped_count"] == 1
     assert second[0]["summary"]["created_issues"] == []
+
+
+def test_e2e_pending_approval_posts_issue_comment(tmp_path: Path, monkeypatch, fake_github) -> None:
+    repo_path = _build_demo_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title="Update demo doc note",
+        body="Add a roadmap note to demo.py",
+        labels=["healer:ready"],
+    )
+    connector = ScriptedConnector(
+        proposer_outputs={
+            str(issue_number): [
+                _make_patch(
+                    "demo.py",
+                    "def add(a: int, b: int) -> int:\n    return a - b\n",
+                    "def add(a: int, b: int) -> int:\n    # roadmap note\n    return a - b\n",
+                )
+            ]
+        },
+    )
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    api = fake_github(state)
+    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service.start("demo", once=True)
+
+    comments = state.issue_comments[issue_number]
+    assert any("Flow's on it" in comment["body"] for comment in comments)
+    assert any("Required label to continue: `healer:pr-approved`" in comment["body"] for comment in comments)
