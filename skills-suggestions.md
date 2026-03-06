@@ -1,0 +1,3 @@
+Updated `skills-suggestions.md` into a repo-grounded implementation spec that stays narrow to the five existing skills, names the real script contracts, and turns the upgrade into an actionable `SKILL.md` checklist without inventing fields the scripts do not emit.
+
+Validation: `./.venv/bin/pytest tests/test_skill_assets.py -q` passed. Full `./.venv/bin/pytest -q` hit one pre-existing repo-wide failure in [src/flow_healer/healer_scan.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_scan.py) because it shells out to bare `pytest`, which is not on PATH in the e2e environment (`tests/e2e/test_flow_healer_e2e.py::test_e2e_scan_creates_and_dedupes_issue`).
