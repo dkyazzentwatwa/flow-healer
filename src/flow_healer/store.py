@@ -21,6 +21,10 @@ class SQLiteStore:
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(self.db_path, check_same_thread=False)
                 conn.row_factory = sqlite3.Row
+                # Enable WAL mode for better concurrency and write performance.
+                # synchronous=NORMAL is safe when using WAL and significantly faster.
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
                 self._conn = conn
             return self._conn
 
