@@ -104,8 +104,9 @@ class AutonomousHealerLoop:
             return
         self.reconciler.reconcile()
         self._ingest_ready_issues()
+        resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
-        if self._circuit_breaker_open():
+        if self._circuit_breaker_open() and resumed_approved == 0:
             logger.warning("Healer circuit breaker open; skipping this cycle.")
             return
         processed = 0
@@ -230,6 +231,37 @@ class AutonomousHealerLoop:
                     self.tracker.add_issue_reaction(issue_id=issue.issue_id, reaction="eyes")
                 except Exception as exc:
                     logger.warning("Failed to add reaction for issue #%s: %s", issue.issue_id, exc)
+
+    def _resume_approved_pending_prs(self) -> int:
+        pending = self.store.list_healer_issues(states=["pr_pending_approval"], limit=100)
+        resumed = 0
+        for row in pending:
+            issue_id = str(row.get("issue_id") or "")
+            if not issue_id:
+                continue
+            if not self.tracker.issue_has_label(
+                issue_id=issue_id,
+                label=self.settings.healer_pr_required_label,
+            ):
+                continue
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="queued",
+                clear_lease=True,
+            )
+            self._post_issue_status(
+                issue_id=issue_id,
+                body=self._format_flow_status_comment(
+                    "Approval's in, we're back on the move 🌊",
+                    "Picking this up again now that the PR label is on the issue.",
+                    [
+                        f"Status: `queued`",
+                        f"Approval label found: `{self.settings.healer_pr_required_label}`",
+                    ],
+                ),
+            )
+            resumed += 1
+        return resumed
 
     def _process_claimed_issue(self, row: dict[str, object]) -> None:
         issue = HealerIssue(

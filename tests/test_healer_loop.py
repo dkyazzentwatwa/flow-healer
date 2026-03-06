@@ -17,6 +17,7 @@ def _make_loop(store, **overrides):
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
         healer_issue_required_labels=["healer:ready"],
+        healer_pr_required_label=overrides.get("healer_pr_required_label", "healer:pr-approved"),
         healer_trusted_actors=[],
         healer_retry_budget=overrides.get("healer_retry_budget", 2),
         healer_backoff_initial_seconds=overrides.get("healer_backoff_initial_seconds", 60),
@@ -158,6 +159,32 @@ def test_ingest_ready_issues_skips_duplicate_eyes_reaction(tmp_path):
     loop._ingest_ready_issues()
 
     loop.tracker.add_issue_reaction.assert_not_called()
+
+
+def test_resume_approved_pending_pr_requeues_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="601",
+        repo="owner/repo",
+        title="Issue 601",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="601", state="pr_pending_approval")
+
+    loop = _make_loop(store)
+    loop.tracker.issue_has_label.return_value = True
+
+    resumed = loop._resume_approved_pending_prs()
+
+    issue = store.get_healer_issue("601")
+    assert resumed == 1
+    assert issue is not None
+    assert issue["state"] == "queued"
+    loop.tracker.add_issue_comment.assert_called_once()
 
 
 def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):
