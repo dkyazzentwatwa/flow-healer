@@ -13,7 +13,7 @@ class SQLiteStore:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
         with self._lock:
@@ -63,6 +63,8 @@ class SQLiteStore:
                     pr_state TEXT NOT NULL DEFAULT '',
                     last_failure_class TEXT NOT NULL DEFAULT '',
                     last_failure_reason TEXT NOT NULL DEFAULT '',
+                    last_comment_id TEXT DEFAULT NULL,
+                    feedback_context TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -137,6 +139,18 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
                 """
             )
+            conn.commit()
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        with self._lock:
+            existing_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(healer_issues)").fetchall()
+            }
+            if "last_comment_id" not in existing_cols:
+                conn.execute("ALTER TABLE healer_issues ADD COLUMN last_comment_id TEXT DEFAULT NULL")
+            if "feedback_context" not in existing_cols:
+                conn.execute("ALTER TABLE healer_issues ADD COLUMN feedback_context TEXT NOT NULL DEFAULT ''")
             conn.commit()
 
     @staticmethod
@@ -292,6 +306,8 @@ class SQLiteStore:
         pr_state: str | None = None,
         last_failure_class: str | None = None,
         last_failure_reason: str | None = None,
+        last_comment_id: str | None = None,
+        feedback_context: str | None = None,
         clear_lease: bool = False,
     ) -> bool:
         conn = self._connect()
@@ -319,6 +335,12 @@ class SQLiteStore:
             if last_failure_reason is not None:
                 updates.append("last_failure_reason = ?")
                 params.append(last_failure_reason)
+            if last_comment_id is not None:
+                updates.append("last_comment_id = ?")
+                params.append(last_comment_id)
+            if feedback_context is not None:
+                updates.append("feedback_context = ?")
+                params.append(feedback_context)
             if clear_lease:
                 updates.append("lease_owner = NULL")
                 updates.append("lease_expires_at = NULL")

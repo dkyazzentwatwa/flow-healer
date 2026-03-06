@@ -205,6 +205,33 @@ class GitHubHealerTracker:
             return "conflict"
         return str(payload.get("state") or "")
 
+    def add_pr_comment(self, *, pr_number: int, body: str) -> bool:
+        if not self.enabled or pr_number <= 0 or not body.strip():
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/issues/{int(pr_number)}/comments",
+            method="POST",
+            body={"body": body},
+        )
+        return isinstance(payload, dict) and "id" in payload
+
+    def list_pr_comments(self, *, pr_number: int) -> list[dict[str, Any]]:
+        if not self.enabled or pr_number <= 0:
+            return []
+        payload = self._request_json(f"/repos/{self.repo_slug}/issues/{int(pr_number)}/comments")
+        if not isinstance(payload, list):
+            return []
+        return [
+            {
+                "id": str(item.get("id")),
+                "body": str(item.get("body") or ""),
+                "author": str((item.get("user") or {}).get("login") or "").strip(),
+                "created_at": str(item.get("created_at") or ""),
+            }
+            for item in payload
+            if isinstance(item, dict)
+        ]
+
     def _request_json(self, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
         url = f"https://api.github.com{path}"
         data: bytes | None = None

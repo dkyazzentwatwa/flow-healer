@@ -37,6 +37,7 @@ class HealerRunner:
         issue_title: str,
         issue_body: str,
         learned_context: str = "",
+        feedback_context: str = "",
         workspace: Path,
         max_diff_files: int,
         max_diff_lines: int,
@@ -50,6 +51,7 @@ class HealerRunner:
             + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
             + f"Issue #{issue_id}: {issue_title}\n\n"
             + f"{issue_body}\n\n"
+            + (f"### User Feedback for PR:\n{feedback_context}\n\n" if feedback_context.strip() else "")
             + "Return ONLY a unified git diff inside a ```diff fenced block.\n"
             + "Do not include prose outside the diff block."
         )

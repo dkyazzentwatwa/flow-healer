@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from flow_healer.healer_loop import AutonomousHealerLoop
 from flow_healer.store import SQLiteStore
@@ -6,6 +7,15 @@ from flow_healer.store import SQLiteStore
 
 def _make_loop(store, **overrides):
     settings = SimpleNamespace(
+        healer_repo_path="/tmp",
+        enable_autonomous_healer=True,
+        healer_poll_interval_seconds=60,
+        healer_mode="guarded_pr",
+        healer_max_concurrent_issues=1,
+        healer_max_wall_clock_seconds_per_issue=300,
+        healer_learning_enabled=True,
+        healer_issue_required_labels=["healer:ready"],
+        healer_trusted_actors=[],
         healer_retry_budget=overrides.get("healer_retry_budget", 2),
         healer_backoff_initial_seconds=overrides.get("healer_backoff_initial_seconds", 60),
         healer_backoff_max_seconds=overrides.get("healer_backoff_max_seconds", 3600),
@@ -15,7 +25,46 @@ def _make_loop(store, **overrides):
     loop = AutonomousHealerLoop.__new__(AutonomousHealerLoop)
     loop.settings = settings
     loop.store = store
+    loop.tracker = MagicMock()
+    loop.tracker.repo_slug = "owner/repo"
     return loop
+
+
+def test_ingest_pr_feedback_requeues_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="401",
+        repo="owner/repo",
+        title="Issue 401",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="401",
+        state="pr_open",
+        pr_number=123,
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_pr_comments.return_value = [
+        {
+            "id": "1001",
+            "body": "Please fix this other thing too.",
+            "author": "bob",
+            "created_at": "2023-01-01T00:00:00Z"
+        }
+    ]
+
+    loop._ingest_pr_feedback()
+
+    issue = store.get_healer_issue("401")
+    assert issue["state"] == "queued"
+    assert "bob" in issue["feedback_context"]
+    assert "fix this other thing" in issue["feedback_context"]
+    assert issue["last_comment_id"] == "1001"
 
 
 def test_backoff_or_fail_requeues_before_retry_budget(tmp_path):
