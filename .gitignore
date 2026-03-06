@@ -1,7 +1,43 @@
 .DS_Store
+
+# Virtual environments
 .venv/
+venv/
+.python-version
+
+# Python caches
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.py,cover
+
+# Test and coverage output
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+
+# Build and packaging artifacts
 dist/
 build/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.yaml
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
