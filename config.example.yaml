@@ -33,6 +33,7 @@ repos:
     max_diff_lines: 400
     max_failed_tests_allowed: 0
     scan_enable_issue_creation: false
+    scan_poll_interval_seconds: 600
     scan_severity_threshold: medium
     scan_max_issues_per_run: 5
     scan_default_labels:

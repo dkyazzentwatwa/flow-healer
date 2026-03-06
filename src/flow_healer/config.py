@@ -47,6 +47,7 @@ class RelaySettings:
     healer_max_diff_lines: int = 400
     healer_max_failed_tests_allowed: int = 0
     healer_scan_enable_issue_creation: bool = False
+    healer_scan_poll_interval_seconds: float = 600.0
     healer_scan_severity_threshold: str = "medium"
     healer_scan_max_issues_per_run: int = 5
     healer_scan_default_labels: list[str] = field(default_factory=lambda: ["kind:scan"])
@@ -116,6 +117,9 @@ class AppConfig:
                     healer_max_diff_lines=int(item.get("max_diff_lines") or 400),
                     healer_max_failed_tests_allowed=int(item.get("max_failed_tests_allowed") or 0),
                     healer_scan_enable_issue_creation=bool(item.get("scan_enable_issue_creation", False)),
+                    healer_scan_poll_interval_seconds=float(
+                        item.get("scan_poll_interval_seconds") or 600.0
+                    ),
                     healer_scan_severity_threshold=str(item.get("scan_severity_threshold") or "medium"),
                     healer_scan_max_issues_per_run=int(item.get("scan_max_issues_per_run") or 5),
                     healer_scan_default_labels=_list_of_str(item.get("scan_default_labels"), ["kind:scan"]),

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -16,6 +17,7 @@ from .healer_memory import HealerMemoryService
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
 from .healer_runner import HealerRunner
+from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue
 from .healer_verifier import HealerVerifier
 from .protocols import ConnectorProtocol
@@ -61,6 +63,16 @@ class AutonomousHealerLoop:
         )
         self.verifier = HealerVerifier(connector=connector)
         self.reviewer = HealerReviewer(connector=connector)
+        self.scanner = FlowHealerScanner(
+            repo_path=self.repo_path,
+            store=store,
+            tracker=self.tracker,
+            severity_threshold=settings.healer_scan_severity_threshold,
+            max_issues_per_run=settings.healer_scan_max_issues_per_run,
+            default_labels=settings.healer_scan_default_labels,
+            enable_issue_creation=settings.healer_scan_enable_issue_creation,
+        )
+        self._last_scan_started_at = 0.0
         self.reconciler = HealerReconciler(
             store=store,
             workspace_manager=self.workspace_manager,
@@ -103,6 +115,7 @@ class AutonomousHealerLoop:
             logger.info("Autonomous healer paused via system command; skipping cycle.")
             return
         self.reconciler.reconcile()
+        self._maybe_run_scan()
         self._ingest_ready_issues()
         self._reconcile_pr_outcomes()
         resumed_approved = self._resume_approved_pending_prs()
@@ -209,6 +222,27 @@ class AutonomousHealerLoop:
                     last_review_id=max_review_id,
                     last_review_comment_id=max_review_comment_id,
                 )
+
+    def _maybe_run_scan(self) -> dict[str, object] | None:
+        if not self.settings.healer_scan_enable_issue_creation:
+            return None
+        interval = max(5.0, float(self.settings.healer_scan_poll_interval_seconds))
+        now = time.monotonic()
+        if self._last_scan_started_at and (now - self._last_scan_started_at) < interval:
+            return None
+        self._last_scan_started_at = now
+        try:
+            summary = self.scanner.run_scan(dry_run=False)
+            logger.info(
+                "Healer scan finished (repo=%s findings=%s created=%s)",
+                self.settings.repo_name,
+                summary.get("findings_over_threshold"),
+                len(summary.get("created_issues") or []),
+            )
+            return summary
+        except Exception as exc:
+            logger.warning("Healer scan failed for repo %s: %s", self.settings.repo_name, exc)
+            return None
 
     def _reconcile_pr_outcomes(self) -> int:
         active_prs = self.store.list_healer_issues(states=["pr_open"], limit=100)

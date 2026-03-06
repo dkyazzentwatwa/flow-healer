@@ -19,6 +19,9 @@ def _make_loop(store, **overrides):
         healer_issue_required_labels=["healer:ready"],
         healer_pr_required_label=overrides.get("healer_pr_required_label", "healer:pr-approved"),
         healer_trusted_actors=[],
+        healer_scan_enable_issue_creation=overrides.get("healer_scan_enable_issue_creation", False),
+        healer_scan_poll_interval_seconds=overrides.get("healer_scan_poll_interval_seconds", 600.0),
+        repo_name=overrides.get("repo_name", "demo"),
         healer_retry_budget=overrides.get("healer_retry_budget", 2),
         healer_backoff_initial_seconds=overrides.get("healer_backoff_initial_seconds", 60),
         healer_backoff_max_seconds=overrides.get("healer_backoff_max_seconds", 3600),
@@ -31,6 +34,8 @@ def _make_loop(store, **overrides):
     loop.tracker = MagicMock()
     loop.tracker.viewer_login.return_value = "healer-service"
     loop.tracker.repo_slug = "owner/repo"
+    loop.scanner = MagicMock()
+    loop._last_scan_started_at = overrides.get("_last_scan_started_at", 0.0)
     return loop
 
 
@@ -214,6 +219,25 @@ def test_reconcile_pr_outcomes_closes_merged_issue(tmp_path):
     assert issue["pr_state"] == "merged"
     loop.tracker.close_issue.assert_called_once_with(issue_id="602")
     loop.tracker.add_issue_comment.assert_called_once()
+
+
+def test_maybe_run_scan_respects_interval(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    loop = _make_loop(
+        store,
+        healer_scan_enable_issue_creation=True,
+        healer_scan_poll_interval_seconds=600.0,
+    )
+    loop.scanner.run_scan.return_value = {"created_issues": [], "findings_over_threshold": 0}
+
+    first = loop._maybe_run_scan()
+    second = loop._maybe_run_scan()
+
+    assert first == {"created_issues": [], "findings_over_threshold": 0}
+    assert second is None
+    loop.scanner.run_scan.assert_called_once_with(dry_run=False)
 
 
 def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):
