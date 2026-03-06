@@ -8,47 +8,118 @@ Requires-Dist: PyYAML>=6.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 
+<div align="center">
+
 # Flow Healer
 
-Flow Healer is a standalone autonomous healing service for GitHub repos. It watches labeled issues, creates isolated worktrees, proposes fixes with an AI connector, runs Docker test gates, verifies the result, and opens a PR when the change is safe enough to review.
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![CLI](https://img.shields.io/badge/interface-CLI-111111?style=for-the-badge&logo=gnubash&logoColor=white)
+![SQLite](https://img.shields.io/badge/state-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
+![Pytest](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)
+![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)
 
-## What ships in v0
+**An autonomous GitHub repo healer that scans for breakage, picks safe work in isolated worktrees, runs guarded fixes through Codex, and only opens a PR when the result survives verification.**
 
-- Standalone CLI: `flow-healer`
-- Multi-repo config in `~/.flow-healer/config.yaml`
-- One SQLite state database per managed repo
-- Per-issue git worktrees
-- Docker-based pytest gates
-- GitHub issue + PR loop
-- Scan pipeline with dry-run support
+</div>
+
+## Why Flow Healer
+
+Most automation stops at issue detection. Flow Healer keeps going.
+
+It watches labeled GitHub issues, creates per-issue workspaces, feeds the task to an AI connector, runs Docker-backed test gates, learns from past attempts, and keeps enough local state to recover cleanly across retries. The result is a practical control loop for repository maintenance, not just a bot that files tickets.
+
+## What It Does
+
+- Monitors one or many repositories from a single config file.
+- Stores durable per-repo state in SQLite under `~/.flow-healer/`.
+- Creates isolated git worktrees so each fix attempt stays contained.
+- Claims and locks work to reduce conflicting edits across issues.
+- Applies retry budgets, backoff, and circuit-breaker logic before reattempting work.
+- Runs deterministic scan passes with optional GitHub issue creation.
+- Verifies candidate changes before opening a pull request.
+- Captures lessons from previous attempts to improve future prompts.
+
+## Architecture
+
+```text
+GitHub Issues / Repo Signals
+            |
+            v
+   Flow Healer CLI + Service
+            |
+   +--------+--------+------------------+
+   |        |        |                  |
+   v        v        v                  v
+ Scanner  Tracker  Workspace Mgr   SQLite Store
+   |        |        |                  |
+   +--------+--------+------------------+
+            |
+            v
+      Autonomous Loop
+            |
+   Codex Connector -> Docker Test Gate -> Verifier -> PR
+```
+
+## Core Modules
+
+```text
+src/flow_healer/
+├── cli.py                # command entrypoint
+├── service.py            # multi-repo orchestration
+├── healer_loop.py        # issue processing control loop
+├── healer_scan.py        # deterministic repo scanning
+├── healer_tracker.py     # GitHub issue + PR adapter
+├── healer_workspace.py   # isolated git worktrees
+├── healer_memory.py      # lessons from prior attempts
+├── healer_dispatcher.py  # claims and lock acquisition
+├── healer_verifier.py    # post-fix verification
+└── store.py              # SQLite persistence
+```
 
 ## Quickstart
 
+### 1. Install
+
 ```bash
-cd /Users/cypher-server/Documents/code/flow-healer
+git clone <your-repo-url>
+cd flow-healer
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 ```
 
-Create `~/.flow-healer/config.yaml`:
+### 2. Create config
+
+Copy `config.example.yaml` into `~/.flow-healer/config.yaml` and adjust repo details:
 
 ```yaml
 service:
   github_token_env: GITHUB_TOKEN
   poll_interval_seconds: 60
   state_root: ~/.flow-healer
+  connector_command: codex
+  connector_model: ""
+  connector_timeout_seconds: 300
+
 repos:
   - name: demo
-    path: /absolute/path/to/repo
+    path: /absolute/path/to/target-repo
     repo_slug: owner/repo
     default_branch: main
-    issue_required_labels: [healer:ready]
-    pr_required_label: healer:pr-approved
+    enable_autonomous_healer: true
     healer_mode: guarded_pr
+    issue_required_labels:
+      - healer:ready
+    pr_required_label: healer:pr-approved
 ```
 
-Then run:
+Export your GitHub token before running:
+
+```bash
+export GITHUB_TOKEN=your_token_here
+```
+
+### 3. Run health checks and a single pass
 
 ```bash
 flow-healer doctor
@@ -56,17 +127,38 @@ flow-healer status
 flow-healer start --once
 ```
 
-## Commands
+## Command Reference
 
-- `flow-healer start [--repo NAME] [--once]`
-- `flow-healer status [--repo NAME]`
-- `flow-healer pause [--repo NAME]`
-- `flow-healer resume [--repo NAME]`
-- `flow-healer scan [--repo NAME] [--dry-run]`
-- `flow-healer doctor [--repo NAME]`
+| Command | Purpose |
+| --- | --- |
+| `flow-healer doctor [--repo NAME]` | Validate repo path, git, Docker, Codex, and token setup |
+| `flow-healer status [--repo NAME]` | Show current issue counts, pause state, and recent attempts |
+| `flow-healer start [--repo NAME] [--once]` | Start the healing loop or run a single iteration |
+| `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo |
+| `flow-healer resume [--repo NAME]` | Resume autonomous processing |
+| `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic scan checks with optional no-write mode |
 
-## Notes
+## Development
 
-- The default connector is `codex exec`.
-- Docker is used for the test gate, not for git push or PR creation.
-- Each managed repo stores state under `~/.flow-healer/repos/<repo-name>/state.db`.
+Run the test suite:
+
+```bash
+pytest
+```
+
+Run a focused test while iterating:
+
+```bash
+pytest tests/test_healer_scan.py -v
+```
+
+## Operational Notes
+
+- The default AI connector command is `codex`.
+- Docker is used for test-gate execution, not for git push or PR creation.
+- State is stored per managed repo at `~/.flow-healer/repos/<repo-name>/state.db`.
+- Scans can be dry-run only, or configured to create deduplicated GitHub issues above a severity threshold.
+
+## Why This System Matters
+
+Flow Healer is built for teams that want autonomous maintenance without surrendering control. It combines AI-assisted remediation with worktree isolation, explicit approval points, deterministic scan inputs, and durable local state, so the system can move fast without behaving like a black box.

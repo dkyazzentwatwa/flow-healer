@@ -39,6 +39,7 @@ class RelaySettings:
     healer_circuit_breaker_window: int = 5
     healer_circuit_breaker_failure_rate: float = 0.5
     healer_learning_enabled: bool = True
+    healer_enable_review: bool = True
     healer_max_diff_files: int = 8
     healer_max_diff_lines: int = 400
     healer_max_failed_tests_allowed: int = 0
@@ -102,6 +103,7 @@ class AppConfig:
                     healer_circuit_breaker_window=int(item.get("circuit_breaker_window") or 5),
                     healer_circuit_breaker_failure_rate=float(item.get("circuit_breaker_failure_rate") or 0.5),
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
+                    healer_enable_review=bool(item.get("enable_review", True)),
                     healer_max_diff_files=int(item.get("max_diff_files") or 8),
                     healer_max_diff_lines=int(item.get("max_diff_lines") or 400),
                     healer_max_failed_tests_allowed=int(item.get("max_failed_tests_allowed") or 0),

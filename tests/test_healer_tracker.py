@@ -47,3 +47,40 @@ def test_create_issue_posts_payload(monkeypatch):
     )
     assert issue is not None
     assert issue["number"] == 77
+
+
+def test_add_pr_comment(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123/comments"
+        assert method == "POST"
+        assert body == {"body": "LGTM!"}
+        return {"id": 999}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.add_pr_comment(pr_number=123, body="LGTM!")
+    assert ok is True
+
+
+def test_list_pr_comments(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123/comments"
+        return [
+            {
+                "id": 1,
+                "body": "Comment 1",
+                "user": {"login": "user1"},
+                "created_at": "2023-01-01T00:00:00Z"
+            }
+        ]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    comments = tracker.list_pr_comments(pr_number=123)
+    assert len(comments) == 1
+    assert comments[0]["author"] == "user1"
+    assert comments[0]["body"] == "Comment 1"
