@@ -75,12 +75,88 @@ def test_list_pr_comments(monkeypatch):
                 "id": 1,
                 "body": "Comment 1",
                 "user": {"login": "user1"},
-                "created_at": "2023-01-01T00:00:00Z"
+                "created_at": "2023-01-01T00:00:00Z",
             }
         ]
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
     comments = tracker.list_pr_comments(pr_number=123)
-    assert len(comments) == 1
-    assert comments[0]["author"] == "user1"
-    assert comments[0]["body"] == "Comment 1"
+    assert comments == [
+        {
+            "id": 1,
+            "body": "Comment 1",
+            "author": "user1",
+            "created_at": "2023-01-01T00:00:00Z",
+        }
+    ]
+
+
+def test_list_pr_reviews(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/pulls/123/reviews"
+        return [
+            {
+                "id": 22,
+                "body": "Please add coverage",
+                "state": "CHANGES_REQUESTED",
+                "user": {"login": "reviewer"},
+                "submitted_at": "2023-01-01T00:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    reviews = tracker.list_pr_reviews(pr_number=123)
+    assert reviews == [
+        {
+            "id": 22,
+            "body": "Please add coverage",
+            "author": "reviewer",
+            "state": "CHANGES_REQUESTED",
+            "created_at": "2023-01-01T00:00:00Z",
+        }
+    ]
+
+
+def test_list_pr_review_comments(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/pulls/123/comments"
+        return [
+            {
+                "id": 33,
+                "body": "Guard this branch",
+                "path": "src/example.py",
+                "user": {"login": "reviewer"},
+                "created_at": "2023-01-01T00:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    comments = tracker.list_pr_review_comments(pr_number=123)
+    assert comments == [
+        {
+            "id": 33,
+            "body": "Guard this branch",
+            "author": "reviewer",
+            "path": "src/example.py",
+            "created_at": "2023-01-01T00:00:00Z",
+        }
+    ]
+
+
+def test_viewer_login_uses_authenticated_user(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/user"
+        return {"login": "healer-service"}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    assert tracker.viewer_login() == "healer-service"
+    assert tracker.viewer_login() == "healer-service"

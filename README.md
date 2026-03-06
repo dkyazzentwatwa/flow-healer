@@ -85,6 +85,7 @@ Copy `config.example.yaml` into `~/.flow-healer/config.yaml` and adjust repo det
 ```yaml
 service:
   github_token_env: GITHUB_TOKEN
+  env_file: ""
   poll_interval_seconds: 60
   state_root: ~/.flow-healer
   connector_command: codex
@@ -107,6 +108,14 @@ Export your GitHub token before running:
 
 ```bash
 export GITHUB_TOKEN=your_token_here
+```
+
+Or point Flow Healer at an existing env file:
+
+```yaml
+service:
+  github_token_env: GITHUB_TOKEN
+  env_file: /absolute/path/to/.env
 ```
 
 ### 3. Run health checks and a single pass

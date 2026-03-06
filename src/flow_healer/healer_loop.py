@@ -33,6 +33,7 @@ class AutonomousHealerLoop:
         settings: RelaySettings,
         store: SQLiteStore,
         connector: ConnectorProtocol,
+        tracker: GitHubHealerTracker | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -43,7 +44,7 @@ class AutonomousHealerLoop:
         from .healer_workspace import HealerWorkspaceManager
 
         self.workspace_manager = HealerWorkspaceManager(repo_path=self.repo_path)
-        self.tracker = GitHubHealerTracker(repo_path=self.repo_path)
+        self.tracker = tracker or GitHubHealerTracker(repo_path=self.repo_path)
         self.dispatcher = HealerDispatcher(
             store=store,
             worker_id=self.worker_id,
@@ -112,61 +113,94 @@ class AutonomousHealerLoop:
 
     def _ingest_pr_feedback(self) -> None:
         active_prs = self.store.list_healer_issues(states=["pr_open", "pr_pending_approval"], limit=100)
+        self_actor = self.tracker.viewer_login().lower()
         for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
             if pr_number <= 0:
                 continue
-            issue_id = str(row.get("issue_id"))
-            last_comment_id_str = str(row.get("last_comment_id") or "0")
-            last_comment_id = int(last_comment_id_str) if last_comment_id_str.isdigit() else 0
+
+            issue_id = str(row.get("issue_id") or "")
+            last_issue_comment_id = int(row.get("last_issue_comment_id") or 0)
+            last_review_id = int(row.get("last_review_id") or 0)
+            last_review_comment_id = int(row.get("last_review_comment_id") or 0)
 
             try:
-                comments = self.tracker.list_pr_comments(pr_number=pr_number)
+                issue_comments = self.tracker.list_pr_comments(pr_number=pr_number)
+                reviews = self.tracker.list_pr_reviews(pr_number=pr_number)
+                review_comments = self.tracker.list_pr_review_comments(pr_number=pr_number)
             except Exception as exc:
-                logger.warning("Failed to list comments for PR #%d: %s", pr_number, exc)
+                logger.warning("Failed to ingest feedback for PR #%d: %s", pr_number, exc)
                 continue
 
-            new_feedback = []
-            current_max_comment_id = last_comment_id
+            new_feedback: list[tuple[str, int, str]] = []
+            max_issue_comment_id = last_issue_comment_id
+            max_review_id = last_review_id
+            max_review_comment_id = last_review_comment_id
 
-            # Sort by creation date to process in order
-            comments.sort(key=lambda x: x.get("created_at", ""))
-
-            for comment in comments:
-                comment_id_str = str(comment.get("id") or "0")
-                comment_id = int(comment_id_str) if comment_id_str.isdigit() else 0
-                author = str(comment.get("author")).lower()
-                body = str(comment.get("body") or "").strip()
-
-                # Simple heuristic: ignore comments from the healer itself
-                if author == self.tracker.repo_slug.split('/')[0].lower() or "[bot]" in author:
-                    if comment_id > current_max_comment_id:
-                        current_max_comment_id = comment_id
+            for comment in issue_comments:
+                comment_id = int(comment.get("id") or 0)
+                if comment_id <= max_issue_comment_id:
                     continue
+                max_issue_comment_id = max(max_issue_comment_id, comment_id)
+                author = str(comment.get("author") or "").strip().lower()
+                body = str(comment.get("body") or "").strip()
+                if comment_id > last_issue_comment_id and body and author != self_actor:
+                    new_feedback.append(
+                        (str(comment.get("created_at") or ""), comment_id, f"PR comment from @{author}: {body}")
+                    )
 
-                if comment_id > last_comment_id:
-                    if body:
-                        new_feedback.append(f"From @{author}: {body}")
-                    if comment_id > current_max_comment_id:
-                        current_max_comment_id = comment_id
+            for review in reviews:
+                review_id = int(review.get("id") or 0)
+                if review_id <= max_review_id:
+                    continue
+                max_review_id = max(max_review_id, review_id)
+                author = str(review.get("author") or "").strip().lower()
+                body = str(review.get("body") or "").strip()
+                state = str(review.get("state") or "").strip().lower()
+                if review_id > last_review_id and body and author != self_actor:
+                    label = f"PR review ({state or 'commented'}) from @{author}: {body}"
+                    new_feedback.append((str(review.get("created_at") or ""), review_id, label))
+
+            for comment in review_comments:
+                comment_id = int(comment.get("id") or 0)
+                if comment_id <= max_review_comment_id:
+                    continue
+                max_review_comment_id = max(max_review_comment_id, comment_id)
+                author = str(comment.get("author") or "").strip().lower()
+                body = str(comment.get("body") or "").strip()
+                path = str(comment.get("path") or "").strip()
+                if comment_id > last_review_comment_id and body and author != self_actor:
+                    prefix = f"Inline review comment on {path}" if path else "Inline review comment"
+                    new_feedback.append((str(comment.get("created_at") or ""), comment_id, f"{prefix} from @{author}: {body}"))
 
             if new_feedback:
+                new_feedback.sort(key=lambda item: (item[0], item[1]))
                 logger.info("Detected new feedback for PR #%d (Issue #%s)", pr_number, issue_id)
-                existing_feedback = str(row.get("feedback_context") or "")
-                combined_feedback = (existing_feedback + "\n\n" + "\n".join(new_feedback)).strip()
-
-                # Re-queue the issue for a new attempt
+                existing_feedback = str(row.get("feedback_context") or "").strip()
+                rendered_feedback = "\n".join(item[2] for item in new_feedback)
+                combined_feedback = "\n\n".join(part for part in [existing_feedback, rendered_feedback] if part).strip()
                 self.store.set_healer_issue_state(
                     issue_id=issue_id,
                     state="queued",
-                    last_comment_id=str(current_max_comment_id),
+                    last_issue_comment_id=max_issue_comment_id,
+                    last_review_id=max_review_id,
+                    last_review_comment_id=max_review_comment_id,
                     feedback_context=combined_feedback,
-                    clear_lease=True
+                    clear_lease=True,
                 )
-            elif current_max_comment_id > last_comment_id:
+                continue
+
+            if (
+                max_issue_comment_id > last_issue_comment_id
+                or max_review_id > last_review_id
+                or max_review_comment_id > last_review_comment_id
+            ):
                 self.store.set_healer_issue_state(
                     issue_id=issue_id,
-                    last_comment_id=str(current_max_comment_id)
+                    state=str(row.get("state") or "pr_open"),
+                    last_issue_comment_id=max_issue_comment_id,
+                    last_review_id=max_review_id,
+                    last_review_comment_id=max_review_comment_id,
                 )
 
     def _ingest_ready_issues(self) -> None:
@@ -229,6 +263,10 @@ class AutonomousHealerLoop:
             workspace = self.workspace_manager.ensure_workspace(
                 issue_id=issue.issue_id,
                 title=issue.title,
+            )
+            self.workspace_manager.prepare_workspace(
+                workspace_path=workspace.path,
+                branch=workspace.branch,
             )
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -366,7 +404,6 @@ class AutonomousHealerLoop:
                 clear_lease=True,
             )
             final_state = "pr_open"
-
             if self.settings.healer_enable_review:
                 try:
                     review = self.reviewer.review(
@@ -382,7 +419,6 @@ class AutonomousHealerLoop:
                     self.tracker.add_pr_comment(pr_number=pr.number, body=review.review_body)
                 except Exception as exc:
                     logger.warning("Failed to generate or post code review for PR #%d: %s", pr.number, exc)
-
         finally:
             self.store.finish_healer_attempt(
                 attempt_id=attempt_id,
@@ -428,7 +464,7 @@ class AutonomousHealerLoop:
             self.settings.healer_backoff_max_seconds,
             self.settings.healer_backoff_initial_seconds * (2 ** max(0, attempt_no - 1)),
         )
-        backoff_until = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
+        backoff_until = (datetime.now(UTC) + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
         self.store.set_healer_issue_state(
             issue_id=issue_id,
             state="queued",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+
 from flow_healer.healer_reviewer import HealerReviewer
 from flow_healer.protocols import ConnectorProtocol
+
 
 def test_healer_reviewer_generates_review():
     connector = MagicMock(spec=ConnectorProtocol)

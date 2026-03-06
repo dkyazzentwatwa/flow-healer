@@ -1,5 +1,7 @@
 service:
   github_token_env: GITHUB_TOKEN
+  env_file: ""
+  github_api_base_url: https://api.github.com
   poll_interval_seconds: 60
   state_root: ~/.flow-healer
   connector_command: codex
@@ -25,6 +27,7 @@ repos:
     circuit_breaker_window: 5
     circuit_breaker_failure_rate: 0.5
     learning_enabled: true
+    enable_review: true
     max_diff_files: 8
     max_diff_lines: 400
     max_failed_tests_allowed: 0

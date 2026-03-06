@@ -65,6 +65,29 @@ class HealerWorkspaceManager:
                 )
         return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
 
+    def prepare_workspace(self, *, workspace_path: Path, branch: str) -> None:
+        ws = Path(workspace_path).resolve()
+        if not self._is_under_root(ws):
+            raise ValueError(f"Refusing to prepare workspace outside healer root: {ws}")
+        reset = subprocess.run(
+            ["git", "-C", str(ws), "reset", "--hard", branch],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if reset.returncode != 0:
+            raise RuntimeError(f"Failed to reset workspace {ws}: {(reset.stderr or reset.stdout).strip()}")
+        clean = subprocess.run(
+            ["git", "-C", str(ws), "clean", "-fd"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if clean.returncode != 0:
+            raise RuntimeError(f"Failed to clean workspace {ws}: {(clean.stderr or clean.stdout).strip()}")
+
     def remove_workspace(self, *, workspace_path: Path) -> None:
         ws = Path(workspace_path).resolve()
         if not self._is_under_root(ws):

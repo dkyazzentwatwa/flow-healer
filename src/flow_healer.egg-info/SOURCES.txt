@@ -32,3 +32,4 @@ tests/test_healer_reviewer.py
 tests/test_healer_runner.py
 tests/test_healer_scan.py
 tests/test_healer_tracker.py
+tests/test_skill_assets.py

@@ -11,6 +11,8 @@ import yaml
 @dataclass(slots=True)
 class ServiceSettings:
     github_token_env: str = "GITHUB_TOKEN"
+    env_file: str = ""
+    github_api_base_url: str = "https://api.github.com"
     poll_interval_seconds: float = 60.0
     state_root: str = "~/.flow-healer"
     connector_command: str = "codex"
@@ -61,8 +63,12 @@ class AppConfig:
         raw = raw if isinstance(raw, dict) else {}
 
         service_raw = raw.get("service") if isinstance(raw.get("service"), dict) else {}
+        env_file = _resolve_env_file(config_path, service_raw.get("env_file"))
+        _load_env_file(env_file)
         service = ServiceSettings(
             github_token_env=str(service_raw.get("github_token_env") or "GITHUB_TOKEN"),
+            env_file=str(env_file) if env_file else "",
+            github_api_base_url=str(service_raw.get("github_api_base_url") or "https://api.github.com"),
             poll_interval_seconds=float(service_raw.get("poll_interval_seconds") or 60.0),
             state_root=str(service_raw.get("state_root") or "~/.flow-healer"),
             connector_command=str(service_raw.get("connector_command") or "codex"),
@@ -132,3 +138,28 @@ def _list_of_str(value: Any, default: list[str]) -> list[str]:
     if not isinstance(value, list):
         return list(default)
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _resolve_env_file(config_path: Path, value: Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return (config_path.parent / candidate).resolve()
+
+
+def _load_env_file(path: Path | None) -> None:
+    if path is None or not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        name = key.strip()
+        if not name:
+            continue
+        cleaned = value.strip().strip("\"'")
+        os.environ.setdefault(name, cleaned)

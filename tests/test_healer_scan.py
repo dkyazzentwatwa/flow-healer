@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from flow_healer.healer_scan import FlowHealerScanner, ScanFinding
+from flow_healer.store import SQLiteStore
 
 
 class _FakeTracker:
@@ -116,3 +117,44 @@ def test_run_scan_dedupes_existing_open_issue(monkeypatch, fake_store):
     finding = fake_store.get_scan_finding("fp_existing")
     assert finding is not None
     assert finding["issue_number"] == 44
+
+
+def test_run_scan_skips_missing_harness_script(monkeypatch, fake_store, tmp_path):
+    scanner = FlowHealerScanner(
+        repo_path=tmp_path,
+        store=fake_store,
+        tracker=None,
+        severity_threshold="medium",
+        max_issues_per_run=5,
+        default_labels=["kind:scan"],
+        enable_issue_creation=False,
+    )
+
+    monkeypatch.setattr(scanner, "_run_pytest_suite", lambda _check_failures: [])
+    summary = scanner.run_scan(dry_run=True)
+
+    assert summary["findings_total"] == 0
+    assert summary["failed_checks"] == []
+
+
+def test_run_scan_uses_unique_run_ids_for_back_to_back_scans(monkeypatch, tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    scanner = FlowHealerScanner(
+        repo_path=tmp_path,
+        store=store,
+        tracker=None,
+        severity_threshold="medium",
+        max_issues_per_run=5,
+        default_labels=["kind:scan"],
+        enable_issue_creation=False,
+    )
+
+    monkeypatch.setattr(scanner, "_run_harness_eval", lambda _check_failures: [])
+    monkeypatch.setattr(scanner, "_run_pytest_suite", lambda _check_failures: [])
+
+    first = scanner.run_scan(dry_run=True)
+    second = scanner.run_scan(dry_run=True)
+
+    assert first["run_id"] != second["run_id"]
+    store.close()

@@ -21,8 +21,6 @@ class SQLiteStore:
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(self.db_path, check_same_thread=False)
                 conn.row_factory = sqlite3.Row
-                # Enable WAL mode for better concurrency and write performance.
-                # synchronous=NORMAL is safe when using WAL and significantly faster.
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 self._conn = conn
@@ -63,7 +61,9 @@ class SQLiteStore:
                     pr_state TEXT NOT NULL DEFAULT '',
                     last_failure_class TEXT NOT NULL DEFAULT '',
                     last_failure_reason TEXT NOT NULL DEFAULT '',
-                    last_comment_id TEXT DEFAULT NULL,
+                    last_issue_comment_id INTEGER NOT NULL DEFAULT 0,
+                    last_review_id INTEGER NOT NULL DEFAULT 0,
+                    last_review_comment_id INTEGER NOT NULL DEFAULT 0,
                     feedback_context TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -147,10 +147,15 @@ class SQLiteStore:
             existing_cols = {
                 row["name"] for row in conn.execute("PRAGMA table_info(healer_issues)").fetchall()
             }
-            if "last_comment_id" not in existing_cols:
-                conn.execute("ALTER TABLE healer_issues ADD COLUMN last_comment_id TEXT DEFAULT NULL")
-            if "feedback_context" not in existing_cols:
-                conn.execute("ALTER TABLE healer_issues ADD COLUMN feedback_context TEXT NOT NULL DEFAULT ''")
+            migrations = [
+                ("last_issue_comment_id", "ALTER TABLE healer_issues ADD COLUMN last_issue_comment_id INTEGER NOT NULL DEFAULT 0"),
+                ("last_review_id", "ALTER TABLE healer_issues ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0"),
+                ("last_review_comment_id", "ALTER TABLE healer_issues ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0"),
+                ("feedback_context", "ALTER TABLE healer_issues ADD COLUMN feedback_context TEXT NOT NULL DEFAULT ''"),
+            ]
+            for column, statement in migrations:
+                if column not in existing_cols:
+                    conn.execute(statement)
             conn.commit()
 
     @staticmethod
@@ -306,7 +311,9 @@ class SQLiteStore:
         pr_state: str | None = None,
         last_failure_class: str | None = None,
         last_failure_reason: str | None = None,
-        last_comment_id: str | None = None,
+        last_issue_comment_id: int | None = None,
+        last_review_id: int | None = None,
+        last_review_comment_id: int | None = None,
         feedback_context: str | None = None,
         clear_lease: bool = False,
     ) -> bool:
@@ -335,9 +342,15 @@ class SQLiteStore:
             if last_failure_reason is not None:
                 updates.append("last_failure_reason = ?")
                 params.append(last_failure_reason)
-            if last_comment_id is not None:
-                updates.append("last_comment_id = ?")
-                params.append(last_comment_id)
+            if last_issue_comment_id is not None:
+                updates.append("last_issue_comment_id = ?")
+                params.append(int(last_issue_comment_id))
+            if last_review_id is not None:
+                updates.append("last_review_id = ?")
+                params.append(int(last_review_id))
+            if last_review_comment_id is not None:
+                updates.append("last_review_comment_id = ?")
+                params.append(int(last_review_comment_id))
             if feedback_context is not None:
                 updates.append("feedback_context = ?")
                 params.append(feedback_context)

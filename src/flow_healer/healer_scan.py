@@ -55,7 +55,7 @@ class FlowHealerScanner:
         self.enable_issue_creation = bool(enable_issue_creation)
 
     def run_scan(self, *, dry_run: bool) -> dict[str, Any]:
-        run_id = f"scan_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        run_id = f"scan_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
         if hasattr(self.store, "create_scan_run"):
             self.store.create_scan_run(run_id=run_id, dry_run=dry_run)
 
@@ -165,10 +165,14 @@ class FlowHealerScanner:
         return summary
 
     def _run_harness_eval(self, check_failures: list[str]) -> list[ScanFinding]:
+        script_path = self.repo_path / "scripts" / "harness_eval_pack.py"
+        if not script_path.exists():
+            logger.info("Skipping harness eval pack; script not present at %s", script_path)
+            return []
         with NamedTemporaryFile(prefix="flow-healer-harness-", suffix=".json", delete=False) as tmp:
             json_path = Path(tmp.name)
 
-        cmd = ["python3", "scripts/harness_eval_pack.py", "--json-out", str(json_path)]
+        cmd = ["python3", str(script_path), "--json-out", str(json_path)]
         proc = subprocess.run(
             cmd,
             cwd=str(self.repo_path),

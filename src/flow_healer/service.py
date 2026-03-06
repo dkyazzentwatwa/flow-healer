@@ -30,13 +30,18 @@ class FlowHealerService:
     def build_runtime(self, repo: RelaySettings) -> RepoRuntime:
         store = SQLiteStore(self.config.repo_db_path(repo.repo_name))
         store.bootstrap()
+        tracker = GitHubHealerTracker(
+            repo_path=Path(repo.healer_repo_path),
+            token=os.getenv(self.config.service.github_token_env, "").strip(),
+            api_base_url=self.config.service.github_api_base_url,
+        )
         connector = CodexCliConnector(
             workspace=repo.healer_repo_path,
             codex_command=self.config.service.connector_command,
             timeout=self.config.service.connector_timeout_seconds,
             model=self.config.service.connector_model,
         )
-        loop = AutonomousHealerLoop(settings=repo, store=store, connector=connector)
+        loop = AutonomousHealerLoop(settings=repo, store=store, connector=connector, tracker=tracker)
         if repo.healer_repo_slug and not loop.tracker.repo_slug:
             loop.tracker.repo_slug = repo.healer_repo_slug
         return RepoRuntime(settings=repo, store=store, loop=loop, tracker=loop.tracker)

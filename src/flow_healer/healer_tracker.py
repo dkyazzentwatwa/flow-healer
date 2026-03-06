@@ -37,10 +37,18 @@ class PullRequestResult:
 class GitHubHealerTracker:
     """Minimal GitHub issue + PR adapter for autonomous healer flows."""
 
-    def __init__(self, *, repo_path: Path, token: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        repo_path: Path,
+        token: str | None = None,
+        api_base_url: str = "https://api.github.com",
+    ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.token = (token or os.getenv("GITHUB_TOKEN", "")).strip()
+        self.api_base_url = api_base_url.rstrip("/")
         self.repo_slug = self._infer_repo_slug(self.repo_path)
+        self._viewer_login: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -223,7 +231,7 @@ class GitHubHealerTracker:
             return []
         return [
             {
-                "id": str(item.get("id")),
+                "id": int(item.get("id") or 0),
                 "body": str(item.get("body") or ""),
                 "author": str((item.get("user") or {}).get("login") or "").strip(),
                 "created_at": str(item.get("created_at") or ""),
@@ -232,8 +240,57 @@ class GitHubHealerTracker:
             if isinstance(item, dict)
         ]
 
+    def list_pr_reviews(self, *, pr_number: int) -> list[dict[str, Any]]:
+        if not self.enabled or pr_number <= 0:
+            return []
+        payload = self._request_json(f"/repos/{self.repo_slug}/pulls/{int(pr_number)}/reviews")
+        if not isinstance(payload, list):
+            return []
+        return [
+            {
+                "id": int(item.get("id") or 0),
+                "body": str(item.get("body") or ""),
+                "author": str((item.get("user") or {}).get("login") or "").strip(),
+                "state": str(item.get("state") or ""),
+                "created_at": str(item.get("submitted_at") or item.get("created_at") or ""),
+            }
+            for item in payload
+            if isinstance(item, dict)
+        ]
+
+    def list_pr_review_comments(self, *, pr_number: int) -> list[dict[str, Any]]:
+        if not self.enabled or pr_number <= 0:
+            return []
+        payload = self._request_json(f"/repos/{self.repo_slug}/pulls/{int(pr_number)}/comments")
+        if not isinstance(payload, list):
+            return []
+        return [
+            {
+                "id": int(item.get("id") or 0),
+                "body": str(item.get("body") or ""),
+                "author": str((item.get("user") or {}).get("login") or "").strip(),
+                "path": str(item.get("path") or ""),
+                "created_at": str(item.get("created_at") or ""),
+            }
+            for item in payload
+            if isinstance(item, dict)
+        ]
+
+    def viewer_login(self) -> str:
+        if self._viewer_login is not None:
+            return self._viewer_login
+        if not self.enabled:
+            self._viewer_login = ""
+            return self._viewer_login
+        payload = self._request_json("/user")
+        if not isinstance(payload, dict):
+            self._viewer_login = ""
+            return self._viewer_login
+        self._viewer_login = str(payload.get("login") or "").strip()
+        return self._viewer_login
+
     def _request_json(self, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
-        url = f"https://api.github.com{path}"
+        url = f"{self.api_base_url}{path}"
         data: bytes | None = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")

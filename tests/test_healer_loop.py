@@ -14,6 +14,7 @@ def _make_loop(store, **overrides):
         healer_max_concurrent_issues=1,
         healer_max_wall_clock_seconds_per_issue=300,
         healer_learning_enabled=True,
+        healer_enable_review=overrides.get("healer_enable_review", True),
         healer_issue_required_labels=["healer:ready"],
         healer_trusted_actors=[],
         healer_retry_budget=overrides.get("healer_retry_budget", 2),
@@ -26,11 +27,12 @@ def _make_loop(store, **overrides):
     loop.settings = settings
     loop.store = store
     loop.tracker = MagicMock()
+    loop.tracker.viewer_login.return_value = "healer-service"
     loop.tracker.repo_slug = "owner/repo"
     return loop
 
 
-def test_ingest_pr_feedback_requeues_issue(tmp_path):
+def test_ingest_pr_feedback_requeues_issue_for_new_external_feedback(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
     store.upsert_healer_issue(
@@ -42,29 +44,108 @@ def test_ingest_pr_feedback_requeues_issue(tmp_path):
         labels=["healer:ready"],
         priority=5,
     )
-    store.set_healer_issue_state(
-        issue_id="401",
-        state="pr_open",
-        pr_number=123,
-    )
+    store.set_healer_issue_state(issue_id="401", state="pr_open", pr_number=123)
 
     loop = _make_loop(store)
     loop.tracker.list_pr_comments.return_value = [
         {
-            "id": "1001",
+            "id": 1001,
             "body": "Please fix this other thing too.",
             "author": "bob",
-            "created_at": "2023-01-01T00:00:00Z"
+            "created_at": "2026-03-06T01:00:00Z",
+        }
+    ]
+    loop.tracker.list_pr_reviews.return_value = []
+    loop.tracker.list_pr_review_comments.return_value = []
+
+    loop._ingest_pr_feedback()
+
+    issue = store.get_healer_issue("401")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert "PR comment from @bob" in issue["feedback_context"]
+    assert issue["last_issue_comment_id"] == 1001
+
+
+def test_ingest_pr_feedback_ignores_healer_comments(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="402",
+        repo="owner/repo",
+        title="Issue 402",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="402", state="pr_open", pr_number=124)
+
+    loop = _make_loop(store)
+    loop.tracker.list_pr_comments.return_value = [
+        {
+            "id": 2001,
+            "body": "Automated review from healer service",
+            "author": "healer-service",
+            "created_at": "2026-03-06T01:00:00Z",
+        }
+    ]
+    loop.tracker.list_pr_reviews.return_value = []
+    loop.tracker.list_pr_review_comments.return_value = []
+
+    loop._ingest_pr_feedback()
+
+    issue = store.get_healer_issue("402")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["feedback_context"] == ""
+    assert issue["last_issue_comment_id"] == 2001
+
+
+def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="403",
+        repo="owner/repo",
+        title="Issue 403",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="403", state="pr_pending_approval", pr_number=125)
+
+    loop = _make_loop(store)
+    loop.tracker.list_pr_comments.return_value = []
+    loop.tracker.list_pr_reviews.return_value = [
+        {
+            "id": 3001,
+            "body": "Please cover the edge case.",
+            "author": "reviewer",
+            "state": "CHANGES_REQUESTED",
+            "created_at": "2026-03-06T01:00:00Z",
+        }
+    ]
+    loop.tracker.list_pr_review_comments.return_value = [
+        {
+            "id": 4001,
+            "body": "This branch needs a nil guard.",
+            "author": "reviewer",
+            "path": "src/example.py",
+            "created_at": "2026-03-06T01:01:00Z",
         }
     ]
 
     loop._ingest_pr_feedback()
 
-    issue = store.get_healer_issue("401")
+    issue = store.get_healer_issue("403")
+    assert issue is not None
     assert issue["state"] == "queued"
-    assert "bob" in issue["feedback_context"]
-    assert "fix this other thing" in issue["feedback_context"]
-    assert issue["last_comment_id"] == "1001"
+    assert "PR review (changes_requested) from @reviewer" in issue["feedback_context"]
+    assert "Inline review comment on src/example.py from @reviewer" in issue["feedback_context"]
+    assert issue["last_review_id"] == 3001
+    assert issue["last_review_comment_id"] == 4001
 
 
 def test_backoff_or_fail_requeues_before_retry_budget(tmp_path):
@@ -92,6 +173,8 @@ def test_backoff_or_fail_requeues_before_retry_budget(tmp_path):
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "tests_failed"
     assert issue["backoff_until"]
+    assert "T" not in str(issue["backoff_until"])
+    assert "+" not in str(issue["backoff_until"])
 
 
 def test_backoff_or_fail_marks_failed_at_retry_budget(tmp_path):
