@@ -26,3 +26,4 @@ flow-healer start --once
 - Tech stack: Python 3.11+, SQLite, GitHub, Docker, pytest
 - Target audience: repository maintainers and contributors
 - [TODO: Verify] Whether future docs should include a dedicated operations runbook
+- Review feedback addressed: this initial docs scaffold is intended as a starting point for iterative refinement.
