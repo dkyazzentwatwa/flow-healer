@@ -94,6 +94,21 @@ def test_add_issue_comment(monkeypatch):
     assert ok is True
 
 
+def test_close_issue(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123"
+        assert method == "PATCH"
+        assert body == {"state": "closed"}
+        return {"number": 123, "state": "closed"}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.close_issue(issue_id="123")
+    assert ok is True
+
+
 def test_list_pr_comments(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

@@ -179,6 +179,16 @@ class GitHubHealerTracker:
         )
         return isinstance(payload, dict) and "id" in payload
 
+    def close_issue(self, *, issue_id: str) -> bool:
+        if not self.enabled or not issue_id.strip():
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/issues/{quote(issue_id.strip())}",
+            method="PATCH",
+            body={"state": "closed"},
+        )
+        return isinstance(payload, dict) and str(payload.get("state") or "").lower() == "closed"
+
     def open_or_update_pr(
         self,
         *,

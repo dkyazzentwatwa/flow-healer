@@ -104,6 +104,7 @@ class AutonomousHealerLoop:
             return
         self.reconciler.reconcile()
         self._ingest_ready_issues()
+        self._reconcile_pr_outcomes()
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
         if self._circuit_breaker_open() and resumed_approved == 0:
@@ -208,6 +209,61 @@ class AutonomousHealerLoop:
                     last_review_id=max_review_id,
                     last_review_comment_id=max_review_comment_id,
                 )
+
+    def _reconcile_pr_outcomes(self) -> int:
+        active_prs = self.store.list_healer_issues(states=["pr_open"], limit=100)
+        resolved = 0
+        for row in active_prs:
+            pr_number = int(row.get("pr_number") or 0)
+            if pr_number <= 0:
+                continue
+
+            pr_state = self.tracker.get_pr_state(pr_number=pr_number).strip().lower()
+            if pr_state != "merged":
+                if pr_state and pr_state != str(row.get("pr_state") or "").strip().lower():
+                    self.store.set_healer_issue_state(
+                        issue_id=str(row.get("issue_id") or ""),
+                        state="pr_open",
+                        pr_state=pr_state,
+                    )
+                continue
+
+            issue_id = str(row.get("issue_id") or "")
+            if not issue_id:
+                continue
+
+            if not self.tracker.close_issue(issue_id=issue_id):
+                logger.warning(
+                    "PR #%d is merged but Flow Healer could not close issue #%s yet.",
+                    pr_number,
+                    issue_id,
+                )
+                self.store.set_healer_issue_state(
+                    issue_id=issue_id,
+                    state="pr_open",
+                    pr_state="merged",
+                )
+                continue
+
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="resolved",
+                pr_state="merged",
+                clear_lease=True,
+            )
+            self._post_issue_status(
+                issue_id=issue_id,
+                body=self._format_flow_status_comment(
+                    "Merged and wrapped up 🌊",
+                    "The PR landed on the base branch, so I'm closing this one out.",
+                    [
+                        "Status: `resolved`",
+                        f"PR: `#{pr_number}`",
+                    ],
+                ),
+            )
+            resolved += 1
+        return resolved
 
     def _ingest_ready_issues(self) -> None:
         issues = self.tracker.list_ready_issues(

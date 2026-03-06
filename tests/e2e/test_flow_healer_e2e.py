@@ -181,6 +181,14 @@ class FakeGitHubState:
             "labels": [{"name": label} for label in issue.labels],
         }
 
+    def merge_pr(self, pr_number: int) -> None:
+        with self._lock:
+            pr = self.pulls.get(pr_number)
+            if pr is None:
+                return
+            pr["state"] = "closed"
+            pr["merged"] = True
+
 
 class FakeGitHubAPI:
     def __init__(self, state: FakeGitHubState) -> None:
@@ -242,7 +250,9 @@ class FakeGitHubAPI:
 
             if parts[3] == "pulls" and len(parts) == 5:
                 pr = self.state.pulls.get(int(parts[4]))
-                return {**pr, "merged": False, "mergeable_state": "clean"} if pr else {}
+                if not pr:
+                    return {}
+                return {**pr, "merged": bool(pr.get("merged")), "mergeable_state": "clean"}
 
             if parts[3] == "pulls" and len(parts) == 6 and parts[5] == "reviews":
                 return list(self.state.reviews.get(int(parts[4]), []))
@@ -292,6 +302,14 @@ class FakeGitHubAPI:
                     }
                     self.state.pulls[pr_number] = pr
                 return pr
+
+        if method == "PATCH":
+            if parts[3] == "issues" and len(parts) == 5:
+                issue = self.state.issues.get(int(parts[4]))
+                if issue is None:
+                    return {}
+                issue.state = str(payload.get("state") or issue.state)
+                return self.state.issue_payload(issue)
 
         return {}
 
@@ -617,3 +635,45 @@ def test_e2e_pending_approval_posts_issue_comment(tmp_path: Path, monkeypatch, f
     comments = state.issue_comments[issue_number]
     assert any("Flow's on it" in comment["body"] for comment in comments)
     assert any("Required label to continue: `healer:pr-approved`" in comment["body"] for comment in comments)
+
+
+def test_e2e_merged_pr_closes_issue_and_marks_resolved(tmp_path: Path, monkeypatch, portable_pytest_gates, fake_github) -> None:
+    repo_path = _build_demo_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title="Fix addition bug",
+        body="Please repair the bug in demo.py",
+        labels=["healer:ready", "healer:pr-approved"],
+    )
+    connector = ScriptedConnector(
+        proposer_outputs={
+            str(issue_number): [
+                _make_patch(
+                    "demo.py",
+                    "def add(a: int, b: int) -> int:\n    return a - b\n",
+                    "def add(a: int, b: int) -> int:\n    return a + b\n",
+                )
+            ]
+        },
+    )
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    api = fake_github(state)
+    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service.start("demo", once=True)
+
+    pr_number = next(iter(state.pulls))
+    state.merge_pr(pr_number)
+
+    service.start("demo", once=True)
+
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    issue = store.get_healer_issue(str(issue_number))
+    assert issue is not None
+    assert issue["state"] == "resolved"
+    assert issue["pr_state"] == "merged"
+    assert state.issues[issue_number].state == "closed"
+    assert any("Merged and wrapped up" in comment["body"] for comment in state.issue_comments[issue_number])
+    store.close()

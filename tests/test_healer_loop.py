@@ -187,6 +187,35 @@ def test_resume_approved_pending_pr_requeues_issue(tmp_path):
     loop.tracker.add_issue_comment.assert_called_once()
 
 
+def test_reconcile_pr_outcomes_closes_merged_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="602",
+        repo="owner/repo",
+        title="Issue 602",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="602", state="pr_open", pr_number=126, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "merged"
+    loop.tracker.close_issue.return_value = True
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("602")
+    assert resolved == 1
+    assert issue is not None
+    assert issue["state"] == "resolved"
+    assert issue["pr_state"] == "merged"
+    loop.tracker.close_issue.assert_called_once_with(issue_id="602")
+    loop.tracker.add_issue_comment.assert_called_once()
+
+
 def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
