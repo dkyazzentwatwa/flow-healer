@@ -3,36 +3,44 @@
 ## High-Level Flow
 
 ~~~text
-GitHub Issues / Repo Signals
+GitHub Issues / Repo Signals <----------------------+
+            |                                       |
+            v                                       |
+   Flow Healer CLI + Service                        |
+            |                                       |
+   +--------+--------+------------------+           |
+   |        |        |                  |           | (Feedback Loop)
+   v        v        v                  v           |
+ Scanner  Tracker  Workspace Mgr   SQLite Store     |
+   |        |        |                  |           |
+   +--------+--------+------------------+           |
+            |                                       |
+            v                                       |
+      Autonomous Loop ------------------------------+
             |
-            v
-   Flow Healer CLI + Service
-            |
-   +--------+--------+------------------+
-   |        |        |                  |
-   v        v        v                  v
- Scanner  Tracker  Workspace Mgr   SQLite Store
-   |        |        |                  |
-   +--------+--------+------------------+
-            |
-            v
-      Autonomous Loop
-            |
-   Connector -> Docker Test Gate -> Verifier -> PR
+   Codex Connector -> Docker Test Gate -> Verifier -> Reviewer -> PR
 ~~~
 
 ## Key Modules
 
-- `src/flow_healer/cli.py`: command entrypoint
-- `src/flow_healer/service.py`: multi-repo orchestration
-- `src/flow_healer/healer_loop.py`: issue lifecycle and retries
-- `src/flow_healer/healer_scan.py`: deterministic repo scanning
-- `src/flow_healer/healer_tracker.py`: GitHub issues, PRs, and comments
-- `src/flow_healer/store.py`: SQLite persistence for issues, attempts, lessons, and scans
+- `src/flow_healer/cli.py`: CLI Command entrypoint.
+- `src/flow_healer/service.py`: Multi-repo orchestration and polling.
+- `src/flow_healer/healer_loop.py`: Main control loop for issue processing, retries, and feedback ingestion.
+- `src/flow_healer/healer_scan.py`: Deterministic repository scanning for known breakage patterns.
+- `src/flow_healer/healer_tracker.py`: GitHub API adapter for issues, PRs, and comments.
+- `src/flow_healer/healer_workspace.py`: Manager for isolated git worktrees.
+- `src/flow_healer/healer_dispatcher.py`: Handles claim logic and lock acquisition for issues.
+- `src/flow_healer/healer_locks.py`: Implements path-level and coarse-grained locking.
+- `src/flow_healer/healer_runner.py`: Executes the fix proposal via the AI connector.
+- `src/flow_healer/healer_verifier.py`: Post-fix verification pass to ensure quality.
+- `src/flow_healer/healer_reviewer.py`: Generates AI-driven code reviews for proposed fixes.
+- `src/flow_healer/healer_memory.py`: Persists and retrieves lessons from prior attempts to improve future fixes.
+- `src/flow_healer/healer_reconciler.py`: Cleans up expired leases, locks, and orphan workspaces.
+- `src/flow_healer/store.py`: SQLite persistence for issues, attempts, lessons, and scans.
 
 ## Design Notes
 
-- Work is isolated per issue in dedicated git worktrees.
-- Retry and circuit-breaker behavior reduce repeated unsafe attempts.
-- PR feedback can requeue an issue for follow-up work.
-- [TODO: Verify] Whether future architecture docs should include a sequence diagram for PR feedback ingestion
+- **Isolation**: Work is isolated per issue in dedicated git worktrees.
+- **Safety**: Retry budgets, backoff, and circuit-breaker behavior reduce repeated unsafe attempts.
+- **Iterative Healing**: PR feedback (comments from human reviewers) is monitored and incorporated into the `feedback_context` for subsequent healing attempts.
+- **Stateful**: Durable state is maintained in SQLite to allow recovery across restarts.
