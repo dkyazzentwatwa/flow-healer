@@ -1,6 +1,8 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
+
 
 def _load_smoke_math():
     module_path = Path(__file__).resolve().parents[1] / "smoke_math.py"
@@ -15,5 +17,14 @@ def _load_smoke_math():
 smoke_math = _load_smoke_math()
 
 
-def test_add_returns_sum() -> None:
-    assert smoke_math.add(2, 3) == 5
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (2, 3, 5),
+        (-2, 3, 1),
+        (2, -3, -1),
+        (-2, -3, -5),
+    ],
+)
+def test_add_returns_sum(left: int, right: int, expected: int) -> None:
+    assert smoke_math.add(left, right) == expected
