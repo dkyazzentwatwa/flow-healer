@@ -13,6 +13,10 @@ class TodoNotFoundError(LookupError):
 class DomainService:
     repository: TodoRepository
 
+    @staticmethod
+    def _todo_not_found(todo_id: str) -> TodoNotFoundError:
+        return TodoNotFoundError(f"Todo '{todo_id}' was not found.")
+
     def create_todo(self, title: str) -> TodoRecord:
         normalized_title = title.strip()
         if not normalized_title:
@@ -25,7 +29,10 @@ class DomainService:
     def complete_todo(self, todo_id: str) -> TodoRecord:
         todo = self.repository.get(todo_id)
         if todo is None:
-            raise TodoNotFoundError(f"Todo '{todo_id}' was not found.")
+            raise self._todo_not_found(todo_id)
 
         todo.completed = True
-        return self.repository.update(todo)
+        try:
+            return self.repository.update(todo)
+        except KeyError as exc:
+            raise self._todo_not_found(todo_id) from exc
