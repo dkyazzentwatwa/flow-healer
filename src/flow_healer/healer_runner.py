@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .language_detector import detect_language_details
@@ -41,6 +41,12 @@ class ResolvedStrategy:
     language_detected: str
     language_effective: str
     strategy: LanguageStrategy
+
+
+@dataclass(slots=True, frozen=True)
+class FilteredStageResult:
+    kept_paths: list[str]
+    excluded_paths: list[str]
 
 
 class HealerRunner:
@@ -130,7 +136,13 @@ class HealerRunner:
                 prompt,
                 timeout_seconds=turn_timeout_seconds,
             )
-            if _stage_workspace_changes(workspace):
+            if _stage_workspace_changes(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=task_spec.language,
+            ):
                 break
             patch = _extract_diff_block(proposer_output)
             if patch.strip():
@@ -168,7 +180,13 @@ class HealerRunner:
                 finally:
                     if patch_path.exists():
                         patch_path.unlink(missing_ok=True)
-                if apply_proc.returncode == 0 and _stage_workspace_changes(workspace):
+                if apply_proc.returncode == 0 and _stage_workspace_changes(
+                    workspace,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    task_spec=task_spec,
+                    language=task_spec.language,
+                ):
                     break
                 failure_class = "patch_apply_failed"
                 failure_reason = (apply_proc.stderr or apply_proc.stdout or "git apply failed").strip()[:500]
@@ -188,7 +206,13 @@ class HealerRunner:
                 task_spec=task_spec,
                 proposer_output=proposer_output,
                 workspace=workspace,
-            ) and _stage_workspace_changes(workspace):
+            ) and _stage_workspace_changes(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=task_spec.language,
+            ):
                 failure_class = ""
                 failure_reason = ""
                 break
@@ -199,7 +223,13 @@ class HealerRunner:
                 task_spec=task_spec,
                 proposer_output=proposer_output,
                 workspace=workspace,
-            ) and _stage_workspace_changes(workspace):
+            ) and _stage_workspace_changes(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=task_spec.language,
+            ):
                 failure_class = ""
                 failure_reason = ""
                 break
@@ -817,7 +847,61 @@ def _artifact_fallback_contract(task_spec: HealerTaskSpec) -> str:
     )
 
 
-def _stage_workspace_changes(workspace: Path) -> bool:
+_GENERIC_ARTIFACT_DIRS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    ".bundle",
+    ".gradle",
+    ".next",
+    ".nuxt",
+    ".yarn",
+    "coverage",
+    "dist",
+    "build",
+    ".cache",
+    "pip-wheel-metadata",
+}
+_GENERIC_ARTIFACT_FILES = {
+    ".ds_store",
+    ".coverage",
+}
+_GENERIC_ARTIFACT_SUFFIXES = {
+    ".pyc",
+    ".pyo",
+    ".class",
+}
+_LANGUAGE_ARTIFACT_DIRS = {
+    "python": {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "env", "dist", "build", "pip-wheel-metadata"},
+    "node": {"node_modules", "dist", "build", "coverage", ".next", ".nuxt"},
+    "ruby": {"vendor", ".bundle"},
+    "rust": {"target"},
+    "java_maven": {"target"},
+    "java_gradle": {"build", ".gradle"},
+}
+_LOCKFILE_GROUPS = {
+    "gemfile.lock": {"gemfile", "bundle", "bundler", "dependency", "dependencies", "lockfile"},
+    "package-lock.json": {"package.json", "npm", "dependency", "dependencies", "lockfile"},
+    "pnpm-lock.yaml": {"pnpm", "package.json", "dependency", "dependencies", "lockfile"},
+    "yarn.lock": {"yarn", "package.json", "dependency", "dependencies", "lockfile"},
+    "cargo.lock": {"cargo", "cargo.toml", "crate", "crates", "dependency", "dependencies", "lockfile"},
+}
+
+
+def _stage_workspace_changes(
+    workspace: Path,
+    *,
+    issue_title: str = "",
+    issue_body: str = "",
+    task_spec: HealerTaskSpec | None = None,
+    language: str = "",
+) -> bool:
     subprocess.run(
         ["git", "-C", str(workspace), "add", "-A"],
         check=False,
@@ -825,7 +909,147 @@ def _stage_workspace_changes(workspace: Path) -> bool:
         text=True,
         timeout=30,
     )
-    return bool(_changed_paths(workspace))
+    result = _filter_staged_changes(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+    )
+    if result.excluded_paths:
+        preview = ", ".join(result.excluded_paths[:5])
+        if len(result.excluded_paths) > 5:
+            preview += ", ..."
+        logger.info(
+            "Excluded %d generated artifact path(s) from staged diff in %s: %s",
+            len(result.excluded_paths),
+            workspace,
+            preview,
+        )
+    return bool(result.kept_paths)
+
+
+def _filter_staged_changes(
+    workspace: Path,
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec | None,
+    language: str,
+) -> FilteredStageResult:
+    staged_paths = _changed_paths(workspace)
+    excluded_paths = [
+        path
+        for path in staged_paths
+        if _should_exclude_generated_artifact(
+            path,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=language,
+        )
+    ]
+    if excluded_paths:
+        _unstage_paths(workspace, excluded_paths)
+    return FilteredStageResult(
+        kept_paths=_changed_paths(workspace),
+        excluded_paths=excluded_paths,
+    )
+
+
+def _unstage_paths(workspace: Path, paths: list[str]) -> None:
+    for start in range(0, len(paths), 100):
+        chunk = paths[start:start + 100]
+        subprocess.run(
+            ["git", "-C", str(workspace), "restore", "--staged", "--", *chunk],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+
+def _should_exclude_generated_artifact(
+    path: str,
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec | None,
+    language: str,
+) -> bool:
+    normalized = str(path or "").strip().lstrip("./")
+    if not normalized:
+        return False
+    if _is_explicit_output_target(normalized, task_spec):
+        return False
+
+    normalized_lower = normalized.lower()
+    lockfile_name = PurePosixPath(normalized_lower).name
+    if lockfile_name in _LOCKFILE_GROUPS:
+        return not _issue_allows_lockfile_change(
+            normalized,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+        )
+
+    parts = [part.lower() for part in PurePosixPath(normalized).parts]
+    filename = parts[-1] if parts else normalized_lower
+    if filename in _GENERIC_ARTIFACT_FILES:
+        return True
+    if any(part in _GENERIC_ARTIFACT_DIRS for part in parts[:-1]):
+        return True
+    if any(filename.endswith(suffix) for suffix in _GENERIC_ARTIFACT_SUFFIXES):
+        return True
+    if any(part.endswith(".egg-info") for part in parts):
+        return True
+
+    effective_language = str(language or "").strip().lower()
+    language_dirs = _LANGUAGE_ARTIFACT_DIRS.get(effective_language, set())
+    if any(part in language_dirs for part in parts[:-1]):
+        return True
+
+    return False
+
+
+def _is_explicit_output_target(path: str, task_spec: HealerTaskSpec | None) -> bool:
+    if task_spec is None:
+        return False
+    normalized = str(path or "").strip().lstrip("./").lower()
+    if not normalized:
+        return False
+    for target in task_spec.output_targets:
+        normalized_target = str(target or "").strip().lstrip("./").lower().rstrip("/")
+        if not normalized_target:
+            continue
+        if normalized == normalized_target or normalized.startswith(f"{normalized_target}/"):
+            return True
+    return False
+
+
+def _issue_allows_lockfile_change(
+    path: str,
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec | None,
+) -> bool:
+    normalized = str(path or "").strip().lstrip("./")
+    normalized_lower = normalized.lower()
+    lockfile_name = PurePosixPath(normalized_lower).name
+    if _is_explicit_output_target(normalized, task_spec):
+        return True
+    issue_text = " ".join(
+        part.strip().lower()
+        for part in (issue_title, issue_body)
+        if str(part or "").strip()
+    )
+    if not issue_text:
+        return False
+    if normalized_lower in issue_text or PurePosixPath(normalized_lower).name in issue_text:
+        return True
+    keywords = _LOCKFILE_GROUPS.get(lockfile_name, set())
+    return any(keyword in issue_text for keyword in keywords)
 
 
 def _classify_non_patch_failure(proposer_output: str) -> tuple[str, str]:

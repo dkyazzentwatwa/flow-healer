@@ -18,7 +18,7 @@ from .healer_locks import diff_paths_to_lock_keys, predict_lock_set
 from .healer_memory import HealerMemoryService
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
-from .healer_runner import HealerRunner
+from .healer_runner import HealerRunner, _stage_workspace_changes
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue
 from .healer_task_spec import compile_task_spec
@@ -905,7 +905,15 @@ class AutonomousHealerLoop:
                 logger.info("Issue #%s is waiting for PR approval label", issue.issue_id)
                 return
 
-            commit_ok, commit_reason = self._commit_and_push(workspace.path, issue_id=issue.issue_id, branch=workspace.branch)
+            commit_ok, commit_reason = self._commit_and_push(
+                workspace.path,
+                issue_id=issue.issue_id,
+                branch=workspace.branch,
+                issue_title=issue.title,
+                issue_body=issue.body,
+                task_spec=task_spec,
+                language=detected_language,
+            )
             if not commit_ok:
                 failure_class = "push_failed"
                 failure_reason = commit_reason
@@ -1398,16 +1406,24 @@ class AutonomousHealerLoop:
         )
 
     @staticmethod
-    def _commit_and_push(workspace: Path, *, issue_id: str, branch: str) -> tuple[bool, str]:
-        add = subprocess.run(
-            ["git", "-C", str(workspace), "add", "-A"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if add.returncode != 0:
-            return False, (add.stderr or add.stdout or "git add failed").strip()
+    def _commit_and_push(
+        workspace: Path,
+        *,
+        issue_id: str,
+        branch: str,
+        issue_title: str,
+        issue_body: str,
+        task_spec: HealerTaskSpec,
+        language: str,
+    ) -> tuple[bool, str]:
+        if not _stage_workspace_changes(
+            workspace,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=language,
+        ):
+            return False, "No non-artifact staged changes remained after artifact filtering."
 
         diff = subprocess.run(
             ["git", "-C", str(workspace), "diff", "--cached", "--quiet"],

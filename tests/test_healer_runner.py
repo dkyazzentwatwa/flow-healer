@@ -6,12 +6,14 @@ from flow_healer.healer_runner import (
     HealerRunner,
     ResolvedStrategy,
     _build_docker_test_script,
+    _changed_paths,
     _gate_runners_for_mode,
     _looks_like_unified_diff,
     _normalize_test_gate_mode,
     _run_test_gates,
     _run_tests_in_docker,
     _run_tests_locally,
+    _stage_workspace_changes,
 )
 from flow_healer.language_strategies import get_strategy
 from flow_healer.healer_task_spec import HealerTaskSpec, compile_task_spec
@@ -134,6 +136,98 @@ def test_run_tests_in_docker_uses_posix_shell(monkeypatch, tmp_path):
     ]
     assert seen["cmd"][8:10] == ["sh", "-c"]
     assert summary["gate_status"] == "passed"
+
+
+def test_stage_workspace_changes_excludes_python_packaging_artifacts(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (workspace / "src" / "flow_healer.egg-info").mkdir(parents=True)
+    (workspace / "src" / "flow_healer.egg-info" / "PKG-INFO").write_text("generated\n", encoding="utf-8")
+    (workspace / "__pycache__").mkdir()
+    (workspace / "__pycache__" / "demo.cpython-311.pyc").write_text("compiled\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=compile_task_spec(issue_title="Fix demo", issue_body="Repair demo.py"),
+        language="python",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["demo.py"]
+
+
+def test_stage_workspace_changes_excludes_ruby_dependency_artifacts(tmp_path):
+    workspace = tmp_path / "repo"
+    ruby_root = workspace / "e2e-smoke" / "ruby"
+    (ruby_root / "spec").mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    _init_git_repo(workspace)
+    (ruby_root / "add.rb").write_text("def add(a, b)\n  a - b\nend\n", encoding="utf-8")
+    (ruby_root / "spec" / "add_spec.rb").write_text("RSpec.describe '#add' do\nend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (ruby_root / "add.rb").write_text("def add(a, b)\n  a + b\nend\n", encoding="utf-8")
+    (ruby_root / "vendor" / "bundle" / "gems" / "demo").mkdir(parents=True)
+    (ruby_root / "vendor" / "bundle" / "gems" / "demo" / "generated.rb").write_text("module Demo; end\n", encoding="utf-8")
+    (ruby_root / ".bundle").mkdir()
+    (ruby_root / ".bundle" / "config").write_text("BUNDLE_PATH: vendor/bundle\n", encoding="utf-8")
+    (ruby_root / "Gemfile.lock").write_text("GEM\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Ruby sandbox regression",
+        issue_body="Fix the Ruby sandbox behavior and keep tests passing.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("e2e-smoke/ruby/add.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        language="ruby",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["e2e-smoke/ruby/add.rb"]
+
+
+def test_stage_workspace_changes_allows_explicit_lockfile_targets(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (workspace / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Update package dependencies",
+        issue_body="Update package.json and package-lock.json for the new dependency set.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=("package-lock.json",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="node",
+        ),
+        language="node",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["package-lock.json"]
 
 
 def test_run_test_gates_marks_local_skipped_when_toolchain_unavailable(monkeypatch):
@@ -261,6 +355,46 @@ class _WorkspaceEditingConnector(_RetryConnector):
         (self.workspace / "docs").mkdir(exist_ok=True)
         (self.workspace / "docs" / "create-plan-docs.md").write_text("Synthesized plan\n", encoding="utf-8")
         return self.outputs.pop(0)
+
+
+class _ArtifactNoiseConnector(_RetryConnector):
+    def __init__(self, workspace: Path, outputs, *, language: str):
+        super().__init__(outputs)
+        self.workspace = workspace
+        self.language = language
+
+    def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+        self.turns.append((thread_id, prompt))
+        if self.language == "ruby":
+            ruby_root = self.workspace / "e2e-smoke" / "ruby"
+            (ruby_root / "vendor" / "bundle" / "gems" / "demo").mkdir(parents=True, exist_ok=True)
+            (ruby_root / ".bundle").mkdir(exist_ok=True)
+            (ruby_root / "Gemfile.lock").write_text("LOCKFILE\n", encoding="utf-8")
+            (ruby_root / ".bundle" / "config").write_text("BUNDLE_PATH: vendor/bundle\n", encoding="utf-8")
+            for index in range(25):
+                (ruby_root / "vendor" / "bundle" / "gems" / "demo" / f"file_{index}.rb").write_text(
+                    f"# generated {index}\n",
+                    encoding="utf-8",
+                )
+            (ruby_root / "add.rb").write_text(
+                "def add(a, b)\n  a + b\nend\n\ndef multiply(a, b)\n  a * b\nend\n",
+                encoding="utf-8",
+            )
+            (ruby_root / "spec" / "add_spec.rb").write_text(
+                "RSpec.describe '#add' do\n"
+                "  it 'adds numbers' do\n"
+                "    expect(add(2, 3)).to eq(5)\n"
+                "  end\n"
+                "end\n",
+                encoding="utf-8",
+            )
+        return self.outputs.pop(0)
+
+
+def _init_git_repo(workspace: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Flow Healer Test"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "flow-healer@example.com"], cwd=workspace, check=True, capture_output=True, text=True)
 
 
 def test_run_attempt_retries_after_patch_apply_failure(monkeypatch, tmp_path):
@@ -736,6 +870,54 @@ def test_run_attempt_materializes_code_file_from_path_fence_for_code_change(monk
     assert "src/calc.py" in result.diff_paths
     content = (workspace / "src" / "calc.py").read_text(encoding="utf-8")
     assert "return a + b" in content
+
+
+def test_run_attempt_ignores_generated_artifact_noise_for_diff_limit(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    ruby_root = workspace / "e2e-smoke" / "ruby"
+    (ruby_root / "spec").mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    _init_git_repo(workspace)
+    (ruby_root / "add.rb").write_text("def add(a, b)\n  a - b\nend\n", encoding="utf-8")
+    (ruby_root / "spec" / "add_spec.rb").write_text("RSpec.describe '#add' do\nend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _ArtifactNoiseConnector(workspace, ["Applied changes."], language="ruby")
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="500",
+        issue_title="Ruby sandbox regression",
+        issue_body="Fix the Ruby sandbox behavior and keep tests passing.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("e2e-smoke/ruby/add.rb", "e2e-smoke/ruby/spec/add_spec.rb"),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        workspace=workspace,
+        max_diff_files=3,
+        max_diff_lines=80,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert result.diff_paths == ["e2e-smoke/ruby/add.rb", "e2e-smoke/ruby/spec/add_spec.rb"]
 
 
 def test_run_attempt_ignores_input_context_path_in_path_fenced_output(monkeypatch, tmp_path):
