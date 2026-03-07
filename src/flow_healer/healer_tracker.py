@@ -109,7 +109,9 @@ class GitHubHealerTracker:
             for entry in (payload.get("labels") or [])
             if isinstance(entry, dict)
         ]
-        return label in labels
+        target = (label or "").strip().lower()
+        normalized = {entry.lower() for entry in labels if entry}
+        return target in normalized
 
     def get_issue(self, *, issue_id: str) -> dict[str, Any] | None:
         if not self.enabled or not issue_id.strip():

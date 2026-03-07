@@ -771,7 +771,7 @@ class AutonomousHealerLoop:
 
         remote_state = str(snapshot.get("state") or "").strip().lower()
         remote_labels = {
-            str(label).strip()
+            str(label).strip().lower()
             for label in (snapshot.get("labels") or [])
             if str(label).strip()
         }
@@ -788,7 +788,12 @@ class AutonomousHealerLoop:
             return False
 
         required_labels = [label for label in self.settings.healer_issue_required_labels if label.strip()]
-        missing_labels = [label for label in required_labels if label not in remote_labels]
+        normalized_required = [self._normalize_label(label) for label in required_labels]
+        missing_labels = [
+            required
+            for required, normalized in zip(required_labels, normalized_required)
+            if normalized not in remote_labels
+        ]
         if missing_labels:
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -804,6 +809,11 @@ class AutonomousHealerLoop:
             )
             return False
         return True
+
+
+    @staticmethod
+    def _normalize_label(label: str) -> str:
+        return (label or "").strip().lower()
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
