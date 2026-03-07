@@ -1,0 +1,9 @@
+{
+  "name": "flow-healer-node-next-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "sh -c 'node --test tests/todo-service.test.js'"
+  }
+}
