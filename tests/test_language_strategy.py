@@ -38,6 +38,11 @@ def test_all_supported_strategies_have_local_test_cmd() -> None:
         assert strategy.local_test_cmd, f"{lang} strategy has empty local_test_cmd"
 
 
+def test_ruby_strategy_upgrades_bundler_before_bundle_install() -> None:
+    strategy = get_strategy("ruby")
+    assert strategy.docker_install_cmd == "gem install bundler && bundle install -j4 --quiet"
+
+
 def test_get_strategy_custom_test_command_enables_pytest_targeting() -> None:
     strategy = get_strategy(
         "node",

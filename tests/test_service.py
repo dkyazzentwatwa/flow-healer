@@ -3,6 +3,7 @@ from pathlib import Path
 from flow_healer.codex_app_server_connector import CodexAppServerConnector
 from flow_healer.codex_cli_connector import CodexCliConnector
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
+from flow_healer.healer_preflight import preflight_cache_key
 from flow_healer.service import FlowHealerService
 
 
@@ -86,6 +87,44 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert recent_attempt["stop_reason"]
     assert recent_attempt["connector_debug_focus"] == ""
     assert recent_attempt["connector_debug_checks"] == []
+    preflight = rows[0]["preflight"]
+    assert preflight["gate_mode"] == "local_then_docker"
+    assert len(preflight["reports"]) == 7
+
+
+def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                    healer_test_gate_mode="docker_only",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_state(
+        preflight_cache_key(gate_mode="docker_only", language="node"),
+        (
+            '{"checked_at":"2026-03-06 20:00:00","execution_root":"e2e-smoke/node",'
+            '"failure_class":"","gate_mode":"docker_only","language":"node","output_tail":"",'
+            '"status":"ready","summary":"Preflight passed","test_summary":{"failed_tests":0}}'
+        ),
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    node_report = next(report for report in rows[0]["preflight"]["reports"] if report["language"] == "node")
+    assert node_report["status"] == "ready"
+    assert node_report["summary"] == "Preflight passed"
 
 
 def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
@@ -127,6 +166,8 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert triage["next_skill"] == "flow-healer-pr-followup"
     assert triage["has_stop_conditions"] is False
     assert preflight["has_stop_conditions"] is True
+    assert rows[0]["preflight_gate_mode"] == "local_then_docker"
+    assert len(rows[0]["preflight_reports"]) == 7
 
 
 def test_build_runtime_uses_configured_connector_backend(tmp_path) -> None:

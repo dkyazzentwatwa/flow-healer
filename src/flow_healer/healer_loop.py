@@ -16,6 +16,11 @@ from .config import RelaySettings
 from .healer_dispatcher import HealerDispatcher
 from .healer_locks import diff_paths_to_lock_keys, predict_lock_set
 from .healer_memory import HealerMemoryService
+from .healer_preflight import (
+    HealerPreflight,
+    execution_root_for_language,
+    preflight_report_to_test_summary,
+)
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
 from .healer_runner import HealerRunner, _stage_workspace_changes
@@ -35,7 +40,7 @@ _FLOW_COMMENT_PERSONA = (
     "Laid-back tech bro vibes, light emoji use, concise status updates, "
     "and always sign off with '-- Flow 🌊'."
 )
-_INFRA_FAILURE_CLASSES = {"connector_unavailable", "connector_runtime_error"}
+_INFRA_FAILURE_CLASSES = {"connector_unavailable", "connector_runtime_error", "preflight_failed"}
 _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "empty_diff",
     "malformed_diff",
@@ -52,6 +57,7 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "push_failed":           {"backoff_multiplier": 2.0, "feedback_hint": "Push failed on last attempt, likely transient."},
     "pr_open_failed":        {"backoff_multiplier": 2.0, "feedback_hint": "Could not open PR last time."},
     "lock_upgrade_conflict": {"backoff_multiplier": 1.0, "feedback_hint": "Previous fix expanded beyond predicted scope. Keep changes narrow."},
+    "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
 }
 
 
@@ -134,6 +140,11 @@ class AutonomousHealerLoop:
             store=store,
             enabled=settings.healer_learning_enabled,
         )
+        self.preflight = HealerPreflight(
+            store=store,
+            runner=self.runner,
+            repo_path=self.repo_path,
+        )
 
     @property
     def enabled(self) -> bool:
@@ -170,6 +181,7 @@ class AutonomousHealerLoop:
         self.reconciler.reconcile()
         self._maybe_run_scan()
         self._ingest_ready_issues()
+        self.preflight.refresh_all(force=False)
         self._reconcile_pr_outcomes()
         self._auto_approve_open_prs()
         self._auto_merge_open_prs()
@@ -855,7 +867,6 @@ class AutonomousHealerLoop:
             return
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
-        detected_language = ""
         self.store.set_healer_issue_state(issue_id=issue.issue_id, state="running")
         lease_stop = threading.Event()
         lease_thread = threading.Thread(
@@ -904,6 +915,38 @@ class AutonomousHealerLoop:
         attempt_state = "failed"
         workspace = None
         try:
+            resolved_execution = self.runner.resolve_execution(workspace=self.repo_path, task_spec=task_spec)
+            detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
+            preflight_execution_root = (
+                resolved_execution.execution_root
+                or execution_root_for_language(detected_language)
+            )
+            should_run_preflight = bool(preflight_execution_root) and (
+                self.repo_path / preflight_execution_root
+            ).is_dir()
+            if detected_language and should_run_preflight:
+                report = self.preflight.ensure_language_ready(
+                    language=detected_language,
+                    execution_root=preflight_execution_root,
+                )
+                if report.status != "ready":
+                    failure_class = "preflight_failed"
+                    failure_reason = report.summary
+                    test_summary = preflight_report_to_test_summary(report)
+                    logger.info(
+                        "Issue #%s attempt %s blocked by %s preflight: %s",
+                        issue.issue_id,
+                        attempt_no,
+                        detected_language,
+                        failure_reason,
+                    )
+                    issue_state = self._backoff_or_fail(
+                        issue_id=issue.issue_id,
+                        attempt_no=attempt_no,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                    )
+                    return
             workspace = self.workspace_manager.ensure_workspace(
                 issue_id=issue.issue_id,
                 title=issue.title,
@@ -917,6 +960,7 @@ class AutonomousHealerLoop:
                 issue_body=issue.body,
             )
             resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
+            detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
                 state="running",

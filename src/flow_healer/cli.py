@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--once", action="store_true")
         if name == "scan":
             cmd.add_argument("--dry-run", action="store_true")
+        if name == "doctor":
+            cmd.add_argument("--preflight", action="store_true")
         if name == "serve":
             cmd.add_argument("--host")
             cmd.add_argument("--port", type=int)
@@ -69,7 +71,7 @@ def main() -> None:
             print(json.dumps(row, indent=2, default=str))
         return
     if args.command == "doctor":
-        for row in service.doctor_rows(args.repo):
+        for row in service.doctor_rows(args.repo, preflight=bool(args.preflight)):
             print(json.dumps(row, indent=2, default=str))
         return
     if args.command == "serve":

@@ -12,6 +12,7 @@ from .codex_app_server_connector import CodexAppServerConnector
 from .codex_cli_connector import CodexCliConnector
 from .config import AppConfig, RelaySettings
 from .healer_loop import AutonomousHealerLoop
+from .healer_preflight import list_cached_preflight_reports
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker
 from .healer_triage import classify_issue_route
@@ -150,6 +151,23 @@ class FlowHealerService:
                             "last_error_reason": runtime.store.get_state("healer_connector_last_error_reason") or "",
                             "last_error_at": runtime.store.get_state("healer_connector_last_error_at") or "",
                         },
+                        "preflight": {
+                            "gate_mode": repo.healer_test_gate_mode,
+                            "reports": [
+                                {
+                                    "language": report.language,
+                                    "execution_root": report.execution_root,
+                                    "status": report.status,
+                                    "failure_class": report.failure_class,
+                                    "summary": report.summary,
+                                    "checked_at": report.checked_at,
+                                }
+                                for report in list_cached_preflight_reports(
+                                    store=runtime.store,
+                                    gate_mode=repo.healer_test_gate_mode,
+                                )
+                            ],
+                        },
                         "recent_attempts": annotated_attempts,
                     }
                 )
@@ -184,7 +202,7 @@ class FlowHealerService:
                 self._close_runtime(runtime)
         return results
 
-    def doctor_rows(self, repo_name: str | None = None) -> list[dict[str, object]]:
+    def doctor_rows(self, repo_name: str | None = None, *, preflight: bool = False) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
         token_name = self.config.service.github_token_env
         token_present = bool(os.getenv(token_name, "").strip())
@@ -196,6 +214,11 @@ class FlowHealerService:
             repo_path = Path(repo.healer_repo_path).expanduser().resolve()
             runtime = self.build_runtime(repo)
             try:
+                reports = (
+                    runtime.loop.preflight.refresh_all(force=True)
+                    if preflight
+                    else list_cached_preflight_reports(store=runtime.store, gate_mode=repo.healer_test_gate_mode)
+                )
                 connector_health = runtime.loop._connector_health_snapshot()
                 runtime.loop._record_connector_health(connector_health)
                 breaker = runtime.loop._circuit_breaker_status()
@@ -223,6 +246,18 @@ class FlowHealerService:
                         "launchd_path_connector": launchd_path_connector or "",
                         "github_token_env": token_name,
                         "github_token_present": token_present,
+                        "preflight_gate_mode": repo.healer_test_gate_mode,
+                        "preflight_reports": [
+                            {
+                                "language": report.language,
+                                "execution_root": report.execution_root,
+                                "status": report.status,
+                                "failure_class": report.failure_class,
+                                "summary": report.summary,
+                                "checked_at": report.checked_at,
+                            }
+                            for report in reports
+                        ],
                         "skill_contracts_ok": skill_contracts["contracts_ok"],
                         "skill_contracts": skill_contracts,
                         "circuit_breaker_open": breaker.open,

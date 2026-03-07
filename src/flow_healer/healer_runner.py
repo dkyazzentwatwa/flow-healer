@@ -735,13 +735,21 @@ def _run_tests_in_docker(
         "-c",
         bash_script,
     ]
-    proc = subprocess.run(
-        docker_cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=max(60, timeout_seconds),
-    )
+    try:
+        proc = subprocess.run(
+            docker_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(60, timeout_seconds),
+        )
+    except FileNotFoundError:
+        return {
+            "exit_code": 127,
+            "output_tail": "(docker gate unavailable: command not found: docker)",
+            "gate_status": "failed",
+            "gate_reason": "tool_missing",
+        }
     status = "passed" if int(proc.returncode) == 0 else "failed"
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     return {

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from flow_healer.healer_loop import AutonomousHealerLoop, _collect_targeted_tests, _FAILURE_CLASS_STRATEGY
+from flow_healer.healer_preflight import PreflightReport
 from flow_healer.healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
 from flow_healer.store import SQLiteStore
 
@@ -52,6 +53,7 @@ def _make_loop(store, **overrides):
     loop = AutonomousHealerLoop.__new__(AutonomousHealerLoop)
     loop.settings = settings
     loop.store = store
+    loop.repo_path = Path(settings.healer_repo_path)
     loop.tracker = MagicMock()
     loop.tracker.viewer_login.return_value = "healer-service"
     loop.tracker.repo_slug = "owner/repo"
@@ -61,12 +63,29 @@ def _make_loop(store, **overrides):
     loop.dispatcher.max_active_issues = overrides.get("max_active_issues", 1)
     loop.scanner = MagicMock()
     loop.reconciler = MagicMock()
+    loop.memory = MagicMock()
+    loop.verifier = MagicMock()
+    loop.reviewer = MagicMock()
+    loop.workspace_manager = MagicMock()
     loop.runner = MagicMock()
     loop.runner.resolve_execution.return_value = SimpleNamespace(
         language_effective="python",
         execution_root="",
     )
     loop.runner.validate_workspace.return_value = {"failed_tests": 0}
+    loop.preflight = MagicMock()
+    loop.preflight.refresh_all.return_value = []
+    loop.preflight.ensure_language_ready.return_value = PreflightReport(
+        language="python",
+        execution_root="e2e-smoke/python",
+        gate_mode="docker_only",
+        status="ready",
+        failure_class="",
+        summary="ready",
+        output_tail="",
+        checked_at="2026-03-06 20:00:00",
+        test_summary={"failed_tests": 0},
+    )
     loop._last_scan_started_at = overrides.get("_last_scan_started_at", 0.0)
     loop.connector = overrides.get("connector", _HealthyConnector())
     return loop
@@ -344,6 +363,57 @@ def test_process_claimed_issue_archives_closed_remote_issue(tmp_path):
     assert issue["state"] == "archived"
     assert issue["pr_state"] == "closed"
     assert issue["lease_owner"] in ("", None)
+
+
+def test_process_claimed_issue_requeues_when_language_preflight_fails(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5041",
+        repo="owner/repo",
+        title="Node sandbox issue",
+        body="Validation: cd e2e-smoke/node && npm test -- --passWithNoTests",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    (tmp_path / "e2e-smoke" / "node").mkdir(parents=True)
+    loop.repo_path = tmp_path
+    loop.tracker.get_issue.return_value = {"issue_id": "5041", "state": "open", "labels": ["healer:ready"]}
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.resolve_execution.return_value = SimpleNamespace(
+        language_effective="node",
+        language_detected="node",
+        execution_root="e2e-smoke/node",
+    )
+    loop.preflight.ensure_language_ready.return_value = PreflightReport(
+        language="node",
+        execution_root="e2e-smoke/node",
+        gate_mode="docker_only",
+        status="failed",
+        failure_class="validation_failed",
+        summary="Preflight validation failed for node in e2e-smoke/node.",
+        output_tail="npm install exploded",
+        checked_at="2026-03-06 20:00:00",
+        test_summary={"failed_tests": 1, "docker_full_status": "failed"},
+    )
+    loop.workspace_manager = MagicMock()
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("5041")
+    attempts = store.list_healer_attempts(issue_id="5041")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "preflight_failed"
+    assert attempts[0]["failure_class"] == "preflight_failed"
+    assert attempts[0]["test_summary"]["preflight_status"] == "failed"
+    loop.runner.run_attempt.assert_not_called()
+    loop.workspace_manager.ensure_workspace.assert_not_called()
 
 
 def test_claim_is_actionable_is_case_insensitive_for_labels(tmp_path):

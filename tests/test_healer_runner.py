@@ -141,6 +141,25 @@ def test_run_tests_in_docker_uses_posix_shell(monkeypatch, tmp_path):
     assert summary["gate_status"] == "passed"
 
 
+def test_run_tests_in_docker_reports_missing_docker(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_in_docker(
+        tmp_path,
+        ["go", "test", "./..."],
+        30,
+        strategy=get_strategy("go"),
+        local_gate_policy="auto",
+    )
+
+    assert summary["gate_status"] == "failed"
+    assert summary["gate_reason"] == "tool_missing"
+    assert summary["exit_code"] == 127
+
+
 def test_run_test_gates_runs_from_resolved_execution_root(monkeypatch, tmp_path):
     sandbox = tmp_path / "e2e-smoke" / "node"
     sandbox.mkdir(parents=True)

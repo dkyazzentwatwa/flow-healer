@@ -62,7 +62,7 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
     ),
     "ruby": LanguageStrategy(
         docker_image="ruby:3.2-slim",
-        docker_install_cmd="bundle install -j4 --quiet",
+        docker_install_cmd="gem install bundler && bundle install -j4 --quiet",
         docker_test_cmd=["bundle", "exec", "rspec"],
         local_test_cmd=["bundle", "exec", "rspec"],
         supports_targeted_paths=True,
