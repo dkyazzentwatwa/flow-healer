@@ -117,6 +117,26 @@ def test_get_issue_returns_state_and_labels(monkeypatch):
     assert issue["labels"] == ["healer:ready", "kind:scan"]
 
 
+def test_issue_has_label_matches_case_insensitive(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123"
+        assert method == "GET"
+        return {
+            "number": 123,
+            "state": "open",
+            "title": "Case test",
+            "body": "details",
+            "labels": [{"name": "Healer:Ready"}, {"name": "healer:PR-APPROVED"}],
+        }
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    assert tracker.issue_has_label(issue_id="123", label="healer:ready")
+    assert tracker.issue_has_label(issue_id="123", label="HEALER:PR-APPROVED")
+
+
 def test_get_issue_returns_none_for_missing_issue(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

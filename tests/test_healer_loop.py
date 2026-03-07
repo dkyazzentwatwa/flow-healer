@@ -286,6 +286,30 @@ def test_process_claimed_issue_archives_closed_remote_issue(tmp_path):
     assert issue["lease_owner"] in ("", None)
 
 
+def test_claim_is_actionable_is_case_insensitive_for_labels(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "504",
+        "state": "open",
+        "labels": ["Healer:READY"],
+    }
+
+    issue = HealerIssue(
+        issue_id="504",
+        repo="owner/repo",
+        title="Case-sensitive label issue",
+        body="",
+        author="alice",
+        labels=["Healer:READY"],
+        priority=5,
+        html_url="https://example.test/issues/504",
+    )
+
+    assert loop._claim_is_actionable(issue) is True
+
+
 def test_resume_approved_pending_pr_requeues_issue(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
