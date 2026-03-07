@@ -19,6 +19,13 @@ _EXPLICIT_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html))"
 )
+_NAMED_OUTPUT_TARGET_RE = re.compile(r"\bNode\.?JS\b", re.IGNORECASE)
+
+
+_NAMED_OUTPUT_TARGETS: dict[str, str] = {
+    "node.js": "src/flow_healer/healer_task_spec.py",
+    "node": "src/flow_healer/healer_task_spec.py",
+}
 _CODE_HINT_RE = re.compile(r"\b(build|feature|implement|fix|bug|app|todo app|api|service|refactor|code)\b", re.IGNORECASE)
 _RESEARCH_HINT_RE = re.compile(r"\b(research|investigate|analyze|compare|survey|look up|best ways|best practices)\b", re.IGNORECASE)
 _DOC_HINT_RE = re.compile(r"\b(plan|spec|doc|docs|readme|guide|proposal|notes|write up|document)\b", re.IGNORECASE)
@@ -104,7 +111,7 @@ def _explicit_output_targets(issue_text: str) -> list[str]:
         if line.startswith("#"):
             current_heading = line
         for match in _EXPLICIT_PATH_RE.finditer(line):
-            candidate = match.group(1).strip().lstrip("./")
+            candidate = _normalize_named_target(match.group(1).strip().lstrip("./"))
             if not candidate:
                 continue
             if candidate not in scored:
@@ -122,6 +129,15 @@ def _score_path_context(*, line: str, heading: str) -> int:
     if _SCOPE_CONTEXT_RE.search(line) or _SCOPE_CONTEXT_RE.search(heading):
         score -= 1
     return score
+
+
+def _normalize_named_target(candidate: str) -> str:
+    lowered = candidate.strip().lower()
+    if lowered in _NAMED_OUTPUT_TARGETS:
+        return _NAMED_OUTPUT_TARGETS[lowered]
+    if _NAMED_OUTPUT_TARGET_RE.fullmatch(candidate or ""):
+        return _NAMED_OUTPUT_TARGETS["node.js"]
+    return candidate
 
 
 def _treat_markdown_targets_as_input_hints(*, issue_text: str, output_targets: tuple[str, ...]) -> bool:
