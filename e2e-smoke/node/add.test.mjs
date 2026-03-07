@@ -1,8 +1,8 @@
-import test from "node:test";
-import assert from "node:assert/strict";
+import assert from 'node:assert/strict';
+import test from 'node:test';
 
-import { add } from "./add.mjs";
+import { add } from './add.mjs';
 
-test("add sums two numbers", () => {
+test('add returns the sum of two numbers', () => {
   assert.equal(add(2, 3), 5);
 });
