@@ -25,16 +25,18 @@ _DOC_HINT_RE = re.compile(r"\b(plan|spec|doc|docs|readme|guide|proposal|notes|wr
 _EDIT_HINT_RE = re.compile(r"\b(edit|revise|update|rewrite|expand|tighten|clarify)\b", re.IGNORECASE)
 _OUTPUT_CONTEXT_RE = re.compile(r"\b(output|deliverable|required output|required outputs|create|write|generate|report)\b", re.IGNORECASE)
 _SCOPE_CONTEXT_RE = re.compile(r"\b(scope|review|analyze|inspect|input|source files?)\b", re.IGNORECASE)
+_TASK_KIND_RE = re.compile(r"^\s*[-*]?\s*task\s*kind:\s*([a-zA-Z]+)\s*$")
 
 
 def compile_task_spec(*, issue_title: str, issue_body: str) -> HealerTaskSpec:
     issue_text = "\n".join(part for part in [issue_title.strip(), issue_body.strip()] if part).strip()
     output_targets = tuple(_explicit_output_targets(issue_text))
+    task_kind_hint = _extract_task_kind_hint(issue_text=issue_text)
     input_context_paths: tuple[str, ...] = ()
     if _treat_markdown_targets_as_input_hints(issue_text=issue_text, output_targets=output_targets):
         input_context_paths = tuple(path for path in output_targets if _is_artifact_path(path))
         output_targets = ()
-    task_kind = _classify_task_kind(issue_text=issue_text, output_targets=output_targets)
+    task_kind = task_kind_hint or _classify_task_kind(issue_text=issue_text, output_targets=output_targets)
     inferred_targets = output_targets or _default_targets(issue_title=issue_title, task_kind=task_kind)
     tool_policy = "repo_plus_web" if task_kind == "research" else "repo_only"
     validation_profile = _validation_profile(task_kind=task_kind, output_targets=inferred_targets)
@@ -77,6 +79,17 @@ def _classify_task_kind(*, issue_text: str, output_targets: tuple[str, ...]) -> 
     if _EDIT_HINT_RE.search(lowered):
         return "edit"
     return "fix"
+
+
+def _extract_task_kind_hint(*, issue_text: str) -> str | None:
+    for raw_line in issue_text.splitlines():
+        match = _TASK_KIND_RE.search(raw_line.strip())
+        if not match:
+            continue
+        candidate = match.group(1).lower()
+        if candidate in {"edit", "fix", "build", "research", "docs"}:
+            return candidate
+    return None
 
 
 def _default_targets(*, issue_title: str, task_kind: str) -> tuple[str, ...]:
