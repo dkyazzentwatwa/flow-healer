@@ -384,7 +384,7 @@ class AutonomousHealerLoop:
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
                 continue
-            if not self.tracker.issue_has_label(
+            if not self._issue_has_label(
                 issue_id=issue_id,
                 label=self.settings.healer_pr_required_label,
             ):
@@ -604,7 +604,7 @@ class AutonomousHealerLoop:
 
             if (
                 self.settings.healer_pr_actions_require_approval
-                and not self.tracker.issue_has_label(
+                and not self._issue_has_label(
                     issue_id=issue.issue_id,
                     label=self.settings.healer_pr_required_label,
                 )
@@ -771,7 +771,7 @@ class AutonomousHealerLoop:
 
         remote_state = str(snapshot.get("state") or "").strip().lower()
         remote_labels = {
-            str(label).strip()
+            str(label).strip().lower()
             for label in (snapshot.get("labels") or [])
             if str(label).strip()
         }
@@ -787,8 +787,14 @@ class AutonomousHealerLoop:
             logger.info("Skipping issue #%s because GitHub issue is %s.", issue.issue_id, remote_state)
             return False
 
-        required_labels = [label for label in self.settings.healer_issue_required_labels if label.strip()]
-        missing_labels = [label for label in required_labels if label not in remote_labels]
+        required_labels = [
+            str(label).strip()
+            for label in self.settings.healer_issue_required_labels
+            if str(label).strip()
+        ]
+        missing_labels = [
+            label for label in required_labels if label.lower() not in remote_labels
+        ]
         if missing_labels:
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -804,6 +810,30 @@ class AutonomousHealerLoop:
             )
             return False
         return True
+
+    def _issue_has_label(self, *, issue_id: str, label: str) -> bool:
+        requested_label = (label or "").strip()
+        if not requested_label:
+            return True
+        target = requested_label.lower()
+        try:
+            snapshot = self.tracker.get_issue(issue_id=issue_id)
+            if isinstance(snapshot, dict):
+                labels = {
+                    str(entry or "").strip().lower()
+                    for entry in (snapshot.get("labels") or [])
+                    if str(entry or "").strip()
+                }
+                if target in labels:
+                    return True
+        except Exception as exc:
+            logger.warning(
+                "Failed to check approval label on issue #%s from issue endpoint; using fallback: %s",
+                issue_id,
+                exc,
+            )
+
+        return self.tracker.issue_has_label(issue_id=issue_id, label=requested_label)
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
