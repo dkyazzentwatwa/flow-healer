@@ -34,3 +34,7 @@ test('add handles negative numbers', () => {
 test('add handles two negative numbers', () => {
   assert.equal(add(-2, -3), -5);
 });
+
+test('add handles larger integers', () => {
+  assert.equal(add(123456789, 987654321), 1111111110);
+});
