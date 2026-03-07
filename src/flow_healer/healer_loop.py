@@ -43,6 +43,18 @@ _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "patch_apply_failed",
     "no_code_diff",
 }
+_STUCK_PR_STATES = {"blocked", "has_failure", "behind"}
+
+
+def _minutes_since(timestamp_str: str) -> float:
+    """Return minutes elapsed since an ISO-8601 / SQLite CURRENT_TIMESTAMP string."""
+    try:
+        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return (datetime.now(tz=UTC) - dt).total_seconds() / 60.0
+    except (ValueError, TypeError):
+        return 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -308,12 +320,15 @@ class AutonomousHealerLoop:
             current_state = str(row.get("state") or "").strip().lower()
             current_pr_state = str(row.get("pr_state") or "").strip().lower()
             current_pr_number = int(row.get("pr_number") or 0)
-            if current_state == "blocked" and current_pr_state != "conflict":
-                continue
             pr_number = int(row.get("pr_number") or 0)
             pr_state = ""
+            mergeable_state = ""
             if pr_number > 0:
-                pr_state = self.tracker.get_pr_state(pr_number=pr_number).strip().lower()
+                pr_details = self.tracker.get_pr_details(pr_number=pr_number)
+                if pr_details is None:
+                    continue
+                pr_state = pr_details.state
+                mergeable_state = pr_details.mergeable_state
             else:
                 discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
                 if discovered_pr is None:
@@ -340,6 +355,24 @@ class AutonomousHealerLoop:
                     continue
                 self._requeue_closed_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
                 continue
+
+            # Stuck-PR detection: re-queue issues whose PR has been non-mergeable too long
+            if mergeable_state in _STUCK_PR_STATES:
+                stuck_since = str(row.get("stuck_since") or "").strip()
+                timeout_minutes = getattr(self.settings, "healer_stuck_pr_timeout_minutes", 60)
+                if not stuck_since:
+                    self.store.mark_pr_stuck(issue_id=issue_id, pr_number=pr_number)
+                elif _minutes_since(stuck_since) >= timeout_minutes:
+                    self._close_and_requeue_stuck_pr(
+                        issue_id=issue_id,
+                        pr_number=pr_number,
+                        mergeable_state=mergeable_state,
+                    )
+                continue
+
+            # If mergeable_state recovered, clear stuck_since
+            if str(row.get("stuck_since") or "").strip():
+                self.store.clear_pr_stuck(issue_id=issue_id)
 
             if pr_state != "merged":
                 if pr_state and (
@@ -441,6 +474,33 @@ class AutonomousHealerLoop:
                 [
                     "Status: `queued`",
                     f"Previous PR: `#{pr_number}`",
+                ],
+            ),
+        )
+
+    def _close_and_requeue_stuck_pr(self, *, issue_id: str, pr_number: int, mergeable_state: str) -> None:
+        reason = f"PR #{pr_number} has been stuck in `{mergeable_state}` state past the timeout."
+        self.tracker.close_pr(
+            pr_number=pr_number,
+            comment=f"Closing this PR — it has been stuck (`{mergeable_state}`) for too long. Flow Healer will open a fresh attempt.",
+        )
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="queued",
+            pr_number=0,
+            pr_state="",
+            feedback_context=reason[:500],
+            clear_lease=True,
+        )
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Stuck PR closed, retrying 🔁",
+                f"PR #{pr_number} was non-mergeable (`{mergeable_state}`) past the configured timeout, so I closed it and queued a fresh attempt.",
+                [
+                    "Status: `queued`",
+                    f"Closed PR: `#{pr_number}`",
+                    f"Reason: `{mergeable_state}`",
                 ],
             ),
         )

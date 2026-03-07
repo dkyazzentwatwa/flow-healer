@@ -104,6 +104,7 @@ class RelaySettings:
     healer_scan_severity_threshold: str = "medium"
     healer_scan_max_issues_per_run: int = 5
     healer_scan_default_labels: list[str] = field(default_factory=lambda: ["kind:scan"])
+    healer_stuck_pr_timeout_minutes: int = 60
 
 
 @dataclass(slots=True)
@@ -190,6 +191,7 @@ class AppConfig:
                     healer_scan_severity_threshold=str(item.get("scan_severity_threshold") or "medium"),
                     healer_scan_max_issues_per_run=int(item.get("scan_max_issues_per_run") or 5),
                     healer_scan_default_labels=_list_of_str(item.get("scan_default_labels"), ["kind:scan"]),
+                    healer_stuck_pr_timeout_minutes=int(item.get("stuck_pr_timeout_minutes") or 60),
                 )
             )
         control_raw = raw.get("control") if isinstance(raw.get("control"), dict) else {}

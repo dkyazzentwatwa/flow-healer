@@ -354,6 +354,18 @@ class GitHubHealerTracker:
         )
         return bool(payload.get("merged")) if isinstance(payload, dict) else False
 
+    def close_pr(self, *, pr_number: int, comment: str = "") -> bool:
+        if not self.enabled or pr_number <= 0:
+            return False
+        if comment.strip():
+            self.add_pr_comment(pr_number=pr_number, body=comment)
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/pulls/{int(pr_number)}",
+            method="PATCH",
+            body={"state": "closed"},
+        )
+        return isinstance(payload, dict) and str(payload.get("state") or "") == "closed"
+
     def list_pr_comments(self, *, pr_number: int) -> list[dict[str, Any]]:
         if not self.enabled or pr_number <= 0:
             return []

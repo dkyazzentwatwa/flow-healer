@@ -211,6 +211,7 @@ class SQLiteStore:
                 ("output_targets_json", "ALTER TABLE healer_issues ADD COLUMN output_targets_json TEXT NOT NULL DEFAULT '[]'"),
                 ("tool_policy", "ALTER TABLE healer_issues ADD COLUMN tool_policy TEXT NOT NULL DEFAULT ''"),
                 ("validation_profile", "ALTER TABLE healer_issues ADD COLUMN validation_profile TEXT NOT NULL DEFAULT ''"),
+                ("stuck_since", "ALTER TABLE healer_issues ADD COLUMN stuck_since TEXT DEFAULT NULL"),
             ]
             for column, statement in migrations:
                 if column not in existing_cols:
@@ -481,6 +482,26 @@ class SQLiteStore:
                 updates.append("lease_expires_at = NULL")
             params.append(issue_id)
             cursor = conn.execute(f"UPDATE healer_issues SET {', '.join(updates)} WHERE issue_id = ?", params)
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_pr_stuck(self, *, issue_id: str, pr_number: int) -> bool:
+        conn = self._connect()
+        with self._lock:
+            cursor = conn.execute(
+                "UPDATE healer_issues SET stuck_since = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE issue_id = ? AND stuck_since IS NULL",
+                (issue_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_pr_stuck(self, *, issue_id: str) -> bool:
+        conn = self._connect()
+        with self._lock:
+            cursor = conn.execute(
+                "UPDATE healer_issues SET stuck_since = NULL, updated_at = CURRENT_TIMESTAMP WHERE issue_id = ?",
+                (issue_id,),
+            )
             conn.commit()
             return cursor.rowcount > 0
 

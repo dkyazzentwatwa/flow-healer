@@ -47,6 +47,7 @@ def _make_loop(store, **overrides):
         healer_circuit_breaker_window=overrides.get("healer_circuit_breaker_window", 4),
         healer_circuit_breaker_failure_rate=overrides.get("healer_circuit_breaker_failure_rate", 0.5),
         healer_circuit_breaker_cooldown_seconds=overrides.get("healer_circuit_breaker_cooldown_seconds", 900),
+        healer_stuck_pr_timeout_minutes=overrides.get("healer_stuck_pr_timeout_minutes", 60),
     )
     loop = AutonomousHealerLoop.__new__(AutonomousHealerLoop)
     loop.settings = settings
@@ -510,7 +511,9 @@ def test_reconcile_pr_outcomes_blocks_conflicted_pr_once(tmp_path):
     store.set_healer_issue_state(issue_id="6015", state="pr_open", pr_number=132, pr_state="open")
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "conflict"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=132, state="conflict", html_url="", mergeable_state="dirty", author="bot"
+    )
 
     resolved = loop._reconcile_pr_outcomes()
 
@@ -540,7 +543,9 @@ def test_reconcile_pr_outcomes_does_not_duplicate_comment_for_blocked_conflict(t
     store.set_healer_issue_state(issue_id="6016", state="blocked", pr_number=133, pr_state="conflict")
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "conflict"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=133, state="conflict", html_url="", mergeable_state="dirty", author="bot"
+    )
 
     resolved = loop._reconcile_pr_outcomes()
 
@@ -567,7 +572,9 @@ def test_reconcile_pr_outcomes_requeues_closed_conflicted_pr(tmp_path):
     store.set_healer_issue_state(issue_id="6017", state="pr_open", pr_number=134, pr_state="conflict")
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "closed"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=134, state="closed", html_url="", mergeable_state="", author="bot"
+    )
     loop.tracker.get_issue.return_value = {"issue_id": "6017", "state": "open", "labels": ["healer:ready"]}
 
     resolved = loop._reconcile_pr_outcomes()
@@ -596,7 +603,9 @@ def test_reconcile_pr_outcomes_archives_closed_conflicted_pr_for_closed_issue(tm
     store.set_healer_issue_state(issue_id="60171", state="pr_open", pr_number=138, pr_state="conflict")
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "closed"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=138, state="closed", html_url="", mergeable_state="", author="bot"
+    )
     loop.tracker.get_issue.return_value = {"issue_id": "60171", "state": "closed", "labels": ["healer:ready"]}
 
     resolved = loop._reconcile_pr_outcomes()
@@ -632,7 +641,9 @@ def test_reconcile_pr_outcomes_restores_pr_open_after_conflict_clears(tmp_path):
     )
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "open"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=135, state="open", html_url="", mergeable_state="clean", author="bot"
+    )
 
     resolved = loop._reconcile_pr_outcomes()
 
@@ -662,7 +673,9 @@ def test_reconcile_pr_outcomes_closes_merged_issue(tmp_path):
     store.set_healer_issue_state(issue_id="602", state="pr_open", pr_number=126, pr_state="open")
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "merged"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=126, state="merged", html_url="", mergeable_state="", author="bot"
+    )
     loop.tracker.close_issue.return_value = True
 
     resolved = loop._reconcile_pr_outcomes()
@@ -764,12 +777,11 @@ def test_conflicted_issue_is_ignored_by_auto_pr_actions_after_reconcile(tmp_path
     store.set_healer_issue_state(issue_id="6032", state="pr_open", pr_number=137, pr_state="open")
 
     loop = _make_loop(store)
-    loop.tracker.get_pr_state.return_value = "conflict"
     loop.tracker.get_pr_details.return_value = PullRequestDetails(
         number=137,
-        state="open",
+        state="conflict",
         html_url="https://github.com/owner/repo/pull/137",
-        mergeable_state="clean",
+        mergeable_state="dirty",
         author="healer-service",
     )
 
@@ -784,6 +796,104 @@ def test_conflicted_issue_is_ignored_by_auto_pr_actions_after_reconcile(tmp_path
     assert merged == 0
     loop.tracker.approve_pr.assert_not_called()
     loop.tracker.merge_pr.assert_not_called()
+
+
+def test_reconcile_pr_outcomes_marks_stuck_pr_on_first_detection(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="7001",
+        repo="owner/repo",
+        title="Issue 7001",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="7001", state="pr_open", pr_number=200, pr_state="open")
+
+    loop = _make_loop(store, healer_stuck_pr_timeout_minutes=60)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=200, state="open", html_url="", mergeable_state="blocked", author="bot"
+    )
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("7001")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue.get("stuck_since") is not None
+    loop.tracker.close_pr.assert_not_called()
+    loop.tracker.add_issue_comment.assert_not_called()
+
+
+def test_reconcile_pr_outcomes_does_not_reset_stuck_since_on_subsequent_ticks(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="7002",
+        repo="owner/repo",
+        title="Issue 7002",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="7002", state="pr_open", pr_number=201, pr_state="open")
+    # Simulate first detection already happened
+    store.mark_pr_stuck(issue_id="7002", pr_number=201)
+    first_stuck_since = (store.get_healer_issue("7002") or {}).get("stuck_since")
+
+    loop = _make_loop(store, healer_stuck_pr_timeout_minutes=60)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=201, state="open", html_url="", mergeable_state="has_failure", author="bot"
+    )
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("7002")
+    assert issue is not None
+    assert issue.get("stuck_since") == first_stuck_since
+    loop.tracker.close_pr.assert_not_called()
+
+
+def test_reconcile_pr_outcomes_closes_and_requeues_stuck_pr_after_timeout(tmp_path):
+    import datetime as dt
+
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="7003",
+        repo="owner/repo",
+        title="Issue 7003",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="7003", state="pr_open", pr_number=202, pr_state="open")
+    # Set stuck_since to 2 hours ago
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = store._connect()
+    conn.execute("UPDATE healer_issues SET stuck_since = ? WHERE issue_id = '7003'", (past,))
+    conn.commit()
+
+    loop = _make_loop(store, healer_stuck_pr_timeout_minutes=60)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=202, state="open", html_url="", mergeable_state="behind", author="bot"
+    )
+    loop.tracker.close_pr.return_value = True
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("7003")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["pr_number"] == 0
+    assert issue["pr_state"] == ""
+    assert "behind" in str(issue.get("feedback_context") or "")
+    loop.tracker.close_pr.assert_called_once_with(pr_number=202, comment=loop.tracker.close_pr.call_args.kwargs["comment"])
+    loop.tracker.add_issue_comment.assert_called_once()
 
 
 def test_maybe_run_scan_respects_interval(tmp_path):
