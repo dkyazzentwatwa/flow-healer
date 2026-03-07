@@ -10,7 +10,7 @@ function json(body, init) {
 }
 
 export async function POST(_request, { params }) {
-  const { id } = await params;
+  const { id } = await Promise.resolve(params);
   const todo = completeTodo(id);
 
   if (!todo) {

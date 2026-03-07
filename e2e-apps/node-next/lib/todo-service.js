@@ -19,14 +19,12 @@ function cloneTodo(todo) {
   return { ...todo };
 }
 
-function ensureCompletionState(todo) {
-  if (!todo.completed) {
-    todo.completed = true;
-  }
-
-  if (!todo.completedAt) {
-    todo.completedAt = new Date().toISOString();
-  }
+function buildCompletedTodo(todo) {
+  return {
+    ...todo,
+    completed: true,
+    completedAt: todo.completedAt ?? new Date().toISOString(),
+  };
 }
 
 export function listTodos() {
@@ -34,15 +32,16 @@ export function listTodos() {
 }
 
 export function completeTodo(id) {
-  const todo = todos.find((entry) => entry.id === id);
+  const todoIndex = todos.findIndex((entry) => entry.id === id);
 
-  if (!todo) {
+  if (todoIndex === -1) {
     return null;
   }
 
-  ensureCompletionState(todo);
+  const completedTodo = buildCompletedTodo(todos[todoIndex]);
+  todos[todoIndex] = completedTodo;
 
-  return cloneTodo(todo);
+  return cloneTodo(completedTodo);
 }
 
 export function resetTodosForTests(seed = defaultTodos) {
