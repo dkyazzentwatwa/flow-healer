@@ -9,4 +9,14 @@ class AddTest {
     void addReturnsSum() {
         assertEquals(5, Add.add(2, 3));
     }
+
+    @Test
+    void addHandlesNegativeNumbers() {
+        assertEquals(-1, Add.add(2, -3));
+    }
+
+    @Test
+    void addKeepsZeroAsIdentity() {
+        assertEquals(7, Add.add(7, 0));
+    }
 }
