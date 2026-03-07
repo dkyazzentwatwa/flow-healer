@@ -242,7 +242,35 @@ def test_run_attempt_includes_task_contract_in_prompt(tmp_path):
     prompt = connector.turns[0][1]
     assert "Task kind: research" in prompt
     assert "Output targets: docs/research-note.md" in prompt
+    assert "Input context: (none)" in prompt
     assert "Use web browsing when needed" in prompt
+
+
+def test_run_attempt_marks_input_specs_as_context_in_prompt(tmp_path):
+    connector = _RetryConnector(["not a patch", "still not a patch"])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="126",
+        issue_title="Implement skills-suggestions.md",
+        issue_body="Use skills-suggestions.md as input spec only and do not make doc-only edits.",
+        task_spec=compile_task_spec(
+            issue_title="Implement skills-suggestions.md",
+            issue_body="Use skills-suggestions.md as input spec only and do not make doc-only edits.",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    prompt = connector.turns[0][1]
+    assert "Input context: skills-suggestions.md" in prompt
+    assert "Treat these files as input-only context, not output targets: skills-suggestions.md." in prompt
 
 
 def test_run_attempt_accepts_direct_workspace_edits_without_diff(monkeypatch, tmp_path):
