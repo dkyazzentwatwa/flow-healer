@@ -19,6 +19,7 @@ _EXPLICIT_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html))"
 )
+_PATH_DIRECTIVE_RE = re.compile(r"\bpath:\s*(?P<path>[^\s`'\"(){}<>,;:]+)", re.IGNORECASE)
 _CODE_HINT_RE = re.compile(r"\b(build|feature|implement|fix|bug|app|todo app|api|service|refactor|code)\b", re.IGNORECASE)
 _RESEARCH_HINT_RE = re.compile(r"\b(research|investigate|analyze|compare|survey|look up|best ways|best practices)\b", re.IGNORECASE)
 _DOC_HINT_RE = re.compile(r"\b(plan|spec|doc|docs|readme|guide|proposal|notes|write up|document)\b", re.IGNORECASE)
@@ -98,17 +99,30 @@ def _validation_profile(*, task_kind: str, output_targets: tuple[str, ...]) -> s
 def _explicit_output_targets(issue_text: str) -> list[str]:
     scored: dict[str, int] = {}
     order: list[str] = []
+    seen: set[str] = set()
     current_heading = ""
     for raw_line in issue_text.splitlines():
         line = raw_line.strip()
         if line.startswith("#"):
             current_heading = line
+        for match in _PATH_DIRECTIVE_RE.finditer(line):
+            candidate = match.group("path").strip().lstrip("./")
+            if not candidate:
+                continue
+            key = candidate.lower()
+            if key not in seen:
+                order.append(candidate)
+                seen.add(key)
+                scored[candidate] = 0
+            scored[candidate] += _score_path_context(line=line, heading=current_heading)
         for match in _EXPLICIT_PATH_RE.finditer(line):
             candidate = match.group(1).strip().lstrip("./")
             if not candidate:
                 continue
-            if candidate not in scored:
+            key = candidate.lower()
+            if key not in seen:
                 order.append(candidate)
+                seen.add(key)
                 scored[candidate] = 0
             scored[candidate] += _score_path_context(line=line, heading=current_heading)
     prioritized = [path for path in order if scored.get(path, 0) >= 2]
