@@ -243,6 +243,7 @@ class AutonomousHealerLoop:
                 self.store.set_healer_issue_state(
                     issue_id=issue_id,
                     state="queued",
+                    backoff_until="",
                     last_issue_comment_id=max_issue_comment_id,
                     last_review_id=max_review_id,
                     last_review_comment_id=max_review_comment_id,
@@ -366,6 +367,7 @@ class AutonomousHealerLoop:
                     self.store.set_healer_issue_state(
                         issue_id=issue.issue_id,
                         state="queued",
+                        backoff_until="",
                         pr_state="",
                         last_failure_class="",
                         last_failure_reason="",
@@ -392,6 +394,7 @@ class AutonomousHealerLoop:
             self.store.set_healer_issue_state(
                 issue_id=issue_id,
                 state="queued",
+                backoff_until="",
                 clear_lease=True,
             )
             self._post_issue_status(
