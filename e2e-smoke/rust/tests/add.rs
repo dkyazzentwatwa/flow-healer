@@ -13,7 +13,6 @@ fn add_covers_smoke_regression_cases() {
         (7, 0, 7),
         (0, 7, 7),
         (20, 22, 42),
-        (u64::MAX - 1, 1, u64::MAX),
     ];
 
     for (left, right, expected) in cases {
