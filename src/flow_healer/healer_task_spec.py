@@ -47,6 +47,7 @@ _COMMAND_LINE_RE = re.compile(
     r"[^\n]*",
     re.IGNORECASE,
 )
+_URL_RE = re.compile(r"\bhttps?://[^\s)>`]+", re.IGNORECASE)
 
 _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bnpm\s+test\b", re.IGNORECASE), "node"),
@@ -191,7 +192,7 @@ def _explicit_paths(issue_text: str) -> list[str]:
     seen: set[str] = set()
     current_heading = ""
     for raw_line in issue_text.splitlines():
-        line = raw_line.strip()
+        line = _strip_external_references(raw_line.strip())
         if line.startswith("#"):
             current_heading = line
         for match in _PATH_DIRECTIVE_RE.finditer(line):
@@ -222,7 +223,7 @@ def _explicit_directories(issue_text: str) -> list[str]:
     directories: list[str] = []
     seen: set[str] = set()
     for raw_line in issue_text.splitlines():
-        line = raw_line.strip()
+        line = _strip_external_references(raw_line.strip())
         for match in _DIRECTORY_RE.finditer(line):
             candidate = match.group(1).strip().lstrip("./").rstrip("/")
             if not candidate or "://" in candidate or "." in Path(candidate).name:
@@ -419,6 +420,10 @@ def _is_code_path(path: str) -> bool:
         ".c", ".cpp", ".h", ".hpp",
         ".swift", ".scala",
     }
+
+
+def _strip_external_references(text: str) -> str:
+    return _URL_RE.sub(" ", text or "")
 
 
 def _slugify(value: str) -> str:

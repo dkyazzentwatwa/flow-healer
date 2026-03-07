@@ -17,8 +17,8 @@ def test_all_supported_language_sandboxes_exist() -> None:
         ],
         "node": [
             "package.json",
-            "add.mjs",
-            "add.test.mjs",
+            "src/add.js",
+            "test/add.test.js",
         ],
         "go": [
             "go.mod",

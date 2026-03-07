@@ -20,6 +20,7 @@ from .healer_task_spec import HealerTaskSpec, task_spec_to_prompt_block
 logger = logging.getLogger("apple_flow.healer_runner")
 _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
 _FENCE_PATH_RE = re.compile(r"(?:^|\s)path=(?P<path>[^\s`]+)")
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 _NON_RETRYABLE_FAILURES = {"connector_unavailable", "connector_runtime_error"}
 _INPUT_CONTEXT_MAX_CHARS = 12_000
 
@@ -297,6 +298,18 @@ class HealerRunner:
             )
 
         if task_spec.validation_profile == "artifact_only":
+            artifact_summary = _validate_artifact_outputs(workspace=workspace, diff_paths=diff_paths)
+            if not artifact_summary["passed"]:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="artifact_validation_failed",
+                    failure_reason=str(artifact_summary.get("summary") or "Artifact validation failed."),
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=artifact_summary,
+                )
             test_summary = {
                 "mode": "skipped_artifact_only",
                 "failed_tests": 0,
@@ -308,6 +321,7 @@ class HealerRunner:
                 "execution_root": resolved_execution.execution_root,
                 "execution_root_source": resolved_execution.execution_root_source,
                 "local_gate_policy": self.local_gate_policy,
+                "artifact_validation": artifact_summary,
             }
         else:
             test_summary = self.validate_workspace(
@@ -782,6 +796,10 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
             "The previous output changed docs/artifacts only. This task requires at least one non-doc code/config file edit."
         )
         tailored_lines.append("Ensure the staged diff includes files outside docs/*.md style artifacts.")
+    if failure_class == "artifact_validation_failed":
+        tailored_lines.append(
+            "The docs/config artifact patch is invalid. Fix the broken relative links or file references and keep the change scoped to artifacts."
+        )
     if failure_class == "patch_apply_failed":
         tailored_lines.append(
             "Regenerate hunks against the current tree and keep paths/hunk headers exact to avoid apply errors."
@@ -907,7 +925,10 @@ def _output_rules(task_spec: HealerTaskSpec) -> str:
 
 def _completion_criteria(task_spec: HealerTaskSpec) -> str:
     if task_spec.validation_profile == "artifact_only":
-        return "### Completion Criteria\nFinish only when the target artifact content is written in the requested files."
+        return (
+            "### Completion Criteria\n"
+            "Finish only when the target artifact content is written in the requested files and relative artifact links remain valid."
+        )
     return (
         "### Completion Criteria\n"
         "Finish only when repo files changed materially, the output format is valid, and the requested validation can pass without extra narrative."
@@ -946,6 +967,69 @@ def _render_input_context_file(*, relative_path: str, workspace: Path) -> str:
     if len(body) > _INPUT_CONTEXT_MAX_CHARS:
         body = body[:_INPUT_CONTEXT_MAX_CHARS].rstrip() + "\n...[truncated]"
     return f"#### {relative_path}\n```text\n{body}\n```"
+
+
+def _validate_artifact_outputs(*, workspace: Path, diff_paths: list[str]) -> dict[str, Any]:
+    checked_files: list[str] = []
+    broken_links: list[dict[str, str]] = []
+    for rel_path in diff_paths:
+        if not _is_markdown_artifact_path(rel_path):
+            continue
+        file_path = workspace / rel_path
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        checked_files.append(rel_path)
+        broken_links.extend(_find_broken_markdown_links(file_path=file_path, rel_path=rel_path))
+    passed = not broken_links
+    summary = "Artifact validation passed." if passed else f"Artifact validation failed with {len(broken_links)} broken relative link(s)."
+    return {
+        "mode": "artifact_validation",
+        "passed": passed,
+        "failed_tests": 0 if passed else 1,
+        "checked_files": checked_files,
+        "broken_links": broken_links,
+        "summary": summary,
+    }
+
+
+def _is_markdown_artifact_path(path: str) -> bool:
+    return Path(path).suffix.lower() in {".md", ".mdx", ".rst", ".txt"}
+
+
+def _find_broken_markdown_links(*, file_path: Path, rel_path: str) -> list[dict[str, str]]:
+    content = file_path.read_text(encoding="utf-8", errors="replace")
+    broken: list[dict[str, str]] = []
+    in_fence = False
+    for line_no, raw_line in enumerate(content.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for match in _MARKDOWN_LINK_RE.finditer(raw_line):
+            target = str(match.group(1) or "").strip()
+            if not target or target.startswith("#") or _is_external_link_target(target):
+                continue
+            target_path = target.split("#", 1)[0].strip()
+            if not target_path:
+                continue
+            resolved = (file_path.parent / target_path).resolve()
+            if resolved.exists():
+                continue
+            broken.append(
+                {
+                    "file": rel_path,
+                    "line": str(line_no),
+                    "target": target,
+                }
+            )
+    return broken
+
+
+def _is_external_link_target(target: str) -> bool:
+    lowered = target.lower()
+    return lowered.startswith(("http://", "https://", "mailto:", "tel:"))
 
 
 def _proposer_retry_budget_for_task(
@@ -1048,11 +1132,11 @@ _LANGUAGE_ARTIFACT_DIRS = {
     "java_gradle": {"build", ".gradle"},
 }
 _LOCKFILE_GROUPS = {
-    "gemfile.lock": {"gemfile", "bundle", "bundler", "dependency", "dependencies", "lockfile"},
-    "package-lock.json": {"package.json", "npm", "dependency", "dependencies", "lockfile"},
-    "pnpm-lock.yaml": {"pnpm", "package.json", "dependency", "dependencies", "lockfile"},
-    "yarn.lock": {"yarn", "package.json", "dependency", "dependencies", "lockfile"},
-    "cargo.lock": {"cargo", "cargo.toml", "crate", "crates", "dependency", "dependencies", "lockfile"},
+    "gemfile.lock": {"gemfile", "dependency", "dependencies", "lockfile"},
+    "package-lock.json": {"package.json", "dependency", "dependencies", "lockfile"},
+    "pnpm-lock.yaml": {"package.json", "dependency", "dependencies", "lockfile"},
+    "yarn.lock": {"package.json", "dependency", "dependencies", "lockfile"},
+    "cargo.lock": {"cargo.toml", "crate", "crates", "dependency", "dependencies", "lockfile"},
 }
 
 

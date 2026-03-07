@@ -27,6 +27,22 @@ def test_compile_task_spec_uses_explicit_file_target_for_edit_issue() -> None:
     assert spec.validation_profile == "artifact_only"
 
 
+def test_compile_task_spec_ignores_urls_when_extracting_artifact_targets() -> None:
+    spec = compile_task_spec(
+        issue_title="README has broken internal links and placeholder GitHub URLs",
+        issue_body=(
+            "## Evidence\n"
+            "- Installation URL still points to https://github.com/yourusername/osint-investigator in README.md\n"
+            "- Support URL still points to https://github.com/yourusername/osint-investigator/issues in README.md\n"
+            "- docs/OSINT-BEGINNER-GUIDE.md exists and should be linked from README.md\n"
+        ),
+    )
+
+    assert "github.c" not in spec.output_targets
+    assert spec.validation_profile == "artifact_only"
+    assert "README.md" in spec.output_targets
+
+
 def test_compile_task_spec_leaves_build_issue_open_for_multi_file_patch() -> None:
     spec = compile_task_spec(
         issue_title="Build a todo app",

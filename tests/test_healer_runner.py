@@ -5,6 +5,7 @@ from pathlib import Path
 from flow_healer.healer_runner import (
     HealerRunner,
     ResolvedExecution,
+    _validate_artifact_outputs,
     _build_docker_test_script,
     _changed_paths,
     _gate_runners_for_mode,
@@ -160,6 +161,45 @@ def test_run_tests_in_docker_reports_missing_docker(monkeypatch, tmp_path):
     assert summary["exit_code"] == 127
 
 
+def test_validate_artifact_outputs_passes_valid_relative_links(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    guide = docs / "guide.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    readme = tmp_path / "README.md"
+    readme.write_text("[Guide](docs/guide.md)\n", encoding="utf-8")
+
+    summary = _validate_artifact_outputs(workspace=tmp_path, diff_paths=["README.md"])
+
+    assert summary["passed"] is True
+    assert summary["failed_tests"] == 0
+    assert summary["broken_links"] == []
+
+
+def test_validate_artifact_outputs_ignores_external_and_code_block_links(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "[Website](https://example.com)\n\n```md\n[Broken](missing.md)\n```\n",
+        encoding="utf-8",
+    )
+
+    summary = _validate_artifact_outputs(workspace=tmp_path, diff_paths=["README.md"])
+
+    assert summary["passed"] is True
+    assert summary["broken_links"] == []
+
+
+def test_validate_artifact_outputs_fails_broken_relative_links(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text("[Guide](docs/missing.md)\n", encoding="utf-8")
+
+    summary = _validate_artifact_outputs(workspace=tmp_path, diff_paths=["README.md"])
+
+    assert summary["passed"] is False
+    assert summary["failed_tests"] == 1
+    assert summary["broken_links"] == [{"file": "README.md", "line": "1", "target": "docs/missing.md"}]
+
+
 def test_run_test_gates_runs_from_resolved_execution_root(monkeypatch, tmp_path):
     sandbox = tmp_path / "e2e-smoke" / "node"
     sandbox.mkdir(parents=True)
@@ -311,6 +351,53 @@ def test_stage_workspace_changes_excludes_ruby_dependency_artifacts(tmp_path):
 
     assert changed is True
     assert _changed_paths(workspace) == ["e2e-smoke/ruby/add.rb"]
+
+
+def test_stage_workspace_changes_excludes_ruby_lockfile_for_validation_command_only_issue(tmp_path):
+    workspace = tmp_path / "repo"
+    ruby_root = workspace / "e2e-smoke" / "ruby"
+    (ruby_root / "spec").mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    _init_git_repo(workspace)
+    (ruby_root / "add.rb").write_text("def add(a, b)\n  a - b\nend\n", encoding="utf-8")
+    (ruby_root / "spec" / "add_spec.rb").write_text("RSpec.describe '#add' do\nend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (ruby_root / "add.rb").write_text("def add(a, b)\n  a + b\nend\n", encoding="utf-8")
+    (ruby_root / "spec" / "add_spec.rb").write_text(
+        "RSpec.describe '#add' do\n"
+        "  it 'adds numbers' do\n"
+        "    expect(add(2, 3)).to eq(5)\n"
+        "  end\n"
+        "end\n",
+        encoding="utf-8",
+    )
+    (ruby_root / "Gemfile.lock").write_text("BUNDLED WITH\n   2.5.23\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Ruby sandbox regression",
+        issue_body=(
+            "Fix the Ruby sandbox behavior in e2e-smoke/ruby.\n"
+            "Validation: cd e2e-smoke/ruby && bundle exec rspec\n"
+        ),
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("e2e-smoke/ruby/add.rb", "e2e-smoke/ruby/spec/add_spec.rb"),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        language="ruby",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == [
+        "e2e-smoke/ruby/add.rb",
+        "e2e-smoke/ruby/spec/add_spec.rb",
+    ]
 
 
 def test_stage_workspace_changes_allows_explicit_lockfile_targets(tmp_path):

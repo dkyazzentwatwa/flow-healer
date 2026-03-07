@@ -725,7 +725,7 @@ def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> 
             "def add(a, b)\n  a + b\nend\n",
             "ruby",
             "e2e-smoke/ruby",
-            ["bundle", "exec", "rspec"],
+            ["bundle", "_2.5.23_", "exec", "rspec"],
         ),
     ],
 )

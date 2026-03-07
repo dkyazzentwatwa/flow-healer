@@ -40,7 +40,9 @@ def test_all_supported_strategies_have_local_test_cmd() -> None:
 
 def test_ruby_strategy_upgrades_bundler_before_bundle_install() -> None:
     strategy = get_strategy("ruby")
-    assert strategy.docker_install_cmd == "gem install bundler && bundle install -j4 --quiet"
+    assert strategy.docker_install_cmd == "gem install bundler -v 2.5.23 && bundle _2.5.23_ install -j4 --quiet"
+    assert strategy.docker_test_cmd == ["bundle", "_2.5.23_", "exec", "rspec"]
+    assert strategy.local_test_cmd == ["bundle", "exec", "rspec"]
 
 
 def test_get_strategy_custom_test_command_enables_pytest_targeting() -> None:

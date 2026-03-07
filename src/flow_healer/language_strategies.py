@@ -4,6 +4,9 @@ import shlex
 from dataclasses import dataclass, field
 
 
+_RUBY_BUNDLER_VERSION = "2.5.23"
+
+
 @dataclass(slots=True, frozen=True)
 class LanguageStrategy:
     docker_image: str
@@ -62,8 +65,11 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
     ),
     "ruby": LanguageStrategy(
         docker_image="ruby:3.2-slim",
-        docker_install_cmd="gem install bundler && bundle install -j4 --quiet",
-        docker_test_cmd=["bundle", "exec", "rspec"],
+        docker_install_cmd=(
+            f"gem install bundler -v {_RUBY_BUNDLER_VERSION} && "
+            f"bundle _{_RUBY_BUNDLER_VERSION}_ install -j4 --quiet"
+        ),
+        docker_test_cmd=["bundle", f"_{_RUBY_BUNDLER_VERSION}_", "exec", "rspec"],
         local_test_cmd=["bundle", "exec", "rspec"],
         supports_targeted_paths=True,
     ),
