@@ -17,3 +17,7 @@ smoke_math = _load_smoke_math()
 
 def test_add_returns_sum() -> None:
     assert smoke_math.add(2, 3) == 5
+
+
+def test_add_handles_larger_integers() -> None:
+    assert smoke_math.add(123_456_789, 987_654_321) == 1_111_111_110
