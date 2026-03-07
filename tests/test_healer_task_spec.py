@@ -9,6 +9,7 @@ def test_compile_task_spec_defaults_research_issue_to_docs_artifact() -> None:
 
     assert spec.task_kind == "research"
     assert spec.output_targets == ("docs/docs-for-preflight-check.md",)
+    assert spec.input_context_paths == ()
     assert spec.tool_policy == "repo_plus_web"
     assert spec.validation_profile == "artifact_only"
 
@@ -21,6 +22,7 @@ def test_compile_task_spec_uses_explicit_file_target_for_edit_issue() -> None:
 
     assert spec.task_kind == "docs"
     assert spec.output_targets == ("README.md",)
+    assert spec.input_context_paths == ()
     assert spec.tool_policy == "repo_only"
     assert spec.validation_profile == "artifact_only"
 
@@ -33,6 +35,7 @@ def test_compile_task_spec_leaves_build_issue_open_for_multi_file_patch() -> Non
 
     assert spec.task_kind == "build"
     assert spec.output_targets == ()
+    assert spec.input_context_paths == ()
     assert spec.tool_policy == "repo_only"
     assert spec.validation_profile == "code_change"
 
@@ -51,6 +54,7 @@ def test_compile_task_spec_prefers_required_outputs_over_review_scope_paths() ->
 
     assert spec.task_kind == "fix"
     assert spec.output_targets == ("docs/reviews/healer-core-review-round-1.md",)
+    assert spec.input_context_paths == ()
     assert spec.tool_policy == "repo_only"
     assert spec.validation_profile == "artifact_only"
 
@@ -63,6 +67,7 @@ def test_compile_task_spec_treats_markdown_as_input_for_code_upgrade_task() -> N
 
     assert spec.task_kind == "build"
     assert spec.output_targets == ()
+    assert spec.input_context_paths == ("skills-suggestions.md",)
     assert spec.tool_policy == "repo_only"
     assert spec.validation_profile == "code_change"
 
@@ -75,5 +80,22 @@ def test_compile_task_spec_treats_markdown_as_input_when_issue_asks_to_ensure_te
 
     assert spec.task_kind == "build"
     assert spec.output_targets == ()
+    assert spec.input_context_paths == ("prompt-upgrade-notes.md",)
     assert spec.tool_policy == "repo_only"
+    assert spec.validation_profile == "code_change"
+
+
+def test_compile_task_spec_marks_input_spec_only_markdown_as_context_not_target() -> None:
+    spec = compile_task_spec(
+        issue_title="Implement upgrades from research-notes.md",
+        issue_body=(
+            "Use research-notes.md as input spec only.\n"
+            "Do not make doc-only edits.\n"
+            "Implement the code changes in src/flow_healer/ and add tests."
+        ),
+    )
+
+    assert spec.task_kind == "build"
+    assert spec.output_targets == ()
+    assert spec.input_context_paths == ("research-notes.md",)
     assert spec.validation_profile == "code_change"
