@@ -9,6 +9,12 @@ test('add returns the sum of two numbers', () => {
 
 test('add handles zero correctly', () => {
   assert.equal(add(0, 0), 0);
+  assert.equal(add(0, 7), 7);
+  assert.equal(add(7, 0), 7);
+});
+
+test('add normalizes negative zero results', () => {
+  assert.equal(add(-0, -0), 0);
 });
 
 test('add handles negative numbers', () => {
