@@ -17,3 +17,10 @@ smoke_math = _load_smoke_math()
 
 def test_add_returns_sum() -> None:
     assert smoke_math.add(2, 3) == 5
+
+
+def test_add_handles_larger_integers() -> None:
+    left = 10**18
+    right = 10**18 + 7
+
+    assert smoke_math.add(left, right) == 2 * 10**18 + 7
