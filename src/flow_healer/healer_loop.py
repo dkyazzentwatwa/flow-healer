@@ -772,11 +772,23 @@ class AutonomousHealerLoop:
             return True
 
         remote_state = str(snapshot.get("state") or "").strip().lower()
-        remote_labels = {
+        remote_title = str(snapshot.get("title") or issue.title)
+        remote_body = str(snapshot.get("body") or issue.body)
+        remote_labels_list = [
             str(label).strip()
             for label in (snapshot.get("labels") or [])
             if str(label).strip()
-        }
+        ]
+        remote_labels = set(remote_labels_list)
+        self.store.upsert_healer_issue(
+            issue_id=issue.issue_id,
+            repo=issue.repo,
+            title=remote_title,
+            body=remote_body,
+            author=issue.author,
+            labels=remote_labels_list,
+            priority=issue.priority,
+        )
         if remote_state and remote_state != "open":
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -821,10 +833,26 @@ class AutonomousHealerLoop:
         if _label_set_match(issue_labels, required_label):
             return True
         try:
-            return self.tracker.issue_has_label(issue_id=issue_id, label=required_label.strip())
+            has_label = self.tracker.issue_has_label(issue_id=issue_id, label=required_label.strip())
         except Exception as exc:
             logger.warning("Failed to check issue label for #%s: %s", issue_id, exc)
-        return False
+            return False
+        if has_label:
+            refreshed_labels = list(issue_labels)
+            if not _label_set_match(refreshed_labels, required_label):
+                refreshed_labels.append(required_label.strip())
+                row = self.store.get_healer_issue(issue_id)
+                if row is not None:
+                    self.store.upsert_healer_issue(
+                        issue_id=issue_id,
+                        repo=str(row.get("repo") or ""),
+                        title=str(row.get("title") or ""),
+                        body=str(row.get("body") or ""),
+                        author=str(row.get("author") or ""),
+                        labels=refreshed_labels,
+                        priority=int(row.get("priority") or 100),
+                    )
+        return has_label
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
