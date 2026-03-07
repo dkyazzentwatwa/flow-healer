@@ -384,10 +384,26 @@ class AutonomousHealerLoop:
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
                 continue
-            if not self.tracker.issue_has_label(
-                issue_id=issue_id,
-                label=self.settings.healer_pr_required_label,
-            ):
+            required_label = str(self.settings.healer_pr_required_label).strip()
+            if not required_label:
+                has_label = True
+            else:
+                local_labels = row.get("labels")
+                has_label = _label_set_contains(labels=local_labels, target=required_label)
+                if not has_label:
+                    try:
+                        has_label = self.tracker.issue_has_label(
+                            issue_id=issue_id,
+                            label=required_label,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to check PR approval label for issue #%s: %s",
+                            issue_id,
+                            exc,
+                        )
+                        continue
+            if not has_label:
                 continue
             self.store.set_healer_issue_state(
                 issue_id=issue_id,
@@ -602,13 +618,23 @@ class AutonomousHealerLoop:
                 )
                 return
 
-            if (
-                self.settings.healer_pr_actions_require_approval
-                and not self.tracker.issue_has_label(
-                    issue_id=issue.issue_id,
-                    label=self.settings.healer_pr_required_label,
-                )
-            ):
+            required_label = str(self.settings.healer_pr_required_label).strip()
+            has_approval_label = True
+            if self.settings.healer_pr_actions_require_approval and required_label:
+                if not _label_set_contains(labels=issue.labels, target=required_label):
+                    try:
+                        has_approval_label = self.tracker.issue_has_label(
+                            issue_id=issue.issue_id,
+                            label=required_label,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to check PR approval label for issue #%s: %s",
+                            issue.issue_id,
+                            exc,
+                        )
+                        has_approval_label = False
+            if self.settings.healer_pr_actions_require_approval and not has_approval_label:
                 self.store.set_healer_issue_state(
                     issue_id=issue.issue_id,
                     state="pr_pending_approval",
@@ -771,7 +797,7 @@ class AutonomousHealerLoop:
 
         remote_state = str(snapshot.get("state") or "").strip().lower()
         remote_labels = {
-            str(label).strip()
+            str(label).strip().lower()
             for label in (snapshot.get("labels") or [])
             if str(label).strip()
         }
@@ -787,7 +813,11 @@ class AutonomousHealerLoop:
             logger.info("Skipping issue #%s because GitHub issue is %s.", issue.issue_id, remote_state)
             return False
 
-        required_labels = [label for label in self.settings.healer_issue_required_labels if label.strip()]
+        required_labels = [
+            str(label).strip().lower()
+            for label in self.settings.healer_issue_required_labels
+            if str(label).strip()
+        ]
         missing_labels = [label for label in required_labels if label not in remote_labels]
         if missing_labels:
             self.store.set_healer_issue_state(
@@ -1122,6 +1152,21 @@ def _format_store_timestamp(value: datetime | None) -> str:
     if value is None:
         return ""
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _normalize_label_values(labels: object) -> set[str]:
+    return {
+        str(label).strip().lower()
+        for label in (labels or [])
+        if str(label).strip()
+    }
+
+
+def _label_set_contains(labels: object, target: str) -> bool:
+    normalized_target = str(target or "").strip().lower()
+    if not normalized_target:
+        return False
+    return normalized_target in _normalize_label_values(labels)
 
 
 def _is_actionable_feedback_author(author: str, self_actor: str) -> bool:
