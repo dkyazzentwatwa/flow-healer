@@ -17,3 +17,9 @@ smoke_math = _load_smoke_math()
 
 def test_add_returns_sum() -> None:
     assert smoke_math.add(2, 3) == 5
+
+
+def test_add_handles_zero_inputs() -> None:
+    assert smoke_math.add(0, 0) == 0
+    assert smoke_math.add(0, 7) == 7
+    assert smoke_math.add(9, 0) == 9
