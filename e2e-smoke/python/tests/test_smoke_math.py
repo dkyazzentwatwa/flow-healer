@@ -17,3 +17,9 @@ smoke_math = _load_smoke_math()
 
 def test_add_returns_sum() -> None:
     assert smoke_math.add(2, 3) == 5
+
+
+def test_add_supports_larger_integers() -> None:
+    large_value = 10**18
+
+    assert smoke_math.add(large_value, large_value) == 2 * large_value
