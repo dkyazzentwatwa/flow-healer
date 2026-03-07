@@ -18,6 +18,8 @@ class HealerTaskSpec:
 _EXPLICIT_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html))"
+,
+    re.IGNORECASE,
 )
 _PATH_DIRECTIVE_RE = re.compile(r"\bpath:\s*(?P<path>[^\s`'\"(){}<>,;:]+)", re.IGNORECASE)
 _CODE_HINT_RE = re.compile(r"\b(build|feature|implement|fix|bug|app|todo app|api|service|refactor|code)\b", re.IGNORECASE)
