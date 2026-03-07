@@ -85,6 +85,26 @@ def test_compile_task_spec_treats_markdown_as_input_when_issue_asks_to_ensure_te
     assert spec.validation_profile == "code_change"
 
 
+def test_compile_task_spec_preserves_node_js_queue_test_contract() -> None:
+    spec = compile_task_spec(
+        issue_title="Issue #73: Node.js queue test 2",
+        issue_body=(
+            "Simple queued Node.js test issue 2 for flow-healer validation.\n"
+            "\n"
+            "Acceptance criteria:\n"
+            "- Issue is visible in the queue\n"
+            "- Flow Healer can pick it up\n"
+            "- Labels mark it as ready and PR-approved"
+        ),
+    )
+
+    assert spec.task_kind == "edit"
+    assert spec.output_targets == ("Node.js",)
+    assert spec.input_context_paths == ()
+    assert spec.tool_policy == "repo_only"
+    assert spec.validation_profile == "code_change"
+
+
 def test_compile_task_spec_marks_input_spec_only_markdown_as_context_not_target() -> None:
     spec = compile_task_spec(
         issue_title="Implement upgrades from research-notes.md",
