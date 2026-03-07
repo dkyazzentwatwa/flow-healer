@@ -15,15 +15,24 @@ class LockAcquireResult:
 
 
 class HealerDispatcher:
-    def __init__(self, *, store: SQLiteStore, worker_id: str, lease_seconds: int) -> None:
+    def __init__(
+        self,
+        *,
+        store: SQLiteStore,
+        worker_id: str,
+        lease_seconds: int,
+        max_active_issues: int,
+    ) -> None:
         self.store = store
         self.worker_id = worker_id
         self.lease_seconds = max(30, int(lease_seconds))
+        self.max_active_issues = max(1, int(max_active_issues))
 
     def claim_next_issue(self) -> dict[str, Any] | None:
         return self.store.claim_next_healer_issue(
             worker_id=self.worker_id,
             lease_seconds=self.lease_seconds,
+            max_active_issues=self.max_active_issues,
         )
 
     def acquire_prediction_locks(self, *, issue_id: str, lock_keys: list[str]) -> LockAcquireResult:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -233,7 +234,7 @@ class FlowHealerScanner:
         ]
 
     def _run_pytest_suite(self, check_failures: list[str]) -> list[ScanFinding]:
-        cmd = ["pytest", "-q"]
+        cmd = [sys.executable, "-m", "pytest", "-q"]
         proc = subprocess.run(
             cmd,
             cwd=str(self.repo_path),

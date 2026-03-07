@@ -16,13 +16,45 @@ class HealerReconciler:
 
     def reconcile(self) -> dict[str, int]:
         recovered_leases = self.store.requeue_expired_healer_issue_leases()
+        interrupted_inactive_attempts = self.store.interrupt_inactive_healer_attempts()
+        interrupted_superseded_attempts = self.store.interrupt_superseded_healer_attempts()
+        cleaned_inactive_workspaces = self._cleanup_inactive_issue_workspaces()
         expired_locks = self.store.cleanup_expired_healer_locks()
         removed_orphans = self._sweep_orphan_workspaces()
         return {
+            "interrupted_inactive_attempts": interrupted_inactive_attempts,
+            "interrupted_superseded_attempts": interrupted_superseded_attempts,
+            "cleaned_inactive_workspaces": cleaned_inactive_workspaces,
             "recovered_leases": recovered_leases,
             "expired_locks": expired_locks,
             "removed_orphans": removed_orphans,
         }
+
+    def _cleanup_inactive_issue_workspaces(self) -> int:
+        inactive_rows = self.store.list_healer_issues(
+            states=["queued", "failed", "resolved", "archived", "blocked", "pr_pending_approval", "pr_open"],
+            limit=2000,
+        )
+        cleaned = 0
+        for row in inactive_rows:
+            workspace_raw = str(row.get("workspace_path") or "").strip()
+            if not workspace_raw:
+                continue
+            issue_id = str(row.get("issue_id") or "")
+            state = str(row.get("state") or "queued")
+            try:
+                self.workspace_manager.remove_workspace(workspace_path=Path(workspace_raw))
+            except Exception as exc:
+                logger.warning("Failed to clean inactive workspace for issue #%s: %s", issue_id, exc)
+                continue
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state=state,
+                workspace_path="",
+                branch_name="",
+            )
+            cleaned += 1
+        return cleaned
 
     def _sweep_orphan_workspaces(self) -> int:
         active_rows = self.store.list_healer_issues(

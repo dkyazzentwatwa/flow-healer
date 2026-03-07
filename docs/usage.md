@@ -55,3 +55,15 @@ flow-healer status --repo my-project
 The scanner identifies deterministic breakage patterns (e.g., failed CI, linting errors). If `scan_enable_issue_creation` is set to `true`, it will create deduplicated GitHub issues for these findings, labeled with `kind:scan` and `healer:ready` to trigger the healing loop automatically.
 
 > **Note**: Labels can be customized per-repo in the configuration to match your project's workflow. Standardizing labels across repos is recommended for consistent multi-repo orchestration.
+
+## Failure Recovery
+
+If a healing attempt finishes with `no_patch` or `verifier_failed`, stop and recover in this sequence:
+
+1. Verify the issue is still visible and has context for retry.
+2. Confirm temporary blockers are fixed (for example: dependency version drift, transient test flakiness, or missing credentials).
+3. Trigger one controlled pass so the operator can review retry behavior before allowing normal cadence.
+
+~~~bash
+flow-healer start --repo my-project --once
+~~~

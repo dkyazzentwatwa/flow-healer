@@ -1,4 +1,5 @@
 PyYAML>=6.0
+textual<1,>=0.86
 
 [dev]
 pytest>=8.0

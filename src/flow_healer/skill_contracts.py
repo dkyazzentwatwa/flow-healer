@@ -1,0 +1,396 @@
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass
+from pathlib import Path
+import re
+
+
+_COMMON_CONTRACT_SECTIONS = (
+    "## Inputs",
+    "## Outputs",
+    "## Key Output Fields",
+    "## Success Criteria",
+    "## Failure Handling",
+    "## Next Step",
+)
+
+
+@dataclass(slots=True, frozen=True)
+class SkillContract:
+    name: str
+    relative_path: str
+    required_snippets: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class SkillContractIssue:
+    skill: str
+    relative_path: str
+    problem: str
+    details: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class SkillContractSnapshot:
+    skill: str
+    relative_path: str
+    has_script: bool
+    scripts: tuple[str, ...]
+    documented_output_fields: tuple[str, ...]
+    script_output_fields: tuple[str, ...]
+    script_output_alignment: bool
+    key_output_fields: tuple[str, ...]
+    next_step_preview: str
+    sections_complete: bool
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def expected_skill_contracts() -> tuple[SkillContract, ...]:
+    return (
+        SkillContract(
+            name="flow-healer-local-validation",
+            relative_path="skills/flow-healer-local-validation/SKILL.md",
+            required_snippets=(
+                *_COMMON_CONTRACT_SECTIONS,
+                "`repo_root`",
+                "`checks[*].exit_code`",
+                "`checks[*].output_tail`",
+            ),
+        ),
+        SkillContract(
+            name="flow-healer-preflight",
+            relative_path="skills/flow-healer-preflight/SKILL.md",
+            required_snippets=(
+                *_COMMON_CONTRACT_SECTIONS,
+                "`required_checks.gh_auth_ok`",
+                "`required_checks.repo_exists`",
+                "`required_checks.git_repo`",
+                "`required_checks.repo_clean_git`",
+                "`required_checks.venv_ok`",
+                "`required_checks.docker_ok`",
+            ),
+        ),
+        SkillContract(
+            name="flow-healer-live-smoke",
+            relative_path="skills/flow-healer-live-smoke/SKILL.md",
+            required_snippets=(
+                *_COMMON_CONTRACT_SECTIONS,
+                "`docs_scaffold`",
+                "`docs_followup_note`",
+                "`issue_id`",
+                "`pr_id`",
+                "`branch_name`",
+                "`attempt_state`",
+                "`verifier_summary`",
+                "`test_summary`",
+            ),
+        ),
+        SkillContract(
+            name="flow-healer-triage",
+            relative_path="skills/flow-healer-triage/SKILL.md",
+            required_snippets=(
+                *_COMMON_CONTRACT_SECTIONS,
+                "`operator_or_environment`",
+                "`repo_fixture_or_setup`",
+                "`connector_or_patch_generation`",
+                "`product_bug`",
+                "`external_service_or_github`",
+                "`flow-healer-connector-debug`",
+            ),
+        ),
+        SkillContract(
+            name="flow-healer-pr-followup",
+            relative_path="skills/flow-healer-pr-followup/SKILL.md",
+            required_snippets=(
+                *_COMMON_CONTRACT_SECTIONS,
+                "`issue.pr_number`",
+                "`issue.last_issue_comment_id`",
+                "`issue.feedback_context`",
+                "`issue.state`",
+                "`attempts[*].state`",
+                "## Safe Resume Checklist",
+            ),
+        ),
+        SkillContract(
+            name="flow-healer-connector-debug",
+            relative_path="skills/flow-healer-connector-debug/SKILL.md",
+            required_snippets=(
+                "# Flow Healer Connector Debug",
+                "Use this skill when `flow-healer-triage` reports `connector_or_patch_generation`.",
+                "Connector command resolution",
+                "Diff fence validity",
+                "Empty diff detection",
+                "Verifier JSON validity",
+                "Patch-apply outcome",
+            ),
+        ),
+    )
+
+
+def recommended_skill_for_diagnosis(diagnosis: str) -> str:
+    normalized = str(diagnosis or "").strip().lower()
+    mapping = {
+        "operator_or_environment": "flow-healer-local-validation",
+        "repo_fixture_or_setup": "flow-healer-preflight",
+        "connector_or_patch_generation": "flow-healer-connector-debug",
+        "product_bug": "flow-healer-live-smoke",
+        "external_service_or_github": "flow-healer-pr-followup",
+    }
+    return mapping.get(normalized, "")
+
+
+def default_action_for_diagnosis(diagnosis: str) -> str:
+    normalized = str(diagnosis or "").strip().lower()
+    mapping = {
+        "operator_or_environment": "Repair the environment, then rerun flow-healer-preflight before another live attempt.",
+        "repo_fixture_or_setup": "Repair the repo or fixture setup, then rerun flow-healer-local-validation.",
+        "connector_or_patch_generation": "Hand off to flow-healer-connector-debug and isolate the broken proposer or verifier contract.",
+        "product_bug": "Capture evidence from the latest run and escalate as a product bug.",
+        "external_service_or_github": "Pause live mutation, wait or retry later, and leave an operator note about the external dependency.",
+    }
+    return mapping.get(normalized, "")
+
+
+def audit_skill_contracts(root: Path | None = None) -> dict[str, object]:
+    base = (root or repo_root()).expanduser().resolve()
+    issues: list[SkillContractIssue] = []
+    healthy = 0
+    snapshots: list[SkillContractSnapshot] = []
+
+    for contract in expected_skill_contracts():
+        skill_path = base / contract.relative_path
+        if not skill_path.exists():
+            issues.append(
+                SkillContractIssue(
+                    skill=contract.name,
+                    relative_path=contract.relative_path,
+                    problem="missing_file",
+                    details=(),
+                )
+            )
+            continue
+        text = skill_path.read_text(encoding="utf-8")
+        snapshot = _skill_snapshot(base=base, contract=contract, text=text)
+        snapshots.append(snapshot)
+        missing = tuple(snippet for snippet in contract.required_snippets if snippet not in text)
+        if missing:
+            issues.append(
+                SkillContractIssue(
+                    skill=contract.name,
+                    relative_path=contract.relative_path,
+                    problem="missing_snippets",
+                    details=missing,
+                )
+            )
+            continue
+        if not snapshot.sections_complete:
+            issues.append(
+                SkillContractIssue(
+                    skill=contract.name,
+                    relative_path=contract.relative_path,
+                    problem="incomplete_sections",
+                    details=tuple(section for section in _COMMON_CONTRACT_SECTIONS if not _section_body(text, section)),
+                )
+            )
+            continue
+        if snapshot.has_script and not snapshot.script_output_alignment:
+            issues.append(
+                SkillContractIssue(
+                    skill=contract.name,
+                    relative_path=contract.relative_path,
+                    problem="script_output_mismatch",
+                    details=_missing_documented_outputs(snapshot),
+                )
+            )
+            continue
+        healthy += 1
+
+    diagnoses = (
+        "operator_or_environment",
+        "repo_fixture_or_setup",
+        "connector_or_patch_generation",
+        "product_bug",
+        "external_service_or_github",
+    )
+    recommended = {diagnosis: recommended_skill_for_diagnosis(diagnosis) for diagnosis in diagnoses}
+    default_actions = {diagnosis: default_action_for_diagnosis(diagnosis) for diagnosis in diagnoses}
+    graph = [
+        "flow-healer-local-validation",
+        "flow-healer-preflight",
+        "flow-healer-live-smoke",
+        "flow-healer-triage",
+        "flow-healer-pr-followup",
+        "flow-healer-connector-debug",
+    ]
+    return {
+        "repo_root": str(base),
+        "expected_skills": len(expected_skill_contracts()),
+        "healthy_skills": healthy,
+        "issues": [
+            {
+                "skill": issue.skill,
+                "relative_path": issue.relative_path,
+                "problem": issue.problem,
+                "details": list(issue.details),
+            }
+            for issue in issues
+        ],
+        "contracts_ok": not issues,
+        "operator_graph": graph,
+        "default_action_by_diagnosis": default_actions,
+        "recommended_skill_by_diagnosis": recommended,
+        "skills": [
+            {
+                "skill": snapshot.skill,
+                "relative_path": snapshot.relative_path,
+                "has_script": snapshot.has_script,
+                "scripts": list(snapshot.scripts),
+                "documented_output_fields": list(snapshot.documented_output_fields),
+                "script_output_fields": list(snapshot.script_output_fields),
+                "script_output_alignment": snapshot.script_output_alignment,
+                "key_output_fields": list(snapshot.key_output_fields),
+                "next_step_preview": snapshot.next_step_preview,
+                "sections_complete": snapshot.sections_complete,
+            }
+            for snapshot in snapshots
+        ],
+    }
+
+
+def _skill_snapshot(*, base: Path, contract: SkillContract, text: str) -> SkillContractSnapshot:
+    skill_dir = (base / contract.relative_path).parent
+    script_paths = tuple(path for path in sorted(skill_dir.glob("scripts/*.py")) if path.is_file())
+    scripts = tuple(str(path.relative_to(base)) for path in script_paths)
+    documented_output_fields = _inline_code_tokens(_section_body(text, "## Outputs"))
+    script_output_fields = _script_output_fields(script_paths)
+    key_output_fields = _inline_code_tokens(_section_body(text, "## Key Output Fields"))
+    next_step_preview = _first_content_line(_section_body(text, "## Next Step"))
+    sections_complete = all(_section_body(text, section) for section in _COMMON_CONTRACT_SECTIONS)
+    return SkillContractSnapshot(
+        skill=contract.name,
+        relative_path=contract.relative_path,
+        has_script=bool(scripts),
+        scripts=scripts,
+        documented_output_fields=documented_output_fields,
+        script_output_fields=script_output_fields,
+        script_output_alignment=_documented_outputs_align(
+            documented_output_fields=documented_output_fields,
+            script_output_fields=script_output_fields,
+            has_script=bool(scripts),
+        ),
+        key_output_fields=key_output_fields,
+        next_step_preview=next_step_preview,
+        sections_complete=sections_complete,
+    )
+
+
+def _section_body(text: str, heading: str) -> str:
+    lines = (text or "").splitlines()
+    capture = False
+    body: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            capture = True
+            continue
+        if capture and stripped.startswith("## "):
+            break
+        if capture:
+            body.append(line.rstrip())
+    return "\n".join(line for line in body if line.strip()).strip()
+
+
+def _inline_code_tokens(text: str) -> tuple[str, ...]:
+    tokens = re.findall(r"`([^`]+)`", text or "")
+    return tuple(token for token in tokens if token)
+
+
+def _script_output_fields(script_paths: tuple[Path, ...]) -> tuple[str, ...]:
+    seen: list[str] = []
+    for script_path in script_paths:
+        for field in _extract_script_output_fields(script_path):
+            if field not in seen:
+                seen.append(field)
+    return tuple(seen)
+
+
+def _extract_script_output_fields(script_path: Path) -> tuple[str, ...]:
+    try:
+        tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
+    except (OSError, SyntaxError):
+        return ()
+
+    assigned_dicts: dict[str, tuple[str, ...]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            keys = _dict_string_keys(node.value)
+            if not keys:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned_dicts[target.id] = keys
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            keys = _dict_string_keys(node.value)
+            if keys:
+                assigned_dicts[node.target.id] = keys
+
+    seen: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "dumps" or not node.args:
+            continue
+        keys = _dict_string_keys(node.args[0])
+        if not keys and isinstance(node.args[0], ast.Name):
+            keys = assigned_dicts.get(node.args[0].id, ())
+        for key in keys:
+            if key not in seen:
+                seen.append(key)
+    return tuple(seen)
+
+
+def _dict_string_keys(node: ast.AST | None) -> tuple[str, ...]:
+    if not isinstance(node, ast.Dict):
+        return ()
+    keys: list[str] = []
+    for key_node in node.keys:
+        if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+            keys.append(key_node.value)
+    return tuple(keys)
+
+
+def _documented_outputs_align(
+    *,
+    documented_output_fields: tuple[str, ...],
+    script_output_fields: tuple[str, ...],
+    has_script: bool,
+) -> bool:
+    if not has_script:
+        return True
+    if not documented_output_fields or not script_output_fields:
+        return False
+    return all(field in script_output_fields for field in documented_output_fields)
+
+
+def _missing_documented_outputs(snapshot: SkillContractSnapshot) -> tuple[str, ...]:
+    if not snapshot.script_output_fields:
+        return ("Could not infer any top-level JSON output fields from the skill script.",)
+    missing = tuple(
+        field for field in snapshot.documented_output_fields if field not in snapshot.script_output_fields
+    )
+    if missing:
+        return missing
+    return ("Documented output fields do not align with the script contract.",)
+
+
+def _first_content_line(text: str) -> str:
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        return line.lstrip("- ").strip()
+    return ""

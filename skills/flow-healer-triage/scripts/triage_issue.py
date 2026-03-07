@@ -7,29 +7,13 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from flow_healer.healer_triage import classify_issue_route
+
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     return {key: row[key] for key in row.keys()}
-
-
-def _classify(issue: dict[str, Any] | None, attempt: dict[str, Any] | None) -> str:
-    failure_class = str((attempt or {}).get("failure_class") or (issue or {}).get("last_failure_class") or "")
-    failure_reason = str((attempt or {}).get("failure_reason") or (issue or {}).get("last_failure_reason") or "").lower()
-    state = str((issue or {}).get("state") or "")
-
-    if failure_class in {"patch_apply_failed", "no_patch"}:
-        return "connector_or_patch_generation"
-    if failure_class == "tests_failed":
-        if "no module named" in failure_reason or "error collecting" in failure_reason:
-            return "repo_fixture_or_setup"
-        return "operator_or_environment"
-    if state == "queued" and str((issue or {}).get("backoff_until") or ""):
-        return "product_bug"
-    if "github" in failure_reason or "auth" in failure_reason or "network" in failure_reason:
-        return "external_service_or_github"
-    return "product_bug" if failure_class else "operator_or_environment"
 
 
 def main() -> int:
@@ -58,11 +42,14 @@ def main() -> int:
         )
     finally:
         conn.close()
+    route = classify_issue_route(issue, attempt)
 
     report = {
         "issue": issue,
         "latest_attempt": attempt,
-        "diagnosis": _classify(issue, attempt),
+        "diagnosis": route.diagnosis,
+        "recommended_skill": route.recommended_skill,
+        "default_action": route.default_action,
     }
     print(json.dumps(report, indent=2, default=str))
     return 0 if issue is not None else 1

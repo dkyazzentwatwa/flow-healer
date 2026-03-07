@@ -32,4 +32,25 @@
    - If one repo raises, later repos are skipped and `runtime.store.close()` may be skipped for that path, leaving open DB handles.
 
 7. [low] Diff extraction is limited to strict fenced/split-git formats.
-   - `src/flow_healer/healer_runner.py:206-214` only recognizes first ` 
+   - `src/flow_healer/healer_runner.py:206-214` only recognizes first ` ```diff ...``` ` block or raw `diff --git` style output.
+   - Slightly valid patch formats outside these cases are treated as no patch, which can force brittle retries and increase failure classifications.
+
+## Low-risk Improvements
+1. Keep artifact-only short-circuit for speed but add deterministic schema checks (required headings/section names) and path guardrails before reporting success.
+2. Require explicit `path=` fenced markers even for single-target artifact writes; fallback content should be ignored unless it matches the requested target and expected format.
+3. Extend targeted-test regex to support pytest node IDs and quoted paths (for example `tests/foo.py::test_bar`).
+4. Change `_run_test_gates` to track `targeted_failed` and `full_failed` separately and compare against policy explicitly instead of a single additive counter.
+5. In `FlowHealerService.start(once=True)`, add `try/finally` around each repo iteration so stores are always closed and remaining repos still process even when one repo fails.
+6. Add patch parser hardening: reject non-standard patch shapes with clear failure reason (`patch_apply_failed`) instead of implicit retry loops.
+
+## Suggested Tests
+1. `tests/test_healer_verifier.py`
+   - Verify `artifact_only` mode rejects wrong/empty or non-matching-content artifacts.
+2. `tests/test_healer_runner.py`
+   - Validate single-target artifact synthesis requires explicit path marker and rejects mixed fenced payloads.
+3. `tests/test_healer_loop.py`
+   - Validate targeted test parsing includes node-id patterns (`tests/foo.py::test_bar`) and quoted paths.
+4. `tests/test_healer_runner.py`
+   - Verify failure accounting separates targeted vs full gate failures and does not double-count the same failure source.
+5. `tests/test_service.py`
+   - Verify `start(once=True)` closes DB store in presence of per-repo exceptions and continues remaining repos.

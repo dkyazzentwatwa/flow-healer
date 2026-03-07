@@ -111,6 +111,28 @@ class GitHubHealerTracker:
         ]
         return label in labels
 
+    def get_issue(self, *, issue_id: str) -> dict[str, Any] | None:
+        if not self.enabled or not issue_id.strip():
+            return None
+        payload = self._request_json(f"/repos/{self.repo_slug}/issues/{quote(issue_id.strip())}")
+        if not isinstance(payload, dict):
+            return None
+        number = int(payload.get("number") or 0)
+        if number <= 0:
+            return None
+        labels = [
+            str((entry or {}).get("name") or "").strip()
+            for entry in (payload.get("labels") or [])
+            if isinstance(entry, dict)
+        ]
+        return {
+            "issue_id": str(number),
+            "state": str(payload.get("state") or ""),
+            "title": str(payload.get("title") or ""),
+            "body": str(payload.get("body") or ""),
+            "labels": labels,
+        }
+
     def find_open_issue_by_fingerprint(self, fingerprint: str) -> dict[str, Any] | None:
         if not self.enabled or not fingerprint.strip():
             return None

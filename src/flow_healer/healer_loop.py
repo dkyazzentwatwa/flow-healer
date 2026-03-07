@@ -4,8 +4,10 @@ import asyncio
 import logging
 import re
 import subprocess
+import threading
 import time
 from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
@@ -19,6 +21,7 @@ from .healer_reviewer import HealerReviewer
 from .healer_runner import HealerRunner
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue
+from .healer_task_spec import compile_task_spec
 from .healer_verifier import HealerVerifier
 from .protocols import ConnectorProtocol
 from .store import SQLiteStore
@@ -30,6 +33,20 @@ _FLOW_COMMENT_PERSONA = (
     "Laid-back tech bro vibes, light emoji use, concise status updates, "
     "and always sign off with '-- Flow 🌊'."
 )
+_INFRA_FAILURE_CLASSES = {"connector_unavailable", "connector_runtime_error"}
+
+
+@dataclass(slots=True, frozen=True)
+class CircuitBreakerStatus:
+    open: bool
+    window: int
+    attempts_considered: int
+    failures: int
+    failure_rate: float
+    threshold: float
+    cooldown_seconds: int
+    cooldown_remaining_seconds: int
+    last_failure_at: str
 
 
 class AutonomousHealerLoop:
@@ -55,6 +72,7 @@ class AutonomousHealerLoop:
             store=store,
             worker_id=self.worker_id,
             lease_seconds=max(60, int(settings.healer_poll_interval_seconds * 3)),
+            max_active_issues=max(1, int(settings.healer_max_concurrent_issues)),
         )
         self.runner = HealerRunner(
             connector=connector,
@@ -120,8 +138,25 @@ class AutonomousHealerLoop:
         self._reconcile_pr_outcomes()
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
-        if self._circuit_breaker_open() and resumed_approved == 0:
-            logger.warning("Healer circuit breaker open; skipping this cycle.")
+        breaker = self._circuit_breaker_status()
+        if breaker.open and resumed_approved == 0:
+            logger.warning(
+                "Healer circuit breaker open; skipping this cycle. "
+                "(failures=%d/%d threshold=%.2f cooldown_remaining=%ss)",
+                breaker.failures,
+                breaker.attempts_considered,
+                breaker.threshold,
+                breaker.cooldown_remaining_seconds,
+            )
+            return
+        connector_health = self._connector_health_snapshot()
+        self._record_connector_health(connector_health)
+        if not bool(connector_health.get("available")):
+            logger.warning(
+                "Healer connector unavailable; skipping claim cycle. reason=%s command=%s",
+                str(connector_health.get("availability_reason") or ""),
+                str(connector_health.get("configured_command") or ""),
+            )
             return
         processed = 0
         while processed < max(1, self.settings.healer_max_concurrent_issues):
@@ -164,7 +199,7 @@ class AutonomousHealerLoop:
                 max_issue_comment_id = max(max_issue_comment_id, comment_id)
                 author = str(comment.get("author") or "").strip().lower()
                 body = str(comment.get("body") or "").strip()
-                if comment_id > last_issue_comment_id and body and author != self_actor:
+                if comment_id > last_issue_comment_id and body and _is_actionable_feedback_author(author, self_actor):
                     new_feedback.append(
                         (str(comment.get("created_at") or ""), comment_id, f"PR comment from @{author}: {body}")
                     )
@@ -177,7 +212,7 @@ class AutonomousHealerLoop:
                 author = str(review.get("author") or "").strip().lower()
                 body = str(review.get("body") or "").strip()
                 state = str(review.get("state") or "").strip().lower()
-                if review_id > last_review_id and body and author != self_actor:
+                if review_id > last_review_id and body and _is_actionable_feedback_author(author, self_actor):
                     label = f"PR review ({state or 'commented'}) from @{author}: {body}"
                     new_feedback.append((str(review.get("created_at") or ""), review_id, label))
 
@@ -189,7 +224,7 @@ class AutonomousHealerLoop:
                 author = str(comment.get("author") or "").strip().lower()
                 body = str(comment.get("body") or "").strip()
                 path = str(comment.get("path") or "").strip()
-                if comment_id > last_review_comment_id and body and author != self_actor:
+                if comment_id > last_review_comment_id and body and _is_actionable_feedback_author(author, self_actor):
                     prefix = f"Inline review comment on {path}" if path else "Inline review comment"
                     new_feedback.append((str(comment.get("created_at") or ""), comment_id, f"{prefix} from @{author}: {body}"))
 
@@ -316,6 +351,20 @@ class AutonomousHealerLoop:
                 labels=issue.labels,
                 priority=issue.priority,
             )
+            if existing_issue is not None:
+                existing_state = str(existing_issue.get("state") or "").strip().lower()
+                existing_pr_state = str(existing_issue.get("pr_state") or "").strip().lower()
+                if existing_state in {"archived", "blocked"} or (
+                    existing_state == "resolved" and existing_pr_state == "closed"
+                ):
+                    self.store.set_healer_issue_state(
+                        issue_id=issue.issue_id,
+                        state="queued",
+                        pr_state="",
+                        last_failure_class="",
+                        last_failure_reason="",
+                        clear_lease=True,
+                    )
             if existing_issue is None:
                 try:
                     self.tracker.add_issue_reaction(issue_id=issue.issue_id, reaction="eyes")
@@ -364,12 +413,28 @@ class AutonomousHealerLoop:
             priority=int(row.get("priority") or 100),
             html_url="",
         )
+        if not self._claim_is_actionable(issue):
+            return
+        logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
+        task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
         self.store.set_healer_issue_state(issue_id=issue.issue_id, state="running")
+        lease_stop = threading.Event()
+        lease_thread = threading.Thread(
+            target=self._lease_heartbeat,
+            args=(issue.issue_id, lease_stop),
+            daemon=True,
+        )
+        lease_thread.start()
         attempt_no = self.store.increment_healer_attempt(issue.issue_id)
         prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
         lock_result = self.dispatcher.acquire_prediction_locks(issue_id=issue.issue_id, lock_keys=prediction.keys)
         if not lock_result.acquired:
-            self._backoff_or_fail(
+            logger.info(
+                "Issue #%s blocked by prediction lock conflict (%s)",
+                issue.issue_id,
+                lock_result.reason,
+            )
+            final_state = self._backoff_or_fail(
                 issue_id=issue.issue_id,
                 attempt_no=attempt_no,
                 failure_class="lock_conflict",
@@ -385,13 +450,20 @@ class AutonomousHealerLoop:
             state="running",
             prediction_source=prediction.source,
             predicted_lock_set=prediction.keys,
+            task_kind=task_spec.task_kind,
+            output_targets=list(task_spec.output_targets),
+            tool_policy=task_spec.tool_policy,
+            validation_profile=task_spec.validation_profile,
         )
         actual_diff: list[str] = []
         test_summary: dict[str, object] = {}
         verifier_summary: dict[str, object] = {}
         failure_class = ""
         failure_reason = ""
-        final_state = "failed"
+        proposer_output_excerpt = ""
+        issue_state = "failed"
+        attempt_state = "failed"
+        workspace = None
         try:
             workspace = self.workspace_manager.ensure_workspace(
                 issue_id=issue.issue_id,
@@ -406,6 +478,16 @@ class AutonomousHealerLoop:
                 state="running",
                 workspace_path=str(workspace.path),
                 branch_name=workspace.branch,
+                task_kind=task_spec.task_kind,
+                output_targets=list(task_spec.output_targets),
+                tool_policy=task_spec.tool_policy,
+                validation_profile=task_spec.validation_profile,
+            )
+            logger.info(
+                "Issue #%s attempt %s running in %s",
+                issue.issue_id,
+                attempt_no,
+                workspace.branch,
             )
             self._post_issue_status(
                 issue_id=issue.issue_id,
@@ -415,6 +497,8 @@ class AutonomousHealerLoop:
                     [
                         f"Attempt: `{attempt_no}`",
                         f"Branch: `{workspace.branch}`",
+                        f"Task kind: `{task_spec.task_kind}`",
+                        f"Targets: `{', '.join(task_spec.output_targets) if task_spec.output_targets else 'inferred in code'}`",
                         f"Test gate mode: `{self.runner.test_gate_mode}`",
                     ],
                 ),
@@ -424,12 +508,16 @@ class AutonomousHealerLoop:
                 issue_text=f"{issue.title}\n{issue.body}",
                 predicted_lock_set=prediction.keys,
                 last_failure_class=str(row.get("last_failure_class") or ""),
+                task_kind=task_spec.task_kind,
+                validation_profile=task_spec.validation_profile,
+                output_targets=list(task_spec.output_targets),
             )
             feedback_context = str(row.get("feedback_context") or "").strip()
             run_result = self.runner.run_attempt(
                 issue_id=issue.issue_id,
                 issue_title=issue.title,
                 issue_body=issue.body,
+                task_spec=task_spec,
                 learned_context=learned_context,
                 feedback_context=feedback_context,
                 workspace=workspace.path,
@@ -440,16 +528,23 @@ class AutonomousHealerLoop:
             )
             actual_diff = run_result.diff_paths
             test_summary = run_result.test_summary
+            proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
             if not run_result.success:
                 failure_class = run_result.failure_class
                 failure_reason = run_result.failure_reason
-                self._backoff_or_fail(
+                logger.info(
+                    "Issue #%s attempt %s proposer/test phase failed (%s): %s",
+                    issue.issue_id,
+                    attempt_no,
+                    failure_class,
+                    failure_reason,
+                )
+                issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
                     failure_class=run_result.failure_class,
                     failure_reason=run_result.failure_reason,
                 )
-                final_state = "failed"
                 return
 
             upgrade = self.dispatcher.upgrade_locks(
@@ -459,19 +554,25 @@ class AutonomousHealerLoop:
             if not upgrade.acquired:
                 failure_class = "lock_upgrade_conflict"
                 failure_reason = upgrade.reason
-                self._backoff_or_fail(
+                logger.info(
+                    "Issue #%s attempt %s failed while upgrading locks: %s",
+                    issue.issue_id,
+                    attempt_no,
+                    failure_reason,
+                )
+                issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
                     failure_class="lock_upgrade_conflict",
                     failure_reason=upgrade.reason,
                 )
-                final_state = "failed"
                 return
 
             verification = self.verifier.verify(
                 issue_id=issue.issue_id,
                 issue_title=issue.title,
                 issue_body=issue.body,
+                task_spec=task_spec,
                 diff_paths=run_result.diff_paths,
                 test_summary=run_result.test_summary,
                 proposer_output=run_result.proposer_output,
@@ -481,13 +582,18 @@ class AutonomousHealerLoop:
             if not verification.passed:
                 failure_class = "verifier_failed"
                 failure_reason = verification.summary
-                self._backoff_or_fail(
+                logger.info(
+                    "Issue #%s attempt %s failed verification: %s",
+                    issue.issue_id,
+                    attempt_no,
+                    failure_reason,
+                )
+                issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
                     failure_class="verifier_failed",
                     failure_reason=verification.summary,
                 )
-                final_state = "failed"
                 return
 
             if (
@@ -516,20 +622,27 @@ class AutonomousHealerLoop:
                         outro="Drop that approval label on here and I'll take it the rest of the way.",
                     ),
                 )
-                final_state = "pr_pending_approval"
+                issue_state = "pr_pending_approval"
+                attempt_state = "pr_pending_approval"
+                logger.info("Issue #%s is waiting for PR approval label", issue.issue_id)
                 return
 
             commit_ok, commit_reason = self._commit_and_push(workspace.path, issue_id=issue.issue_id, branch=workspace.branch)
             if not commit_ok:
                 failure_class = "push_failed"
                 failure_reason = commit_reason
-                self._backoff_or_fail(
+                logger.info(
+                    "Issue #%s attempt %s failed during commit/push: %s",
+                    issue.issue_id,
+                    attempt_no,
+                    failure_reason,
+                )
+                issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
                     failure_class="push_failed",
                     failure_reason=commit_reason,
                 )
-                final_state = "failed"
                 return
 
             pr = self.tracker.open_or_update_pr(
@@ -546,13 +659,13 @@ class AutonomousHealerLoop:
             if pr is None:
                 failure_class = "pr_open_failed"
                 failure_reason = "Failed to create/update pull request."
-                self._backoff_or_fail(
+                logger.info("Issue #%s attempt %s could not open PR", issue.issue_id, attempt_no)
+                issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
                     failure_class="pr_open_failed",
                     failure_reason="Failed to create/update pull request.",
                 )
-                final_state = "failed"
                 return
 
             self.store.set_healer_issue_state(
@@ -574,7 +687,9 @@ class AutonomousHealerLoop:
                     ],
                 ),
             )
-            final_state = "pr_open"
+            issue_state = "pr_open"
+            attempt_state = "pr_open"
+            logger.info("Issue #%s opened/updated PR #%s", issue.issue_id, pr.number)
             if self.settings.healer_enable_review:
                 try:
                     review = self.reviewer.review(
@@ -591,19 +706,22 @@ class AutonomousHealerLoop:
                 except Exception as exc:
                     logger.warning("Failed to generate or post code review for PR #%d: %s", pr.number, exc)
         finally:
+            lease_stop.set()
+            lease_thread.join(timeout=1.0)
             self.store.finish_healer_attempt(
                 attempt_id=attempt_id,
-                state=final_state,
+                state=attempt_state,
                 actual_diff_set=actual_diff,
                 test_summary=test_summary,
                 verifier_summary=verifier_summary,
                 failure_class=failure_class,
                 failure_reason=failure_reason,
+                proposer_output_excerpt=proposer_output_excerpt,
             )
             self.memory.maybe_record_lesson(
                 issue=issue,
                 attempt_id=attempt_id,
-                final_state=final_state,
+                final_state=attempt_state,
                 predicted_lock_set=prediction.keys,
                 actual_diff_set=actual_diff,
                 test_summary=test_summary,
@@ -612,20 +730,86 @@ class AutonomousHealerLoop:
                 failure_reason=failure_reason,
             )
             self.store.release_healer_locks(issue_id=issue.issue_id)
-            if final_state == "failed" and failure_class:
+            if workspace is not None:
+                self._cleanup_workspace(issue_id=issue.issue_id, state=issue_state, workspace_path=workspace.path)
+            logger.info("Issue #%s attempt finished with state=%s", issue.issue_id, attempt_state)
+            if attempt_state == "failed" and failure_class:
                 self._post_issue_status(
                     issue_id=issue.issue_id,
                     body=self._format_flow_status_comment(
                         "Quick heads-up: this pass hit a snag ⚠️",
                         None,
                         [
-                            f"Attempt state: `{final_state}`",
+                            f"Attempt state: `{attempt_state}`",
                             f"Failure class: `{failure_class}`",
                             f"Reason: {failure_reason}",
                         ],
                         outro="I saved the failure details so the next pass has better context.",
-                    ),
+                        ),
                 )
+
+    def _claim_is_actionable(self, issue: HealerIssue) -> bool:
+        if not issue.issue_id:
+            return False
+        try:
+            snapshot = self.tracker.get_issue(issue_id=issue.issue_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh remote state for issue #%s; proceeding with local claim: %s",
+                issue.issue_id,
+                exc,
+            )
+            return True
+        if not isinstance(snapshot, dict):
+            return True
+
+        remote_state = str(snapshot.get("state") or "").strip().lower()
+        remote_labels = {
+            str(label).strip()
+            for label in (snapshot.get("labels") or [])
+            if str(label).strip()
+        }
+        if remote_state and remote_state != "open":
+            self.store.set_healer_issue_state(
+                issue_id=issue.issue_id,
+                state="archived",
+                pr_state="closed",
+                last_failure_class="",
+                last_failure_reason="",
+                clear_lease=True,
+            )
+            logger.info("Skipping issue #%s because GitHub issue is %s.", issue.issue_id, remote_state)
+            return False
+
+        required_labels = [label for label in self.settings.healer_issue_required_labels if label.strip()]
+        missing_labels = [label for label in required_labels if label not in remote_labels]
+        if missing_labels:
+            self.store.set_healer_issue_state(
+                issue_id=issue.issue_id,
+                state="blocked",
+                last_failure_class="",
+                last_failure_reason="",
+                clear_lease=True,
+            )
+            logger.info(
+                "Skipping issue #%s because required labels are missing: %s",
+                issue.issue_id,
+                ", ".join(missing_labels),
+            )
+            return False
+        return True
+
+    def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
+        interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
+        while not stop_event.wait(interval):
+            renewed = self.store.renew_healer_issue_lease(
+                issue_id=issue_id,
+                worker_id=self.worker_id,
+                lease_seconds=self.dispatcher.lease_seconds,
+            )
+            if not renewed:
+                logger.warning("Lease heartbeat stopped for issue #%s; lease could not be renewed.", issue_id)
+                return
 
     def _backoff_or_fail(
         self,
@@ -634,7 +818,30 @@ class AutonomousHealerLoop:
         attempt_no: int,
         failure_class: str,
         failure_reason: str,
-    ) -> None:
+    ) -> str:
+        if failure_class in _INFRA_FAILURE_CLASSES:
+            delay = max(15, min(300, int(self.settings.healer_backoff_initial_seconds)))
+            backoff_until = (datetime.now(UTC) + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="queued",
+                backoff_until=backoff_until,
+                last_failure_class=failure_class,
+                last_failure_reason=failure_reason[:500],
+                clear_lease=True,
+            )
+            now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            self.store.set_state("healer_connector_last_error_class", failure_class)
+            self.store.set_state("healer_connector_last_error_reason", failure_reason[:500])
+            self.store.set_state("healer_connector_last_error_at", now_str)
+            logger.info(
+                "Issue #%s requeued due to infra failure (%s) with backoff until %s",
+                issue_id,
+                failure_class,
+                backoff_until,
+            )
+            return "queued"
+
         if attempt_no >= self.settings.healer_retry_budget:
             self.store.set_healer_issue_state(
                 issue_id=issue_id,
@@ -643,7 +850,13 @@ class AutonomousHealerLoop:
                 last_failure_reason=failure_reason[:500],
                 clear_lease=True,
             )
-            return
+            logger.info(
+                "Issue #%s reached retry budget and is now failed (%s): %s",
+                issue_id,
+                failure_class,
+                failure_reason,
+            )
+            return "failed"
 
         delay = min(
             self.settings.healer_backoff_max_seconds,
@@ -658,19 +871,118 @@ class AutonomousHealerLoop:
             last_failure_reason=failure_reason[:500],
             clear_lease=True,
         )
+        logger.info(
+            "Issue #%s requeued after attempt %s with backoff until %s (%s)",
+            issue_id,
+            attempt_no,
+            backoff_until,
+            failure_class,
+        )
+        return "queued"
 
-    def _circuit_breaker_open(self) -> bool:
+    def _connector_health_snapshot(self) -> dict[str, str | bool]:
+        try:
+            self.connector.ensure_started()
+        except Exception as exc:
+            return {
+                "available": False,
+                "configured_command": "",
+                "resolved_command": "",
+                "availability_reason": f"connector ensure_started failed: {exc}",
+                "last_health_error": str(exc),
+            }
+        if hasattr(self.connector, "health_snapshot"):
+            try:
+                health = self.connector.health_snapshot()  # type: ignore[attr-defined]
+                return {
+                    "available": bool(health.get("available")),
+                    "configured_command": str(health.get("configured_command") or ""),
+                    "resolved_command": str(health.get("resolved_command") or ""),
+                    "availability_reason": str(health.get("availability_reason") or ""),
+                    "last_health_error": str(health.get("last_health_error") or ""),
+                }
+            except Exception as exc:
+                return {
+                    "available": False,
+                    "configured_command": "",
+                    "resolved_command": "",
+                    "availability_reason": f"connector health snapshot failed: {exc}",
+                    "last_health_error": str(exc),
+                }
+        return {
+            "available": True,
+            "configured_command": "",
+            "resolved_command": "",
+            "availability_reason": "",
+            "last_health_error": "",
+        }
+
+    def _record_connector_health(self, health: dict[str, str | bool]) -> None:
+        available = "true" if bool(health.get("available")) else "false"
+        self.store.set_state("healer_connector_available", available)
+        self.store.set_state("healer_connector_configured_command", str(health.get("configured_command") or ""))
+        self.store.set_state("healer_connector_resolved_command", str(health.get("resolved_command") or ""))
+        self.store.set_state("healer_connector_availability_reason", str(health.get("availability_reason") or ""))
+        self.store.set_state("healer_connector_last_checked_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+
+    def _circuit_breaker_status(self) -> CircuitBreakerStatus:
         window = max(5, self.settings.healer_circuit_breaker_window)
         attempts = self.store.list_recent_healer_attempts(limit=window)
         if len(attempts) < window:
-            return False
+            return CircuitBreakerStatus(
+                open=False,
+                window=window,
+                attempts_considered=len(attempts),
+                failures=0,
+                failure_rate=0.0,
+                threshold=float(self.settings.healer_circuit_breaker_failure_rate),
+                cooldown_seconds=max(60, int(self.settings.healer_circuit_breaker_cooldown_seconds)),
+                cooldown_remaining_seconds=0,
+                last_failure_at="",
+            )
         failures = 0
+        latest_failure_at: datetime | None = None
         for attempt in attempts:
             state = str(attempt.get("state") or "").lower()
-            if state not in {"pr_open", "resolved", "pr_pending_approval"}:
+            if state not in {"pr_open", "resolved", "pr_pending_approval", "interrupted"}:
                 failures += 1
+                finished_at = _parse_store_timestamp(str(attempt.get("finished_at") or ""))
+                if finished_at is not None and (latest_failure_at is None or finished_at > latest_failure_at):
+                    latest_failure_at = finished_at
         failure_rate = failures / float(max(1, len(attempts)))
-        return failure_rate >= self.settings.healer_circuit_breaker_failure_rate
+        threshold = float(self.settings.healer_circuit_breaker_failure_rate)
+        cooldown_seconds = max(60, int(self.settings.healer_circuit_breaker_cooldown_seconds))
+        if failure_rate < threshold:
+            return CircuitBreakerStatus(
+                open=False,
+                window=window,
+                attempts_considered=len(attempts),
+                failures=failures,
+                failure_rate=failure_rate,
+                threshold=threshold,
+                cooldown_seconds=cooldown_seconds,
+                cooldown_remaining_seconds=0,
+                last_failure_at=_format_store_timestamp(latest_failure_at),
+            )
+
+        cooldown_remaining_seconds = 0
+        if latest_failure_at is not None:
+            elapsed = (datetime.now(UTC) - latest_failure_at).total_seconds()
+            cooldown_remaining_seconds = max(0, int(cooldown_seconds - elapsed))
+        return CircuitBreakerStatus(
+            open=cooldown_remaining_seconds > 0,
+            window=window,
+            attempts_considered=len(attempts),
+            failures=failures,
+            failure_rate=failure_rate,
+            threshold=threshold,
+            cooldown_seconds=cooldown_seconds,
+            cooldown_remaining_seconds=cooldown_remaining_seconds,
+            last_failure_at=_format_store_timestamp(latest_failure_at),
+        )
+
+    def _circuit_breaker_open(self) -> bool:
+        return self._circuit_breaker_status().open
 
     def _post_issue_status(self, *, issue_id: str, body: str) -> None:
         try:
@@ -694,6 +1006,19 @@ class AutonomousHealerLoop:
             lines.extend(["", outro.strip()])
         lines.extend(["", "-- Flow 🌊"])
         return "\n".join(lines)
+
+    def _cleanup_workspace(self, *, issue_id: str, state: str, workspace_path: Path) -> None:
+        try:
+            self.workspace_manager.remove_workspace(workspace_path=workspace_path)
+        except Exception as exc:
+            logger.warning("Failed to clean workspace for issue #%s: %s", issue_id, exc)
+            return
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state=state,
+            workspace_path="",
+            branch_name="",
+        )
 
     @staticmethod
     def _commit_and_push(workspace: Path, *, issue_id: str, branch: str) -> tuple[bool, str]:
@@ -737,3 +1062,28 @@ class AutonomousHealerLoop:
         if push.returncode != 0:
             return False, (push.stderr or push.stdout or "git push failed").strip()
         return True, ""
+
+
+def _parse_store_timestamp(raw: str) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _format_store_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_actionable_feedback_author(author: str, self_actor: str) -> bool:
+    normalized = (author or "").strip().lower()
+    if not normalized or normalized == (self_actor or "").strip().lower():
+        return False
+    if normalized.endswith("[bot]"):
+        return False
+    return True

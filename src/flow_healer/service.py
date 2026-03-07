@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from .config import AppConfig, RelaySettings
 from .healer_loop import AutonomousHealerLoop
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker
+from .healer_triage import classify_issue_route
+from .skill_contracts import audit_skill_contracts
 from .store import SQLiteStore
 
 
@@ -40,6 +43,7 @@ class FlowHealerService:
             codex_command=self.config.service.connector_command,
             timeout=self.config.service.connector_timeout_seconds,
             model=self.config.service.connector_model,
+            reasoning_effort=self.config.service.connector_reasoning_effort,
         )
         loop = AutonomousHealerLoop(settings=repo, store=store, connector=connector, tracker=tracker)
         if repo.healer_repo_slug and not loop.tracker.repo_slug:
@@ -71,11 +75,25 @@ class FlowHealerService:
         rows: list[dict[str, object]] = []
         for repo in self.config.select_repos(repo_name):
             runtime = self.build_runtime(repo)
+            connector_health = runtime.loop._connector_health_snapshot()
+            runtime.loop._record_connector_health(connector_health)
             issues = runtime.store.list_healer_issues(limit=500)
+            issues_by_id = {str(issue.get("issue_id") or ""): issue for issue in issues}
+            breaker = runtime.loop._circuit_breaker_status()
             counts: dict[str, int] = {}
             for issue in issues:
                 state = str(issue.get("state") or "unknown")
                 counts[state] = counts.get(state, 0) + 1
+            recent_attempts = runtime.store.list_recent_healer_attempts(limit=5)
+            annotated_attempts: list[dict[str, object]] = []
+            for attempt in recent_attempts:
+                attempt_row = dict(attempt)
+                issue = issues_by_id.get(str(attempt.get("issue_id") or ""))
+                route = classify_issue_route(issue, attempt)
+                attempt_row["diagnosis"] = route.diagnosis
+                attempt_row["recommended_skill"] = route.recommended_skill
+                attempt_row["default_action"] = route.default_action
+                annotated_attempts.append(attempt_row)
             rows.append(
                 {
                     "repo": repo.repo_name,
@@ -83,7 +101,27 @@ class FlowHealerService:
                     "paused": runtime.store.get_state("healer_paused") == "true",
                     "issues_total": len(issues),
                     "state_counts": counts,
-                    "recent_attempts": runtime.store.list_recent_healer_attempts(limit=5),
+                    "circuit_breaker": {
+                        "open": breaker.open,
+                        "attempts_considered": breaker.attempts_considered,
+                        "failures": breaker.failures,
+                        "failure_rate": breaker.failure_rate,
+                        "threshold": breaker.threshold,
+                        "cooldown_remaining_seconds": breaker.cooldown_remaining_seconds,
+                        "last_failure_at": breaker.last_failure_at,
+                    },
+                    "connector": {
+                        "available": connector_health.get("available"),
+                        "configured_command": connector_health.get("configured_command"),
+                        "resolved_command": connector_health.get("resolved_command"),
+                        "availability_reason": connector_health.get("availability_reason"),
+                        "last_health_error": connector_health.get("last_health_error"),
+                        "last_checked_at": runtime.store.get_state("healer_connector_last_checked_at") or "",
+                        "last_error_class": runtime.store.get_state("healer_connector_last_error_class") or "",
+                        "last_error_reason": runtime.store.get_state("healer_connector_last_error_reason") or "",
+                        "last_error_at": runtime.store.get_state("healer_connector_last_error_at") or "",
+                    },
+                    "recent_attempts": annotated_attempts,
                 }
             )
             runtime.store.close()
@@ -117,9 +155,15 @@ class FlowHealerService:
         token_name = self.config.service.github_token_env
         token_present = bool(os.getenv(token_name, "").strip())
         docker_present = shutil.which("docker") is not None
-        codex_present = shutil.which(self.config.service.connector_command) is not None
+        launchd_path = _launch_agent_path("local.flow-healer")
+        launchd_path_connector = _resolve_command_in_path(self.config.service.connector_command, launchd_path)
+        skill_contracts = audit_skill_contracts()
         for repo in self.config.select_repos(repo_name):
             repo_path = Path(repo.healer_repo_path).expanduser().resolve()
+            runtime = self.build_runtime(repo)
+            connector_health = runtime.loop._connector_health_snapshot()
+            runtime.loop._record_connector_health(connector_health)
+            breaker = runtime.loop._circuit_breaker_status()
             git_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"])
             branch_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--verify", repo.healer_default_branch])
             rows.append(
@@ -130,14 +174,67 @@ class FlowHealerService:
                     "git_repo": git_ok,
                     "default_branch_ok": branch_ok,
                     "docker": docker_present,
-                    "codex": codex_present,
+                    "codex": bool(connector_health.get("available")),
+                    "connector_command": self.config.service.connector_command,
+                    "connector_resolved_command": connector_health.get("resolved_command"),
+                    "connector_availability_reason": connector_health.get("availability_reason"),
+                    "launchd_path": launchd_path,
+                    "launchd_path_has_connector": bool(launchd_path_connector),
+                    "launchd_path_connector": launchd_path_connector or "",
                     "github_token_env": token_name,
                     "github_token_present": token_present,
+                    "skill_contracts_ok": skill_contracts["contracts_ok"],
+                    "skill_contracts": skill_contracts,
+                    "circuit_breaker_open": breaker.open,
+                    "circuit_breaker_cooldown_remaining_seconds": breaker.cooldown_remaining_seconds,
                 }
             )
+            runtime.store.close()
+        return rows
+
+    def control_command_rows(self, repo_name: str | None = None, *, limit: int = 100) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for repo in self.config.select_repos(repo_name):
+            store = SQLiteStore(self.config.repo_db_path(repo.repo_name))
+            store.bootstrap()
+            for entry in store.list_control_commands(limit=limit):
+                row = dict(entry)
+                row.setdefault("repo_name", repo.repo_name)
+                rows.append(row)
+            store.close()
+        rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        if len(rows) > limit:
+            rows = rows[:limit]
         return rows
 
 
 def _check_command(cmd: list[str]) -> bool:
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=15)
     return proc.returncode == 0
+
+
+def _launch_agent_path(label: str) -> str:
+    domain = f"gui/{os.getuid()}/{label}"
+    proc = subprocess.run(
+        ["launchctl", "print", domain],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        return ""
+    text = proc.stdout or ""
+    path_matches = re.findall(r"^\s*PATH => ([^\n]+)$", text, flags=re.MULTILINE)
+    if not path_matches:
+        return ""
+    # Prefer the explicit environment PATH, then fallback to default.
+    return path_matches[-1].strip()
+
+
+def _resolve_command_in_path(command: str, path_value: str) -> str:
+    if not command.strip():
+        return ""
+    if os.path.isabs(command):
+        return command if os.path.isfile(command) and os.access(command, os.X_OK) else ""
+    return shutil.which(command, path=path_value or None) or ""

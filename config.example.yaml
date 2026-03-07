@@ -5,8 +5,34 @@ service:
   poll_interval_seconds: 60
   state_root: ~/.flow-healer
   connector_command: codex
-  connector_model: ""
+  connector_model: gpt-5.4
+  connector_reasoning_effort: medium
   connector_timeout_seconds: 300
+
+control:
+  web:
+    enabled: true
+    host: 0.0.0.0
+    port: 8787
+    auth_mode: none
+  mail:
+    enabled: false
+    account: dkyazze@icloud.com
+    mailbox: INBOX
+    trusted_senders:
+      - dkyazze@icloud.com
+    poll_interval_seconds: 30
+    subject_prefix: "FH:"
+    send_replies: true
+  calendar:
+    enabled: false
+    calendar_name: healer-cal
+    poll_interval_seconds: 30
+    subject_prefix: "FH:"
+    lookback_minutes: 5
+    lookahead_minutes: 2
+  commands:
+    enable_full_control: false
 
 repos:
   - name: demo
@@ -26,6 +52,7 @@ repos:
     backoff_max_seconds: 3600
     circuit_breaker_window: 5
     circuit_breaker_failure_rate: 0.5
+    circuit_breaker_cooldown_seconds: 900
     learning_enabled: true
     enable_review: true
     test_gate_mode: local_then_docker
@@ -33,7 +60,7 @@ repos:
     max_diff_lines: 400
     max_failed_tests_allowed: 0
     scan_enable_issue_creation: false
-    scan_poll_interval_seconds: 600
+    scan_poll_interval_seconds: 180
     scan_severity_threshold: medium
     scan_max_issues_per_run: 5
     scan_default_labels:

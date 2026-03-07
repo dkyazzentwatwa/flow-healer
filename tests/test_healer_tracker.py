@@ -94,6 +94,42 @@ def test_add_issue_comment(monkeypatch):
     assert ok is True
 
 
+def test_get_issue_returns_state_and_labels(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123"
+        assert method == "GET"
+        return {
+            "number": 123,
+            "state": "open",
+            "title": "Test issue",
+            "body": "details",
+            "labels": [{"name": "healer:ready"}, {"name": "kind:scan"}],
+        }
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    issue = tracker.get_issue(issue_id="123")
+    assert issue is not None
+    assert issue["issue_id"] == "123"
+    assert issue["state"] == "open"
+    assert issue["labels"] == ["healer:ready", "kind:scan"]
+
+
+def test_get_issue_returns_none_for_missing_issue(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/404"
+        assert method == "GET"
+        return {}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    assert tracker.get_issue(issue_id="404") is None
+
+
 def test_close_issue(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

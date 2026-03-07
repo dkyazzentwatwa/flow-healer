@@ -16,7 +16,7 @@ This roadmap outlines the next areas of investment for Flow Healer. It is intent
 - Add richer policy controls for which issues, labels, authors, and file paths are eligible for autonomous work.
 - Improve path prediction and lock scoping so concurrent fixes can move faster with less collision risk.
 - Introduce stronger preflight checks before a proposal runs, including repo cleanliness, branch safety, and environment readiness.
-- Expand verifier guardrails for docs-only, config-only, and high-risk code changes.
+- Build on the new verifier guardrails for docs-only, config-only, and high-risk code changes with clearer evidence capture and repo-specific tuning.
 
 ### 2. Better Verification and Review
 

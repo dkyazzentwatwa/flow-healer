@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from flow_healer.store import SQLiteStore
 
 
@@ -103,6 +105,8 @@ def test_triage_script_classifies_connector_failure(tmp_path):
     assert proc.returncode == 0
     payload = json.loads(proc.stdout)
     assert payload["diagnosis"] == "connector_or_patch_generation"
+    assert payload["recommended_skill"] == "flow-healer-connector-debug"
+    assert "connector-debug" in payload["default_action"]
 
 
 def test_followup_inspector_reads_issue_state(tmp_path):
@@ -141,3 +145,123 @@ def test_followup_inspector_reads_issue_state(tmp_path):
     payload = json.loads(proc.stdout)
     assert payload["issue"]["pr_number"] == 4
     assert payload["issue"]["last_issue_comment_id"] == 123
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "required_snippets"),
+    [
+        (
+            "skills/flow-healer-local-validation/SKILL.md",
+            [
+                "## Inputs",
+                "## Outputs",
+                "## Key Output Fields",
+                "## Success Criteria",
+                "## Failure Handling",
+                "## Next Step",
+                "`repo_root`",
+                "`checks[*].exit_code`",
+                "`checks[*].output_tail`",
+                "`name`, `category`, or `duration_seconds`",
+            ],
+        ),
+        (
+            "skills/flow-healer-preflight/SKILL.md",
+            [
+                "## Inputs",
+                "## Outputs",
+                "## Key Output Fields",
+                "## Success Criteria",
+                "## Failure Handling",
+                "## Next Step",
+                "`required_checks.gh_auth_ok`",
+                "`required_checks.repo_exists`",
+                "`required_checks.git_repo`",
+                "`required_checks.repo_clean_git`",
+                "`required_checks.venv_ok`",
+                "`required_checks.docker_ok`",
+                "Treat `docker_ok` as required",
+            ],
+        ),
+        (
+            "skills/flow-healer-live-smoke/SKILL.md",
+            [
+                "## Inputs",
+                "## Outputs",
+                "## Key Output Fields",
+                "## Success Criteria",
+                "## Failure Handling",
+                "## Next Step",
+                "`docs_scaffold`",
+                "`docs_followup_note`",
+                "`issue_id`",
+                "`pr_id`",
+                "`branch_name`",
+                "`attempt_state`",
+                "`verifier_summary`",
+                "`test_summary`",
+                "It does not run `flow-healer start --once` by itself.",
+            ],
+        ),
+        (
+            "skills/flow-healer-triage/SKILL.md",
+            [
+                "## Inputs",
+                "## Outputs",
+                "## Key Output Fields",
+                "## Success Criteria",
+                "## Failure Handling",
+                "## Next Step",
+                "`operator_or_environment`",
+                "`repo_fixture_or_setup`",
+                "`connector_or_patch_generation`",
+                "`product_bug`",
+                "`external_service_or_github`",
+                "`flow-healer-connector-debug`",
+            ],
+        ),
+        (
+            "skills/flow-healer-pr-followup/SKILL.md",
+            [
+                "## Inputs",
+                "## Outputs",
+                "## Key Output Fields",
+                "## Success Criteria",
+                "## Failure Handling",
+                "## Next Step",
+                "`issue.pr_number`",
+                "`issue.last_issue_comment_id`",
+                "`issue.feedback_context`",
+                "`issue.state`",
+                "`attempts[*].state`",
+                "## Safe Resume Checklist",
+                "The issue is still active.",
+                "The PR is still relevant.",
+                "New external feedback exists.",
+                "No active running attempt exists.",
+                "Stored branch or worktree metadata still matches reality.",
+            ],
+        ),
+        (
+            "skills/flow-healer-connector-debug/SKILL.md",
+            [
+                "# Flow Healer Connector Debug",
+                "Use this skill when `flow-healer-triage` reports `connector_or_patch_generation`.",
+                "Connector command resolution",
+                "Diff fence validity",
+                "Empty diff detection",
+                "Verifier JSON validity",
+                "Patch-apply outcome",
+                "Validate connector command resolution",
+                "Rerun the connector against a fixed prompt fixture",
+                "Detect empty diff output and malformed diff fences",
+                "Validate any verifier payload as JSON",
+                "Compare proposer and verifier contracts",
+            ],
+        ),
+    ],
+)
+def test_skill_docs_encode_the_skills_upgrade_contract(relative_path: str, required_snippets: list[str]) -> None:
+    text = (ROOT / relative_path).read_text(encoding="utf-8")
+    for snippet in required_snippets:
+        assert snippet in text

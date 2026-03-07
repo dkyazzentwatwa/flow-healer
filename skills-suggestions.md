@@ -1,509 +1,178 @@
-# Skills Upgrade Suggestions
+# Skills Upgrade Implementation
 
-The repo-local `skills/` set is already well shaped for the Flow Healer lifecycle:
-The repo-local `/skills` set is already pointed in the right direction. The current five skills cover the main operator loop:
+This repo now has the intended operator skill path under `skills/`:
 
 - `flow-healer-local-validation`
 - `flow-healer-preflight`
 - `flow-healer-live-smoke`
 - `flow-healer-triage`
 - `flow-healer-pr-followup`
+- `flow-healer-connector-debug`
 
-The next round of improvement should stay narrow: tighten the contract of these five skills, make handoffs explicit, and add only the missing runtime-debugging skills that current failure buckets already imply.
+The contract upgrade is implemented by making each existing `SKILL.md` executable from the skill file alone. Each core skill now names what to pass in, what JSON comes back, which fields matter first, when to stop, and what the default next action is. The connector failure path is also documented through a dedicated connector-debug skill.
 
-## What To Preserve
+## Baseline Preserved
 
-- Keep one skill per operator stage.
-- Keep script-driven, deterministic workflows.
-- Keep the skill surface repo-local and low ceremony.
-- Keep live GitHub work behind explicit preflight and stop conditions.
+- One repo-local skill still maps to each operator stage.
+- Script-driven flows remain deterministic.
+- Live GitHub mutation is still gated behind preflight and explicit stop conditions.
+- The default path is readable without requiring `references/` on first pass.
+- Documented fields stay aligned with current script output.
 
-## Cross-Skill Fixes
-
-Every `SKILL.md` should expose the same operator contract. Today the skills are directionally consistent, but the contract is uneven and forces operators to infer too much from nearby docs or script output.
-
-Add these sections to all five skills:
-
-- `Inputs`: required flags, optional flags, defaults, and any path assumptions.
-- `Outputs`: exact artifact paths or top-level JSON fields the script returns.
-- `Key Output Fields`: the first fields an operator should read.
-- `Success Criteria`: what counts as pass, partial pass, or hard stop.
-- `Failure Handling`: retryable versus non-retryable outcomes.
-- `Next Step`: the default downstream skill or operator action.
-
-Apply these shared writing rules:
-
-- Put stop conditions in every skill, even if the current workflow implies them.
-- Name the script output fields exactly as emitted by the script.
-- Prefer direct action wording such as "stop", "rerun", "handoff", or "repair first".
-- Keep each skill self-sufficient for the first pass; do not require opening a reference doc just to understand the default path.
-
-## Skill-Specific Fixes
+## Implemented Skill Contracts
 
 ### `flow-healer-local-validation`
 
-Current gap:
+`skills/flow-healer-local-validation/SKILL.md` now includes:
 
-- The skill is too thin relative to how important the local gate is.
-- It says to treat non-zero checks as a no-go, but it does not explain the check schema or local-only versus live-readiness outcomes.
+- `Inputs`
+- `Outputs`
+- `Key Output Fields`
+- `Success Criteria`
+- `Failure Handling`
+- `Next Step`
 
-Recommended fixes:
+The documented outputs remain aligned with `skills/flow-healer-local-validation/scripts/local_validation.py`:
 
-- Add `Inputs` for repo root, optional mode, and optional smoke-config dependency.
-- Add `Outputs` and `Key Output Fields` for `repo_root` and `checks`.
-- Document each check entry as `name`, `cmd`, `exit_code`, `output_tail`, and any future `category` or `duration_seconds` fields if the script is expanded.
-- Add `Success Criteria` with three outcomes:
-  - local repo healthy
-  - healthy enough for preflight
-  - blocked pending remediation
-- Add `Next Step` guidance:
-  - stop after local validation for plumbing-only work
-  - hand off to `flow-healer-preflight` before live mutation
-  - skip live smoke unless the request truly needs live GitHub validation
-- Surface the decision boundary from `references/modes.md` directly in the skill instead of leaving it buried in the reference.
+- `repo_root`
+- `checks`
+- `checks[*].exit_code`
+- `checks[*].output_tail`
+
+The skill also keeps the warning explicit: do not rely on future-only fields such as `name`, `category`, or `duration_seconds`.
 
 ### `flow-healer-preflight`
 
-Current gap:
+`skills/flow-healer-preflight/SKILL.md` now includes the required shared sections and describes the real script contract from `skills/flow-healer-preflight/scripts/preflight_check.py`.
 
-- The skill covers the broad environment gate well, but it does not make runtime drift checks or output interpretation explicit enough.
+The documented outputs remain:
 
-Recommended fixes:
+- `repo_path`
+- `repo_slug`
+- `required_checks`
+- `context`
+- `samples`
+- `notes`
 
-- Add `Inputs` for `repo-path`, `repo-slug`, and optional `state-db-path`.
-- Add `Outputs` and `Key Output Fields` for:
-  - `required_checks`
-  - `context`
-  - `samples`
-  - `notes`
-- Add `Success Criteria` buckets:
-  - safe for live smoke
-  - safe only for local work
-  - blocked pending remediation
-- Expand stop conditions to mention:
-  - auth failure
-  - dirty worktree when the run expects cleanliness
-  - missing `.venv`
-  - missing Docker when relevant gates require it
-  - unexpected active healer state
-- Add a short `Failure Handling` section that points operators to `references/remediation.md` only after the primary failure is named in the skill itself.
-- Add a `Next Step` section that defaults to `flow-healer-live-smoke` only when all required checks pass.
+The key required checks are called out directly in the main skill body:
+
+- `required_checks.gh_auth_ok`
+- `required_checks.repo_exists`
+- `required_checks.git_repo`
+- `required_checks.repo_clean_git`
+- `required_checks.venv_ok`
+- `required_checks.docker_ok`
+
+The skill now also states the real current constraint: `docker_ok` is required today.
 
 ### `flow-healer-live-smoke`
 
-Current gap:
+`skills/flow-healer-live-smoke/SKILL.md` now includes the required shared sections and keeps the template list aligned with `skills/flow-healer-live-smoke/scripts/make_live_smoke_bundle.py`.
 
-- The workflow is clear, but template scope, bundle outputs, and artifact checklist are still too implicit.
+The documented outputs remain:
 
-Recommended fixes:
+- `template`
+- `connector_path`
+- `config_path`
+- `state_root`
 
-- Add `Inputs` for repo path, repo slug, repo name, output dir, and template.
-- Add `Outputs` and `Key Output Fields` for:
-  - `template`
-  - `connector_path`
-  - `config_path`
-  - `state_root`
-- Move the core artifact checklist from `references/runbook.md` into the skill:
-  - issue id
-  - PR id
-  - branch name
-  - attempt state
-  - verifier summary
-  - test summary
-- Add `Success Criteria` for a smoke run that completes with coherent issue, PR, and verifier artifacts.
-- Add `Failure Handling` that explicitly routes suspicious failures to `flow-healer-triage` instead of retrying.
-- Document the current templates as smoke-safe and note that docs-only smoke is useful for plumbing but not fully representative of broader patch behavior.
-
-### `flow-healer-triage`
-
-Current gap:
-
-- The skill explains the diagnosis buckets, but not the default action to take after classification.
-
-Recommended fixes:
-
-- Add `Inputs` for DB path and issue id.
-- Add `Outputs` and `Key Output Fields` for:
-  - `issue`
-  - `latest_attempt`
-  - `diagnosis`
-- Add `Success Criteria` that defines a successful run as one that produces a diagnosis plus an operator-ready next action.
-- Add `Failure Handling` for incomplete or ambiguous issue state.
-- Add explicit bucket-to-action mapping:
-  - `operator_or_environment` -> repair environment and rerun `flow-healer-preflight`
-  - `repo_fixture_or_setup` -> repair repo/setup and rerun `flow-healer-local-validation`
-  - `connector_or_patch_generation` -> hand off to a connector-debug skill
-  - `product_bug` -> capture evidence and escalate
-  - `external_service_or_github` -> retry later with operator note
-- Add `Next Step` language so the operator does not have to translate the bucket manually.
-
-### `flow-healer-pr-followup`
-
-Current gap:
-
-- The skill is cautious, but the reuse contract is still partly hidden in `references/followup_rules.md`.
-
-Recommended fixes:
-
-- Add `Inputs` for DB path and issue id.
-- Add `Outputs` and `Key Output Fields` for:
-  - `issue`
-  - `attempts`
-- Add `Success Criteria` that defines when reuse is safe.
-- Add `Failure Handling` that distinguishes:
-  - no new feedback
-  - already ingested feedback
-  - active running state
-  - branch or worktree mismatch
-- Add a short safe-to-resume checklist directly in the skill:
-  - issue still active
-  - PR still relevant
-  - new external feedback exists
-  - no active running attempt
-  - stored branch/worktree metadata still matches reality
-- Add `Next Step` guidance that falls back to `flow-healer-triage` when reuse is unsafe or ambiguous.
-
-## Missing Skills To Add
-
-Only add skills that close gaps already visible in the current lifecycle.
-
-### `flow-healer-connector-debug`
-
-Why it belongs:
-
-- `flow-healer-triage` already names `connector_or_patch_generation` as a first-class diagnosis bucket.
-- There is no dedicated skill for `no_patch`, malformed diff output, patch-apply failures, or connector command resolution drift.
-
-Recommended scope:
-
-- Validate connector command resolution.
-- Re-run the connector against a fixed prompt fixture.
-- Detect malformed diff fences, empty patch bodies, and invalid JSON payloads.
-- Compare proposer and verifier output contracts.
-
-### `flow-healer-incident-capture`
-
-Why it belongs:
-
-- `flow-healer-triage` can identify likely product bugs, but there is no skill that packages evidence into a reusable escalation artifact.
-
-Recommended scope:
-
-- Gather issue metadata and recent attempts.
-- Include failure class, failure reason, verifier summary, and test summary.
-- Capture reproduction hints and relevant state rows.
-- Produce a markdown incident packet ready for `docs/` or GitHub issue creation.
-
-### `flow-healer-state-repair`
-
-Why it belongs:
-
-- Current skills can notice broken or stuck SQLite state, but none are dedicated to safely analyzing and repairing it.
-
-Recommended scope:
-
-- Inspect `running`, `queued`, backoff, and PR-linked issue states.
-- Detect orphaned attempts or mismatched issue and attempt state.
-- Recommend safe manual remediation before another live run.
-- Prefer repair planning over automatic mutation.
-
-## Highest-Leverage Order
-
-If only a few changes land first, do them in this order:
-
-1. Tighten the shared contract across all five existing `SKILL.md` files.
-2. Expand `flow-healer-local-validation` so it reports healer-specific readiness instead of only broad repo health.
-3. Expand `flow-healer-preflight` so it catches runtime drift before live execution.
-4. Add `flow-healer-connector-debug` because triage already points to that missing branch.
-5. Deepen `flow-healer-triage` so it returns explicit next-step guidance.
-
-## Acceptance Bar
-
-Treat the upgrade as complete when:
-
-- Each existing skill can be executed without opening a second doc for the default path.
-- Every skill names its inputs, outputs, stop conditions, and next step.
-- `local-validation`, `preflight`, `live-smoke`, `triage`, and `pr-followup` form an explicit operator graph.
-- The missing `connector_or_patch_generation` path is covered by a dedicated skill instead of an implied manual investigation.
-That gives Flow Healer a workable path from safe local checks to live smoke, failure diagnosis, and PR reuse. The next upgrade should keep that narrow, deterministic style while closing a few gaps around handoffs, artifact contracts, and deeper runtime diagnostics.
-
-## What Is Already Strong
-
-- Each skill is scoped to one stage of the healer lifecycle instead of trying to be a catch-all.
-- Four of the five skills already anchor to small scripts, which keeps execution deterministic.
-- The sequence is easy to understand: validate locally, preflight, smoke, triage failures, then follow up on an existing PR.
-- The references files are lightweight and useful; they add guardrails without bloating the skill entrypoints.
-
-## Main Improvement Areas
-
-### 1. Standardize the contract for every skill
-
-The skills are similar in tone, but they do not yet expose the same operator contract.
-
-Suggested additions to every `SKILL.md`:
-
-- `Inputs`: required arguments, optional arguments, and where they come from
-- `Outputs`: exact artifact or report produced
-- `Success Criteria`: what counts as pass, partial pass, or hard stop
-- `Next Step`: which skill should usually follow
-- `Failure Handling`: retryable versus non-retryable outcomes
-
-Why this matters:
-
-- `preflight` and `live-smoke` are clearly related, but the handoff is still implied rather than explicit.
-- `triage` returns a diagnosis bucket, but the default next move still lives in operator judgment.
-- `pr-followup` has good stop conditions, but not a crisp definition of "safe to resume."
-
-### 2. Make script output schemas part of the skills
-
-The scripts mostly emit structured JSON, but the skills do not tell the operator which fields matter first.
-
-Concrete gaps:
-
-- `flow-healer-local-validation` returns `checks`, but the skill does not explain which failures block live work versus which are informational.
-- `flow-healer-preflight` emits `required_checks`, `context`, `samples`, and `notes`, but the skill only describes them at a high level.
-- `flow-healer-triage` returns `issue`, `latest_attempt`, and `diagnosis`, but the meaning of the evidence is not formalized in the skill.
-- `flow-healer-pr-followup` returns `issue` plus `attempts`, but the resume criteria are still partially inferred.
-- `flow-healer-live-smoke` depends on a generated bundle and a runbook checklist, but the artifact set could be more explicit in the main skill file.
-
-Recommended upgrade:
-
-- Add a short "Key Output Fields" section to each skill that names the first fields an operator or agent should inspect.
-
-### 3. Strengthen transitions between skills
-
-The current skills are good as individual islands. The next step is to make them behave more like an operating graph.
-
-Recommended handoff rules:
-
-- `local-validation` should say when to stop locally, when to escalate to `preflight`, and when to jump directly to `live-smoke`.
-- `preflight` should classify outcomes as:
-  - safe for live smoke
-  - safe only for local work
-  - blocked pending remediation
-- `triage` should map each diagnosis bucket to a default next skill.
-- `pr-followup` should state when follow-up should fall back to `triage` instead of attempting resume.
-
-Suggested bucket-to-next-step mapping:
-
-- `operator_or_environment` -> fix environment, rerun `flow-healer-preflight`
-- `repo_fixture_or_setup` -> repair local repo/test setup, rerun `flow-healer-local-validation`
-- `connector_or_patch_generation` -> run a dedicated connector-debug skill
-- `product_bug` -> capture evidence with an incident skill
-- `external_service_or_github` -> retry later with a clear operator note
-
-### 4. Expand `flow-healer-local-validation`
-
-This skill is currently the thinnest compared with how important it is.
-
-Observed behavior today:
-
-- It runs `pytest -q`.
-- It optionally runs a dry-run scan only if `.flow-healer-smoke-config.yaml` exists.
-
-That is useful, but it leaves out a lot of healer-specific confidence checks.
-
-Recommended upgrades:
-
-- Add validation modes such as `fast`, `core`, and `full`.
-- Add targeted checks for:
-  - `tests/test_healer_loop.py`
-  - `tests/test_healer_runner.py`
-  - `tests/test_codex_cli_connector.py`
-  - `tests/test_skill_assets.py`
-  - `flow-healer doctor`
-  - `flow-healer scan --dry-run`
-- Report a `category` and `duration_seconds` per check so the skill can recommend the next action more reliably.
-
-### 5. Expand `flow-healer-preflight` for runtime drift
-
-`preflight` is already a good repo readiness check, but its focus is still mostly git, auth, Docker, and SQLite state.
-
-Observed behavior today:
-
-- Checks GitHub auth
-- Verifies git worktree state
-- Verifies clean working tree
-- Verifies `.venv`
-- Verifies Docker
-- Samples open issues and PRs
-- Optionally inspects SQLite issue counts
-
-Recommended upgrades:
-
-- Verify the configured connector command resolves and is executable.
-- Verify the state DB path is writable, not just present.
-- Confirm the configured default branch matches remote reality.
-- Check that the CLI resolves from the intended interpreter, not just that `.venv/bin/python` exists.
-- Detect environment drift that would break launchd or non-interactive runs.
-
-This is a high-value area because Flow Healer has core modules like `codex_cli_connector.py`, `healer_runner.py`, and `service.py`, but the skill surface does not yet inspect connector readiness directly.
-
-### 6. Broaden `flow-healer-live-smoke`
-
-The live smoke bundle generator is solid and deterministic, but the templates are still narrow.
-
-Observed behavior today:
+The skill keeps the real template choices explicit:
 
 - `docs_scaffold`
 - `docs_followup_note`
 
-That is a good starting point, but it only proves a subset of low-risk mutation paths.
+The artifact checklist now lives in the main skill body instead of only in the runbook:
 
-Recommended upgrades:
+- `issue_id`
+- `pr_id`
+- `branch_name`
+- `attempt_state`
+- `verifier_summary`
+- `test_summary`
 
-- Add more smoke-safe templates such as:
-  - `single_markdown_edit`
-  - `comment_only_followup`
-  - `tests_fixture_note`
-  - `config_comment_annotation`
-- Add a `risk class` note for each template.
-- Add guidance on when docs-only smoke is not representative enough.
-- Promote the artifact checklist from the runbook into the main skill file so fewer steps depend on opening a second document.
+The skill also states the real boundary: bundle generation does not itself run `flow-healer start --once`.
 
-### 7. Deepen `flow-healer-triage`
+### `flow-healer-triage`
 
-The current triage script is intentionally lightweight, but it is one of the best places to invest next.
+`skills/flow-healer-triage/SKILL.md` now includes the required shared sections and maps each diagnosis bucket to a default operator action.
 
-Observed behavior today:
+The documented outputs remain:
 
-- Reads the issue row
-- Reads the latest attempt
-- Classifies into one of five buckets
+- `issue`
+- `latest_attempt`
+- `diagnosis`
 
-Recommended upgrades:
+The key fields called out in the skill body remain:
 
-- Include previous attempts for the same issue, not just the latest one.
-- Surface recurring failure patterns such as repeated `no_patch` or `patch_apply_failed`.
-- Include verifier and test summaries when present.
-- Capture lock prediction versus actual lock behavior when relevant.
-- Add a compact "incident packet" mode for product bugs.
+- `diagnosis`
+- `latest_attempt.failure_class`
+- `latest_attempt.failure_reason`
+- `issue.state`
 
-This would turn triage from a simple classifier into a reusable incident-analysis tool.
+The default action mapping is now explicit for:
 
-### 8. Clarify `flow-healer-pr-followup`
+- `operator_or_environment`
+- `repo_fixture_or_setup`
+- `connector_or_patch_generation`
+- `product_bug`
+- `external_service_or_github`
 
-This skill is careful, which is good, but it could be more explicit about what makes reuse safe.
+### `flow-healer-pr-followup`
 
-Recommended upgrades:
+`skills/flow-healer-pr-followup/SKILL.md` now includes the required shared sections and keeps the reuse decision visible without requiring `references/`.
 
-- Define exact resume criteria:
-  - issue state
-  - PR state
-  - presence of new external feedback
-  - branch/worktree metadata alignment
-  - no active running attempt
-- Define explicit "recreate instead of resume" conditions.
-- Add a short checklist for feedback ingestion across issue comments, PR comments, and review comments.
-- Explain how to handle stale branches, force-pushes, and closed/reopened PRs.
+The documented outputs remain:
 
-## New Skills Worth Adding
+- `issue`
+- `attempts`
 
-### 1. `flow-healer-connector-debug`
+The main skill body now calls out:
 
-Purpose:
+- `issue.pr_number`
+- `issue.last_issue_comment_id`
+- `issue.feedback_context`
+- `issue.state`
+- `attempts[*].state`
 
-- Diagnose `no_patch`, malformed diff output, patch-apply failures, verifier/proposer contract mismatches, and connector command resolution problems.
+The safe-to-resume checklist is also present in the main skill body:
 
-Why it should exist:
+- issue still active
+- PR still relevant
+- new external feedback exists
+- no active running attempt
+- stored branch or worktree metadata still matches reality
 
-- `flow-healer-triage` already has a `connector_or_patch_generation` bucket.
-- There is no dedicated skill for digging into that bucket once it is identified.
+### `flow-healer-connector-debug`
 
-Suggested scope:
+The previously missing connector-debug path now exists as `skills/flow-healer-connector-debug/SKILL.md`.
 
-- Validate connector command resolution
-- Re-run the connector against a fixed prompt fixture
-- Check output mode expectations against actual output
-- Detect malformed diff fences, empty patch bodies, and invalid JSON payloads
-- Compare proposer/verifier output contracts
+Its scope covers the highest-value gap identified in the original proposal:
 
-Best trigger examples:
+- validating connector command resolution
+- rerunning the connector against a fixed prompt fixture
+- detecting empty diff output
+- detecting malformed diff fences
+- detecting invalid verifier JSON payloads
+- detecting patch-apply failures
+- comparing proposer and verifier output contracts
 
-- "why did the healer produce no patch"
-- "debug connector output"
-- "investigate patch_apply_failed"
+## Operator Graph
 
-### 2. `flow-healer-incident-capture`
+The current skill graph is now explicit:
 
-Purpose:
+1. `flow-healer-local-validation`
+2. `flow-healer-preflight`
+3. `flow-healer-live-smoke`
+4. `flow-healer-triage`
+5. `flow-healer-pr-followup`
+6. `flow-healer-connector-debug` for connector and patch-generation failures
 
-- Turn a suspicious failure into a compact, reusable incident packet.
+## Acceptance Status
 
-Why it should exist:
+Treat the contract upgrade as implemented because:
 
-- `triage` can identify a likely product bug, but it does not yet package the evidence into an artifact ready for escalation.
-
-Suggested scope:
-
-- Gather issue metadata
-- Gather recent attempts
-- Capture failure class and reason
-- Include verifier and test summaries
-- Include reproduction hints and relevant state rows
-- Produce a markdown report suitable for `docs/` or GitHub issue creation
-
-Best trigger examples:
-
-- "capture this healer incident"
-- "prepare a product bug packet"
-- "collect evidence for escalation"
-
-### 3. `flow-healer-state-repair`
-
-Purpose:
-
-- Inspect and safely repair stuck or inconsistent healer state in SQLite after interrupted runs.
-
-Why it should exist:
-
-- The current skills can detect state problems, but none are dedicated to resolving them safely.
-
-Suggested scope:
-
-- Inspect `running`, `queued`, backoff, and PR-linked issue states
-- Detect orphaned attempts or mismatched issue/attempt state
-- Recommend safe manual remediation steps before another live run
-- Optionally generate a before/after repair plan without mutating automatically
-
-Best trigger examples:
-
-- "why is this issue stuck in running"
-- "repair the healer state db"
-- "inspect queue drift after interruption"
-
-### 4. `flow-healer-review-readiness`
-
-Purpose:
-
-- Decide whether a healer-generated PR is ready for human review or needs another local iteration first.
-
-Why it should exist:
-
-- Today the repo can validate, smoke, and follow up, but there is no focused skill for the review boundary itself.
-
-Suggested scope:
-
-- Summarize verifier output and test results
-- Check patch scope and changed-file risk
-- Confirm branch/PR metadata is coherent
-- Flag when follow-up should wait for a human instead of auto-resume
-
-Best trigger examples:
-
-- "is this healer PR ready for review"
-- "should we requeue this PR or wait"
-- "summarize review readiness"
-
-## Highest-Leverage Next Steps
-
-If only a few upgrades are taken first, the best sequence is:
-
-1. Expand `flow-healer-local-validation` so it validates healer-specific behavior rather than only broad repo health.
-2. Add `flow-healer-connector-debug`, because connector and patch-generation failures are already a named triage category.
-3. Expand `flow-healer-preflight` to catch runtime drift before live execution.
-4. Add `flow-healer-incident-capture` so product-bug classification leads directly to a reusable artifact.
-
-## Summary
-
-The current skills are already a good foundation because they are narrow, deterministic, and aligned with real operator workflows. The biggest win now is not adding a large number of overlapping skills. It is tightening the contracts of the existing five skills, making handoffs explicit, and adding a few missing lifecycle skills around connector debugging, state repair, and incident capture.
+- each existing operator skill can be executed from its `SKILL.md` without opening a second doc for the default path
+- every core skill names inputs, outputs, success criteria, failure handling, and next step
+- the live-smoke artifact checklist is in the main skill body
+- documented output fields align with current script JSON
+- the connector failure path is explicitly routed through a dedicated skill

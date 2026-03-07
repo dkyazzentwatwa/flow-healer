@@ -3,7 +3,7 @@
 # Flow Healer
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![CLI](https://img.shields.io/badge/interface-CLI-111111?style=for-the-badge&logo=gnubash&logoColor=white)
+![Control Plane](https://img.shields.io/badge/interface-CLI%20%2B%20Web-111111?style=for-the-badge&logo=gnubash&logoColor=white)
 ![SQLite](https://img.shields.io/badge/state-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
 ![Pytest](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)
 ![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)
@@ -22,6 +22,8 @@ It watches labeled GitHub issues, creates per-issue workspaces, feeds the task t
 
 - Monitors one or many repositories from a single config file.
 - Stores durable per-repo state in SQLite under `~/.flow-healer/`.
+- Provides a phone-friendly web dashboard (`flow-healer serve`) for status and control.
+- Supports Apple Mail + Calendar command polling with strict subject DSL.
 - Creates isolated git worktrees so each fix attempt stays contained.
 - Claims and locks work to reduce conflicting edits across issues.
 - Applies retry budgets, backoff, and circuit-breaker logic before reattempting work.
@@ -125,6 +127,7 @@ service:
 flow-healer doctor
 flow-healer status
 flow-healer start --once
+flow-healer serve
 ```
 
 ## Command Reference
@@ -137,6 +140,26 @@ flow-healer start --once
 | `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo |
 | `flow-healer resume [--repo NAME]` | Resume autonomous processing |
 | `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic scan checks with optional no-write mode |
+| `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Run healer loop + web dashboard + Apple Mail/Calendar pollers |
+
+## Apple Control DSL
+
+Mail subjects and Calendar event titles use:
+
+```text
+FH: <command> repo=<repo-name> key=value ...
+```
+
+Examples:
+
+```text
+FH: status repo=demo
+FH: pause repo=demo
+FH: resume repo=demo
+FH: once repo=demo
+FH: scan repo=demo dry_run=true
+FH: doctor repo=demo
+```
 
 ## Development
 

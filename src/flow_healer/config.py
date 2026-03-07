@@ -16,8 +16,51 @@ class ServiceSettings:
     poll_interval_seconds: float = 60.0
     state_root: str = "~/.flow-healer"
     connector_command: str = "codex"
-    connector_model: str = ""
+    connector_model: str = "gpt-5.4"
+    connector_reasoning_effort: str = "medium"
     connector_timeout_seconds: int = 300
+
+
+@dataclass(slots=True)
+class WebControlSettings:
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8787
+    auth_mode: str = "none"
+
+
+@dataclass(slots=True)
+class MailControlSettings:
+    enabled: bool = False
+    account: str = ""
+    mailbox: str = "INBOX"
+    trusted_senders: list[str] = field(default_factory=list)
+    poll_interval_seconds: float = 30.0
+    subject_prefix: str = "FH:"
+    send_replies: bool = True
+
+
+@dataclass(slots=True)
+class CalendarControlSettings:
+    enabled: bool = False
+    calendar_name: str = "healer-cal"
+    poll_interval_seconds: float = 30.0
+    subject_prefix: str = "FH:"
+    lookback_minutes: int = 5
+    lookahead_minutes: int = 2
+
+
+@dataclass(slots=True)
+class CommandControlSettings:
+    enable_full_control: bool = False
+
+
+@dataclass(slots=True)
+class ControlSettings:
+    web: WebControlSettings = field(default_factory=WebControlSettings)
+    mail: MailControlSettings = field(default_factory=MailControlSettings)
+    calendar: CalendarControlSettings = field(default_factory=CalendarControlSettings)
+    commands: CommandControlSettings = field(default_factory=CommandControlSettings)
 
 
 @dataclass(slots=True)
@@ -40,6 +83,7 @@ class RelaySettings:
     healer_backoff_max_seconds: int = 3600
     healer_circuit_breaker_window: int = 5
     healer_circuit_breaker_failure_rate: float = 0.5
+    healer_circuit_breaker_cooldown_seconds: int = 900
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
     healer_test_gate_mode: str = "local_then_docker"
@@ -47,7 +91,7 @@ class RelaySettings:
     healer_max_diff_lines: int = 400
     healer_max_failed_tests_allowed: int = 0
     healer_scan_enable_issue_creation: bool = False
-    healer_scan_poll_interval_seconds: float = 600.0
+    healer_scan_poll_interval_seconds: float = 180.0
     healer_scan_severity_threshold: str = "medium"
     healer_scan_max_issues_per_run: int = 5
     healer_scan_default_labels: list[str] = field(default_factory=lambda: ["kind:scan"])
@@ -57,6 +101,7 @@ class RelaySettings:
 class AppConfig:
     service: ServiceSettings
     repos: list[RelaySettings]
+    control: ControlSettings = field(default_factory=ControlSettings)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AppConfig":
@@ -74,7 +119,8 @@ class AppConfig:
             poll_interval_seconds=float(service_raw.get("poll_interval_seconds") or 60.0),
             state_root=str(service_raw.get("state_root") or "~/.flow-healer"),
             connector_command=str(service_raw.get("connector_command") or "codex"),
-            connector_model=str(service_raw.get("connector_model") or ""),
+            connector_model=str(service_raw.get("connector_model") or "gpt-5.4"),
+            connector_reasoning_effort=str(service_raw.get("connector_reasoning_effort") or "medium"),
             connector_timeout_seconds=int(service_raw.get("connector_timeout_seconds") or 300),
         )
 
@@ -110,6 +156,9 @@ class AppConfig:
                     healer_backoff_max_seconds=int(item.get("backoff_max_seconds") or 3600),
                     healer_circuit_breaker_window=int(item.get("circuit_breaker_window") or 5),
                     healer_circuit_breaker_failure_rate=float(item.get("circuit_breaker_failure_rate") or 0.5),
+                    healer_circuit_breaker_cooldown_seconds=int(
+                        item.get("circuit_breaker_cooldown_seconds") or 900
+                    ),
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
                     healer_test_gate_mode=str(item.get("test_gate_mode") or "local_then_docker"),
@@ -118,14 +167,49 @@ class AppConfig:
                     healer_max_failed_tests_allowed=int(item.get("max_failed_tests_allowed") or 0),
                     healer_scan_enable_issue_creation=bool(item.get("scan_enable_issue_creation", False)),
                     healer_scan_poll_interval_seconds=float(
-                        item.get("scan_poll_interval_seconds") or 600.0
+                        item.get("scan_poll_interval_seconds") or 180.0
                     ),
                     healer_scan_severity_threshold=str(item.get("scan_severity_threshold") or "medium"),
                     healer_scan_max_issues_per_run=int(item.get("scan_max_issues_per_run") or 5),
                     healer_scan_default_labels=_list_of_str(item.get("scan_default_labels"), ["kind:scan"]),
                 )
             )
-        return cls(service=service, repos=repos)
+        control_raw = raw.get("control") if isinstance(raw.get("control"), dict) else {}
+        web_raw = control_raw.get("web") if isinstance(control_raw.get("web"), dict) else {}
+        mail_raw = control_raw.get("mail") if isinstance(control_raw.get("mail"), dict) else {}
+        calendar_raw = control_raw.get("calendar") if isinstance(control_raw.get("calendar"), dict) else {}
+        commands_raw = control_raw.get("commands") if isinstance(control_raw.get("commands"), dict) else {}
+
+        control = ControlSettings(
+            web=WebControlSettings(
+                enabled=bool(web_raw.get("enabled", True)),
+                host=str(web_raw.get("host") or "0.0.0.0"),
+                port=int(web_raw.get("port") or 8787),
+                auth_mode=str(web_raw.get("auth_mode") or "none"),
+            ),
+            mail=MailControlSettings(
+                enabled=bool(mail_raw.get("enabled", False)),
+                account=str(mail_raw.get("account") or ""),
+                mailbox=str(mail_raw.get("mailbox") or "INBOX"),
+                trusted_senders=_list_of_str(mail_raw.get("trusted_senders"), []),
+                poll_interval_seconds=float(mail_raw.get("poll_interval_seconds") or 30.0),
+                subject_prefix=str(mail_raw.get("subject_prefix") or "FH:"),
+                send_replies=bool(mail_raw.get("send_replies", True)),
+            ),
+            calendar=CalendarControlSettings(
+                enabled=bool(calendar_raw.get("enabled", False)),
+                calendar_name=str(calendar_raw.get("calendar_name") or "healer-cal"),
+                poll_interval_seconds=float(calendar_raw.get("poll_interval_seconds") or 30.0),
+                subject_prefix=str(calendar_raw.get("subject_prefix") or "FH:"),
+                lookback_minutes=int(calendar_raw.get("lookback_minutes") or 5),
+                lookahead_minutes=int(calendar_raw.get("lookahead_minutes") or 2),
+            ),
+            commands=CommandControlSettings(
+                enable_full_control=bool(commands_raw.get("enable_full_control", False)),
+            ),
+        )
+
+        return cls(service=service, repos=repos, control=control)
 
     def state_root_path(self) -> Path:
         return Path(self.service.state_root).expanduser().resolve()

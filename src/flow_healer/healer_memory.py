@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -36,12 +37,15 @@ _STOPWORDS = {
 }
 _NEGATIVE_FAILURES = {
     "no_patch",
+    "no_workspace_change",
     "patch_apply_failed",
     "diff_limit_exceeded",
     "tests_failed",
     "verifier_failed",
     "lock_conflict",
     "lock_upgrade_conflict",
+    "connector_unavailable",
+    "connector_runtime_error",
 }
 
 
@@ -138,12 +142,18 @@ class HealerMemoryService:
         issue_text: str,
         predicted_lock_set: list[str],
         last_failure_class: str = "",
+        task_kind: str = "",
+        validation_profile: str = "",
+        output_targets: list[str] | tuple[str, ...] | None = None,
         limit: int = 3,
     ) -> str:
         lessons = self.retrieve_lessons(
             issue_text=issue_text,
             predicted_lock_set=predicted_lock_set,
             last_failure_class=last_failure_class,
+            task_kind=task_kind,
+            validation_profile=validation_profile,
+            output_targets=output_targets,
             limit=limit,
         )
         if not lessons:
@@ -163,6 +173,9 @@ class HealerMemoryService:
         issue_text: str,
         predicted_lock_set: list[str],
         last_failure_class: str = "",
+        task_kind: str = "",
+        validation_profile: str = "",
+        output_targets: list[str] | tuple[str, ...] | None = None,
         limit: int = 3,
     ) -> list[RetrievedHealerLesson]:
         if not self.enabled or not hasattr(self.store, "list_healer_lessons"):
@@ -175,6 +188,14 @@ class HealerMemoryService:
         predicted_keys = set(predicted_lock_set or [])
         scored: list[RetrievedHealerLesson] = []
         for row in rows:
+            scope_key = str(row.get("scope_key") or "").strip()
+            if _should_skip_lesson_for_task(
+                scope_key=scope_key,
+                task_kind=task_kind,
+                validation_profile=validation_profile,
+                output_targets=output_targets or (),
+            ):
+                continue
             guardrail = row.get("guardrail") if isinstance(row.get("guardrail"), dict) else {}
             lesson_keys = set()
             for key in guardrail.get("predicted_lock_set") or []:
@@ -192,7 +213,6 @@ class HealerMemoryService:
                     score += 12 * len(overlap)
                 elif "repo:*" in predicted_keys and row.get("scope_key") == "repo:*":
                     score += 4
-            scope_key = str(row.get("scope_key") or "").strip()
             if scope_key and scope_key in predicted_keys:
                 score += 8
             lesson_failure_class = str(guardrail.get("failure_class") or "").strip()
@@ -280,12 +300,15 @@ class HealerMemoryService:
 
         failure_map = {
             "no_patch": "Return only a valid unified diff fenced block.",
+            "no_workspace_change": "Ensure the run actually edits files and stages a scoped artifact diff.",
             "patch_apply_failed": "Do not assume stale file paths or hunk context; align the diff to the current tree.",
             "diff_limit_exceeded": "Keep the patch narrowly scoped and avoid broad refactors.",
             "tests_failed": "Preserve existing behavior and satisfy both targeted and full pytest gates.",
             "verifier_failed": "Address the root cause instead of silencing symptoms or only making tests pass.",
             "lock_conflict": "Avoid overlapping edits outside the predicted scope to reduce contention.",
             "lock_upgrade_conflict": "Avoid expanding the patch into new paths after the initial scoped plan.",
+            "connector_unavailable": "Check worker runtime environment and ensure Codex CLI is available before consuming retries.",
+            "connector_runtime_error": "Treat connector runtime crashes as infra failures and capture raw error output for diagnosis.",
         }
         mapped = failure_map.get(failure_class, "Keep the patch conservative and easy to verify.")
         reason = (failure_reason or "").strip()
@@ -303,3 +326,30 @@ class HealerMemoryService:
             if len(token) >= 3 and token not in _STOPWORDS
         }
         return words
+
+
+def _should_skip_lesson_for_task(
+    *,
+    scope_key: str,
+    task_kind: str,
+    validation_profile: str,
+    output_targets: list[str] | tuple[str, ...],
+) -> bool:
+    normalized_scope = (scope_key or "").strip()
+    if not normalized_scope.startswith("path:"):
+        return False
+    if validation_profile != "code_change":
+        return False
+    normalized_kind = (task_kind or "").strip().lower()
+    if normalized_kind not in {"build", "fix", "edit"}:
+        return False
+    if output_targets and not all(_is_artifact_path(path) for path in output_targets):
+        return False
+    rel_path = normalized_scope.removeprefix("path:").strip()
+    return _is_artifact_path(rel_path)
+
+
+def _is_artifact_path(path: str) -> bool:
+    lowered = str(path or "").strip().lower()
+    suffix = Path(lowered).suffix
+    return lowered.startswith("docs/") or suffix in {".md", ".mdx", ".rst", ".txt"}

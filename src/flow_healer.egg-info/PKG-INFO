@@ -5,6 +5,7 @@ Summary: Standalone multi-repo autonomous healing service for GitHub repositorie
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: PyYAML>=6.0
+Requires-Dist: textual<1,>=0.86
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 
@@ -95,6 +96,7 @@ Copy `config.example.yaml` into `~/.flow-healer/config.yaml` and adjust repo det
 ```yaml
 service:
   github_token_env: GITHUB_TOKEN
+  env_file: ""
   poll_interval_seconds: 60
   state_root: ~/.flow-healer
   connector_command: codex
@@ -111,12 +113,21 @@ repos:
     issue_required_labels:
       - healer:ready
     pr_required_label: healer:pr-approved
+    test_gate_mode: local_then_docker
 ```
 
 Export your GitHub token before running:
 
 ```bash
 export GITHUB_TOKEN=your_token_here
+```
+
+Or point Flow Healer at an existing env file:
+
+```yaml
+service:
+  github_token_env: GITHUB_TOKEN
+  env_file: /absolute/path/to/.env
 ```
 
 ### 3. Run health checks and a single pass
