@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .language_detector import detect_language
+from .language_strategies import LanguageStrategy, get_strategy
 from .protocols import ConnectorProtocol
 
 logger = logging.getLogger("apple_flow.healer_runner")
@@ -34,10 +36,19 @@ class HealerRunner:
         *,
         timeout_seconds: int,
         test_gate_mode: str = "local_then_docker",
+        language: str = "",
+        docker_image: str = "",
+        test_command: str = "",
+        install_command: str = "",
     ) -> None:
         self.connector = connector
         self.timeout_seconds = max(30, int(timeout_seconds))
         self.test_gate_mode = _normalize_test_gate_mode(test_gate_mode)
+        # Language/strategy overrides — resolved per-workspace at run time.
+        self._language = language.strip()
+        self._docker_image = docker_image.strip()
+        self._test_command = test_command.strip()
+        self._install_command = install_command.strip()
 
     def run_attempt(
         self,
@@ -113,11 +124,13 @@ class HealerRunner:
                 test_summary={},
             )
 
+        strategy = self._resolve_strategy(workspace)
         test_summary = _run_test_gates(
             workspace,
             targeted_tests=targeted_tests,
             timeout_seconds=self.timeout_seconds,
             mode=self.test_gate_mode,
+            strategy=strategy,
         )
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
@@ -141,6 +154,16 @@ class HealerRunner:
             diff_files=diff_files,
             diff_lines=diff_lines,
             test_summary=test_summary,
+        )
+
+    def _resolve_strategy(self, workspace: Path) -> LanguageStrategy:
+        """Detect language (unless pinned in config) and build the strategy."""
+        language = self._language or detect_language(workspace)
+        return get_strategy(
+            language,
+            docker_image=self._docker_image,
+            test_command=self._test_command,
+            install_command=self._install_command,
         )
 
 
@@ -198,26 +221,28 @@ def _run_test_gates(
     targeted_tests: list[str],
     timeout_seconds: int,
     mode: str,
+    strategy: LanguageStrategy,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "mode": mode,
+        "language": strategy.docker_image,  # informational
         "failed_tests": 0,
         "targeted_tests": targeted_tests,
     }
-    runners = _gate_runners_for_mode(mode)
+    runners = _gate_runners_for_mode(mode, strategy)
 
     if targeted_tests:
-        targeted_cmd = ["pytest", "-q", *targeted_tests]
+        # Targeted tests: prepend the test paths to the base test command.
+        targeted_cmd = list(strategy.docker_test_cmd[:-1] or strategy.docker_test_cmd) + targeted_tests
         for runner_name, runner in runners:
-            targeted = runner(workspace, targeted_cmd, timeout_seconds)
+            targeted = runner(workspace, targeted_cmd, timeout_seconds, strategy)
             summary[f"{runner_name}_targeted_exit_code"] = targeted["exit_code"]
             summary[f"{runner_name}_targeted_output_tail"] = targeted["output_tail"]
             if targeted["exit_code"] != 0:
                 summary["failed_tests"] += 1
 
-    full_cmd = ["pytest", "-q"]
     for runner_name, runner in runners:
-        full = runner(workspace, full_cmd, timeout_seconds)
+        full = runner(workspace, list(strategy.docker_test_cmd), timeout_seconds, strategy)
         summary[f"{runner_name}_full_exit_code"] = full["exit_code"]
         summary[f"{runner_name}_full_output_tail"] = full["output_tail"]
         if full["exit_code"] != 0:
@@ -225,12 +250,34 @@ def _run_test_gates(
     return summary
 
 
-def _run_pytest_locally(workspace: Path, command: list[str], timeout_seconds: int) -> dict[str, Any]:
+def _run_tests_locally(
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    strategy: LanguageStrategy,
+) -> dict[str, Any]:
+    local_cmd = strategy.local_test_cmd
+    if not local_cmd:
+        # Language toolchain not expected on host; skip and report success.
+        return {"exit_code": 0, "output_tail": "(local gate skipped: no local_test_cmd for this language)"}
+
     env = os.environ.copy()
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(workspace) if not existing else f"{workspace}{os.pathsep}{existing}"
+    # For Python, ensure the workspace is on PYTHONPATH.
+    if "python" in strategy.docker_image:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(workspace) if not existing else f"{workspace}{os.pathsep}{existing}"
+
+    # Use the language's local_test_cmd as the base; append any extra path
+    # args from *command* that go beyond the base command length.
+    extra_args = command[len(local_cmd):] if command[:len(local_cmd)] == local_cmd else []
+    final_cmd = [*local_cmd, *extra_args]
+
+    # Python commands need to be run via sys.executable -m <module>.
+    if "python" in strategy.docker_image and local_cmd[0] in {"pytest"}:
+        final_cmd = [sys.executable, "-m", *final_cmd]
+
     proc = subprocess.run(
-        [sys.executable, "-m", *command],
+        final_cmd,
         cwd=str(workspace),
         env=env,
         check=False,
@@ -245,8 +292,13 @@ def _run_pytest_locally(workspace: Path, command: list[str], timeout_seconds: in
     }
 
 
-def _run_pytest_in_docker(workspace: Path, command: list[str], timeout_seconds: int) -> dict[str, Any]:
-    bash_script = _build_docker_test_script(command)
+def _run_tests_in_docker(
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    strategy: LanguageStrategy,
+) -> dict[str, Any]:
+    bash_script = _build_docker_test_script(strategy, command)
     docker_cmd = [
         "docker",
         "run",
@@ -255,7 +307,7 @@ def _run_pytest_in_docker(workspace: Path, command: list[str], timeout_seconds: 
         f"{workspace}:/workspace",
         "-w",
         "/workspace",
-        "python:3.11-slim",
+        strategy.docker_image,
         "bash",
         "-lc",
         bash_script,
@@ -274,16 +326,12 @@ def _run_pytest_in_docker(workspace: Path, command: list[str], timeout_seconds: 
     }
 
 
-def _build_docker_test_script(command: list[str]) -> str:
-    bootstrap = [
-        "python -m pip install --disable-pip-version-check -q pytest",
-        (
-            "if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then "
-            "python -m pip install --disable-pip-version-check -q -e .; "
-            "fi"
-        ),
-    ]
-    return " && ".join([*bootstrap, " ".join(_shell_quote(part) for part in command)])
+def _build_docker_test_script(strategy: LanguageStrategy, command: list[str]) -> str:
+    parts: list[str] = []
+    if strategy.docker_install_cmd:
+        parts.append(strategy.docker_install_cmd)
+    parts.append(" ".join(_shell_quote(part) for part in command))
+    return " && ".join(parts)
 
 
 def _shell_quote(value: str) -> str:
@@ -297,12 +345,12 @@ def _normalize_test_gate_mode(mode: str) -> str:
     return "local_then_docker"
 
 
-def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:
+def _gate_runners_for_mode(mode: str, strategy: LanguageStrategy) -> list[tuple[str, Any]]:
     if mode == "local_only":
-        return [("local", _run_pytest_locally)]
+        return [("local", _run_tests_locally)]
     if mode == "docker_only":
-        return [("docker", _run_pytest_in_docker)]
+        return [("docker", _run_tests_in_docker)]
     return [
-        ("local", _run_pytest_locally),
-        ("docker", _run_pytest_in_docker),
+        ("local", _run_tests_locally),
+        ("docker", _run_tests_in_docker),
     ]

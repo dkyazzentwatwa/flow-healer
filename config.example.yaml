@@ -38,3 +38,12 @@ repos:
     scan_max_issues_per_run: 5
     scan_default_labels:
       - kind:scan
+    # Language / ecosystem (auto-detected when omitted)
+    # Supported: python | node | go | rust | java_maven | java_gradle | ruby
+    language: ""
+    # Override the Docker image used for test execution (auto-selected per language)
+    docker_image: ""
+    # Override the test command, e.g. "npm run test:ci" or "pytest tests/unit"
+    test_command: ""
+    # Override the Docker dependency-install step, e.g. "npm ci"
+    install_command: ""

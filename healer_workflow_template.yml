@@ -1,0 +1,99 @@
+# flow-healer GitHub Actions workflow
+#
+# Drop this file into  .github/workflows/flow-healer.yml  in any repository
+# to enable autonomous issue healing.
+#
+# Required secrets
+# ----------------
+# GITHUB_TOKEN   – automatically provided by GitHub Actions (no setup needed).
+# OPENAI_API_KEY – used by the `codex` CLI connector. Set this in your repo's
+#                  Settings → Secrets and variables → Actions.
+#
+# Quick-start
+# -----------
+# 1. Copy this file to  .github/workflows/flow-healer.yml
+# 2. Set OPENAI_API_KEY in your repository secrets.
+# 3. Create a GitHub issue and add the label  healer:ready
+# 4. Flow Healer will open a PR.  Add  healer:pr-approved  to merge it.
+#
+# Language support
+# ----------------
+# Flow Healer auto-detects your project's language from marker files:
+#   go.mod → Go   |  Cargo.toml → Rust   |  package.json → Node.js
+#   pom.xml → Maven  |  build.gradle → Gradle  |  Gemfile → Ruby
+#   pyproject.toml / setup.py → Python  (default fallback)
+#
+# Override detection by setting the HEALER_LANGUAGE env var below.
+
+name: Flow Healer
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
+  schedule:
+    # Poll every 10 minutes so feedback and PR-approval labels are picked up.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  heal:
+    runs-on: ubuntu-latest
+    # Prevent concurrent runs from stepping on each other.
+    concurrency:
+      group: flow-healer-${{ github.repository }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history is needed for git worktree operations.
+          fetch-depth: 0
+
+      - name: Set up Python (for flow-healer itself)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install flow-healer
+        run: pip install flow-healer
+
+      - name: Write minimal config
+        run: |
+          mkdir -p ~/.flow-healer
+          cat > ~/.flow-healer/config.yaml << 'EOF'
+          service:
+            github_token_env: GITHUB_TOKEN
+            connector_command: codex
+            poll_interval_seconds: 30
+
+          repos:
+            - name: this-repo
+              path: ${{ github.workspace }}
+              repo_slug: ${{ github.repository }}
+              default_branch: ${{ github.event.repository.default_branch || 'main' }}
+              enable_autonomous_healer: true
+              healer_mode: guarded_pr
+              issue_required_labels:
+                - healer:ready
+              pr_actions_require_approval: true
+              pr_required_label: healer:pr-approved
+              test_gate_mode: docker_only
+              # language: ""        # uncomment to pin: python|node|go|rust|java_maven|java_gradle|ruby
+              # docker_image: ""    # uncomment to override Docker image
+              # test_command: ""    # uncomment to override test command
+              # install_command: "" # uncomment to override install step
+          EOF
+
+      - name: Run flow-healer (single pass)
+        run: flow-healer start --once
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

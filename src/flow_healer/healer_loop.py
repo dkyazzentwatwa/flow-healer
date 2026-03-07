@@ -60,6 +60,10 @@ class AutonomousHealerLoop:
             connector=connector,
             timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
             test_gate_mode=settings.healer_test_gate_mode,
+            language=settings.healer_language,
+            docker_image=settings.healer_docker_image,
+            test_command=settings.healer_test_command,
+            install_command=settings.healer_install_command,
         )
         self.verifier = HealerVerifier(connector=connector)
         self.reviewer = HealerReviewer(connector=connector)

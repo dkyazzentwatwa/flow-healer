@@ -51,6 +51,11 @@ class RelaySettings:
     healer_scan_severity_threshold: str = "medium"
     healer_scan_max_issues_per_run: int = 5
     healer_scan_default_labels: list[str] = field(default_factory=lambda: ["kind:scan"])
+    # Language / ecosystem settings (auto-detected when empty)
+    healer_language: str = ""         # e.g. python | node | go | rust | java_maven | java_gradle | ruby
+    healer_docker_image: str = ""     # override auto-detected Docker image
+    healer_test_command: str = ""     # override test command, e.g. "npm run test:ci"
+    healer_install_command: str = ""  # override Docker install step
 
 
 @dataclass(slots=True)
@@ -123,6 +128,10 @@ class AppConfig:
                     healer_scan_severity_threshold=str(item.get("scan_severity_threshold") or "medium"),
                     healer_scan_max_issues_per_run=int(item.get("scan_max_issues_per_run") or 5),
                     healer_scan_default_labels=_list_of_str(item.get("scan_default_labels"), ["kind:scan"]),
+                    healer_language=str(item.get("language") or ""),
+                    healer_docker_image=str(item.get("docker_image") or ""),
+                    healer_test_command=str(item.get("test_command") or ""),
+                    healer_install_command=str(item.get("install_command") or ""),
                 )
             )
         return cls(service=service, repos=repos)
