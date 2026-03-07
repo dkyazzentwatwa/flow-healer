@@ -45,6 +45,28 @@ def test_healer_memory_records_success_and_failure_lessons():
     assert any(lesson["guardrail"]["failure_class"] == "tests_failed" for lesson in lessons)
 
 
+def test_healer_memory_records_malformed_diff_guardrail_lessons():
+    store = FakeStore()
+    memory = HealerMemoryService(store, enabled=True)
+    issue = SimpleNamespace(issue_id="5011", title="Fix diff fence handling", body="Touches src/flow_healer/healer_runner.py")
+
+    memory.maybe_record_lesson(
+        issue=issue,
+        attempt_id="hat_failure",
+        final_state="failed",
+        predicted_lock_set=["path:src/flow_healer/healer_runner.py"],
+        actual_diff_set=[],
+        test_summary={},
+        verifier_summary={},
+        failure_class="malformed_diff",
+        failure_reason="Proposer returned a diff fence, but the contents were not a valid unified diff.",
+    )
+
+    lessons = store.list_healer_lessons()
+    assert len(lessons) == 1
+    assert lessons[0]["guardrail"]["failure_class"] == "malformed_diff"
+
+
 def test_healer_memory_retrieval_prefers_scope_overlap_and_marks_use():
     store = FakeStore()
     memory = HealerMemoryService(store, enabled=True)

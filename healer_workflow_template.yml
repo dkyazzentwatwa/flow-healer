@@ -1,0 +1,90 @@
+# flow-healer GitHub Actions workflow (repo-local bootstrap)
+#
+# This template is for the flow-healer repository itself (or forks with the same layout).
+# It installs the local checked-out source via `pip install -e .`.
+#
+# Required secrets
+# - OPENAI_API_KEY: used by the `codex` connector
+# - GITHUB_TOKEN: provided automatically by GitHub Actions
+
+name: Flow Healer
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  heal:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: flow-healer-${{ github.repository }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node (for codex CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install codex CLI
+        run: npm install -g @openai/codex
+
+      - name: Install flow-healer from repository source
+        run: pip install -e .
+
+      - name: Write flow-healer config
+        run: |
+          mkdir -p ~/.flow-healer
+          cat > ~/.flow-healer/config.yaml << 'EOF'
+          service:
+            github_token_env: GITHUB_TOKEN
+            connector_command: codex
+            poll_interval_seconds: 30
+
+          repos:
+            - name: this-repo
+              path: ${{ github.workspace }}
+              repo_slug: ${{ github.repository }}
+              default_branch: ${{ github.event.repository.default_branch || 'main' }}
+              enable_autonomous_healer: true
+              healer_mode: guarded_pr
+              issue_required_labels:
+                - healer:ready
+              pr_actions_require_approval: false
+              pr_required_label: healer:pr-approved
+              pr_auto_approve_clean: true
+              pr_auto_merge_clean: true
+              pr_merge_method: squash
+              test_gate_mode: docker_only
+              local_gate_policy: auto
+              # language: ""        # optional: python|node|go|rust|java_maven|java_gradle|ruby
+              # docker_image: ""    # optional override
+              # test_command: ""    # optional override
+              # install_command: "" # optional override
+          EOF
+
+      - name: Run flow-healer (single pass)
+        run: flow-healer start --once
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

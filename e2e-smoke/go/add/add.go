@@ -1,6 +1,6 @@
 package add
 
-// Add returns the sum of two integers.
-func Add(a int, b int) int {
+// Add returns the arithmetic sum of a and b.
+func Add(a, b int) int {
 	return a + b
 }

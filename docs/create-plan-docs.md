@@ -176,10 +176,10 @@ Responsibilities:
 
 Recommended touchpoints:
 
-- [`src/flow_healer/healer_runner.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_runner.py): run proposal preflight before the first proposer turn and short-circuit on hard failures.
-- [`src/flow_healer/healer_workspace.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_workspace.py): reuse or extend repo/worktree safety helpers.
-- [`src/flow_healer/healer_loop.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_loop.py): surface preflight failures in attempt status and retry logic.
-- [`src/flow_healer/service.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/service.py): expose the same engine through `doctor` or a comparable operator command.
+- [`src/flow_healer/healer_runner.py`](src/flow_healer/healer_runner.py): run proposal preflight before the first proposer turn and short-circuit on hard failures.
+- [`src/flow_healer/healer_workspace.py`](src/flow_healer/healer_workspace.py): reuse or extend repo/worktree safety helpers.
+- [`src/flow_healer/healer_loop.py`](src/flow_healer/healer_loop.py): surface preflight failures in attempt status and retry logic.
+- [`src/flow_healer/service.py`](src/flow_healer/service.py): expose the same engine through `doctor` or a comparable operator command.
 
 ## Implementation Plan
 

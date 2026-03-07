@@ -2,6 +2,9 @@
 name = "flow-healer-rust-smoke"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
+publish = false
+description = "Rust smoke fixture covering the add regression path"
 
 [lib]
 path = "src/lib.rs"

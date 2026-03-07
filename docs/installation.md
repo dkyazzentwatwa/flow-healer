@@ -35,8 +35,9 @@ Global settings for the Flow Healer service.
 | `github_token_env` | Environment variable name for the GitHub token. | `GITHUB_TOKEN` |
 | `poll_interval_seconds` | How often to poll GitHub for changes. | `60` |
 | `state_root` | Directory for SQLite state and worktrees. | `~/.flow-healer` |
+| `connector_backend` | Which Codex transport to use: `exec` or `app_server`. | `exec` |
 | `connector_command` | The CLI command for the AI connector (e.g., `codex`). | `codex` |
-| `connector_model` | Model name to pass to the connector. | `""` |
+| `connector_model` | Model name to pass to the connector. | `gpt-5.4` |
 | `connector_timeout_seconds` | Max time allowed for AI generation. | `300` |
 
 ### Repo Settings
@@ -52,9 +53,12 @@ Configuration for each managed repository.
 | `enable_autonomous_healer` | Enable the healing loop for this repo. | `true` |
 | `healer_mode` | `guarded_pr` (verify before PR) or `autonomous_pr`. | `guarded_pr` |
 | `issue_required_labels` | Labels required to trigger healing. | `["healer:ready"]` |
-| `pr_actions_require_approval` | Require a label before opening/updating a PR. | `true` |
+| `pr_actions_require_approval` | Require a label before opening/updating a PR. | `false` |
 | `pr_required_label` | Label required if `pr_actions_require_approval` is true. | `["healer:pr-approved"]` |
-| `max_concurrent_issues` | Max issues to process at once for this repo. | `1` |
+| `pr_auto_approve_clean` | Best-effort auto-approve clean PRs when the reviewer token is a different actor from the PR author. | `true` |
+| `pr_auto_merge_clean` | Best-effort auto-merge clean PRs with no merge conflicts. | `true` |
+| `pr_merge_method` | Merge strategy used for auto-merge. | `squash` |
+| `max_concurrent_issues` | Max issues to process at once for this repo. | `3` |
 | `retry_budget` | Max attempts per issue before giving up. | `2` |
 | `learning_enabled` | Record and use lessons from past attempts. | `true` |
 | `enable_review` | Generate an AI code review for the proposed PR. | `true` |

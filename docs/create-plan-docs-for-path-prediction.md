@@ -8,11 +8,11 @@ Improve Flow Healer's path prediction and lock scoping so concurrent fixes can s
 
 The current system is safe, but it leaves throughput on the table:
 
-- [`src/flow_healer/healer_locks.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_locks.py) predicts locks from path-like tokens in issue text, then escalates mostly by path count.
-- [`src/flow_healer/healer_loop.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_loop.py) compiles a richer task spec and extracts targeted tests, but it still calls the text-only predictor before the run and upgrades locks only after the proposer has already edited files.
-- [`src/flow_healer/healer_dispatcher.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_dispatcher.py) acquires predicted locks one key at a time and rolls back if a later key conflicts.
-- [`src/flow_healer/store.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/store.py) stores lock rows in SQLite and checks overlap in Python after loading all live locks.
-- [`src/flow_healer/healer_memory.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_memory.py) already records predicted and actual lock sets, which gives phase 1 enough telemetry to measure prediction quality without introducing ML.
+- [`src/flow_healer/healer_locks.py`](src/flow_healer/healer_locks.py) predicts locks from path-like tokens in issue text, then escalates mostly by path count.
+- [`src/flow_healer/healer_loop.py`](src/flow_healer/healer_loop.py) compiles a richer task spec and extracts targeted tests, but it still calls the text-only predictor before the run and upgrades locks only after the proposer has already edited files.
+- [`src/flow_healer/healer_dispatcher.py`](src/flow_healer/healer_dispatcher.py) acquires predicted locks one key at a time and rolls back if a later key conflicts.
+- [`src/flow_healer/store.py`](src/flow_healer/store.py) stores lock rows in SQLite and checks overlap in Python after loading all live locks.
+- [`src/flow_healer/healer_memory.py`](src/flow_healer/healer_memory.py) already records predicted and actual lock sets, which gives phase 1 enough telemetry to measure prediction quality without introducing ML.
 
 ## Research Findings
 

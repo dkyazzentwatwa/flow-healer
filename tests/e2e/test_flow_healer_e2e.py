@@ -93,6 +93,47 @@ def _build_demo_repo(tmp_path: Path) -> Path:
     return repo_path
 
 
+def _build_node_repo(tmp_path: Path) -> Path:
+    repo_path = tmp_path / "node-repo"
+    origin_path = tmp_path / "node-origin.git"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-b", "main"], cwd=repo_path)
+    _git(["config", "user.name", "Flow Healer Test"], cwd=repo_path)
+    _git(["config", "user.email", "flow-healer@example.com"], cwd=repo_path)
+    _write(
+        repo_path / "package.json",
+        "{\n"
+        '  "name": "demo-node-healer",\n'
+        '  "version": "1.0.0",\n'
+        '  "type": "module",\n'
+        '  "scripts": {\n'
+        '    "test": "node --test"\n'
+        "  }\n"
+        "}\n",
+    )
+    _write(
+        repo_path / "src" / "add.js",
+        "export function add(a, b) {\n"
+        "  return a - b;\n"
+        "}\n",
+    )
+    _write(
+        repo_path / "test" / "add.test.js",
+        "import assert from 'node:assert/strict';\n"
+        "import test from 'node:test';\n"
+        "import { add } from '../src/add.js';\n\n"
+        "test('add adds numbers', () => {\n"
+        "  assert.equal(add(2, 3), 5);\n"
+        "});\n",
+    )
+    _git(["add", "."], cwd=repo_path)
+    _git(["commit", "-m", "init node app"], cwd=repo_path)
+    _git(["init", "--bare", str(origin_path)])
+    _git(["remote", "add", "origin", str(origin_path)], cwd=repo_path)
+    _git(["push", "-u", "origin", "main"], cwd=repo_path)
+    return repo_path
+
+
 @dataclass
 class FakeGitHubIssue:
     number: int
@@ -296,12 +337,30 @@ class FakeGitHubAPI:
                         "html_url": f"https://example.test/{repo_slug}/pull/{pr_number}",
                         "head": {"ref": branch},
                         "base": {"ref": str(payload.get("base") or "main")},
+                        "user": {"login": self.state.viewer_login},
                         "title": str(payload.get("title") or ""),
                         "body": str(payload.get("body") or ""),
                         "head_label": head_label,
                     }
                     self.state.pulls[pr_number] = pr
                 return pr
+
+            if parts[3] == "pulls" and len(parts) == 6 and parts[5] == "reviews":
+                pr_number = int(parts[4])
+                pr = self.state.pulls.get(pr_number)
+                if pr is None:
+                    return {}
+                pr_author = str((pr.get("user") or {}).get("login") or "").strip().lower()
+                reviewer = self.state.viewer_login.strip().lower()
+                if str(payload.get("event") or "").strip().upper() == "APPROVE" and pr_author == reviewer:
+                    return {}
+                review_id = self.state.add_review(
+                    pr_number=pr_number,
+                    body=str(payload.get("body") or ""),
+                    author=self.state.viewer_login,
+                    state=str(payload.get("event") or "COMMENTED").strip().upper(),
+                )
+                return {"id": review_id}
 
         if method == "PATCH":
             if parts[3] == "issues" and len(parts) == 5:
@@ -310,6 +369,12 @@ class FakeGitHubAPI:
                     return {}
                 issue.state = str(payload.get("state") or issue.state)
                 return self.state.issue_payload(issue)
+
+        if method == "PUT":
+            if parts[3] == "pulls" and len(parts) == 6 and parts[5] == "merge":
+                pr_number = int(parts[4])
+                self.state.merge_pr(pr_number)
+                return {"merged": True}
 
         return {}
 
@@ -365,7 +430,21 @@ class ScriptedConnector:
         raise AssertionError(f"Unexpected thread id: {thread_id}")
 
 
-def _make_service(repo_path: Path, *, state_root: Path, api_base_url: str, enable_scan_issue_creation: bool = False) -> FlowHealerService:
+def _make_service(
+    repo_path: Path,
+    *,
+    state_root: Path,
+    api_base_url: str,
+    enable_scan_issue_creation: bool = False,
+    test_gate_mode: str = "local_then_docker",
+    local_gate_policy: str = "auto",
+    language: str = "",
+    test_command: str = "",
+    pr_actions_require_approval: bool = False,
+    pr_auto_approve_clean: bool = True,
+    pr_auto_merge_clean: bool = True,
+    pr_merge_method: str = "squash",
+) -> FlowHealerService:
     return FlowHealerService(
         AppConfig(
             service=ServiceSettings(
@@ -380,9 +459,17 @@ def _make_service(repo_path: Path, *, state_root: Path, api_base_url: str, enabl
                     healer_repo_path=str(repo_path),
                     healer_repo_slug="owner/repo",
                     healer_issue_required_labels=["healer:ready"],
+                    healer_pr_actions_require_approval=pr_actions_require_approval,
                     healer_pr_required_label="healer:pr-approved",
+                    healer_pr_auto_approve_clean=pr_auto_approve_clean,
+                    healer_pr_auto_merge_clean=pr_auto_merge_clean,
+                    healer_pr_merge_method=pr_merge_method,
                     healer_scan_enable_issue_creation=enable_scan_issue_creation,
                     healer_scan_default_labels=["kind:scan"],
+                    healer_test_gate_mode=test_gate_mode,
+                    healer_local_gate_policy=local_gate_policy,
+                    healer_language=language,
+                    healer_test_command=test_command,
                 )
             ],
         )
@@ -453,7 +540,13 @@ def test_e2e_issue_ingestion_to_pr_open(tmp_path: Path, monkeypatch, portable_py
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
     api = fake_github(state)
-    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        pr_actions_require_approval=True,
+        pr_auto_merge_clean=False,
+    )
     service.start("demo", once=True)
 
     rows = service.status_rows("demo")
@@ -472,6 +565,70 @@ def test_e2e_issue_ingestion_to_pr_open(tmp_path: Path, monkeypatch, portable_py
     issue = store.get_healer_issue(str(issue_number))
     assert issue is not None
     assert issue["state"] == "pr_open"
+    store.close()
+
+
+def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> None:
+    repo_path = _build_node_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title="Fix Node add helper",
+        body="Please repair src/add.js so tests pass.",
+        labels=["healer:ready", "healer:pr-approved"],
+    )
+    connector = ScriptedConnector(
+        proposer_outputs={
+            str(issue_number): [
+                _make_patch(
+                    "src/add.js",
+                    "export function add(a, b) {\n  return a - b;\n}\n",
+                    "export function add(a, b) {\n  return a + b;\n}\n",
+                )
+            ]
+        },
+    )
+
+    def _run_docker_gate_locally(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        del kwargs
+        proc = subprocess.run(
+            command,
+            cwd=str(workspace),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(30, timeout_seconds),
+        )
+        output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        return {
+            "exit_code": int(proc.returncode),
+            "output_tail": output[-2000:],
+        }
+
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setattr("flow_healer.healer_runner._run_pytest_in_docker", _run_docker_gate_locally)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    api = fake_github(state)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        test_gate_mode="docker_only",
+        language="node",
+        test_command="npm test",
+        pr_auto_merge_clean=False,
+    )
+    service.start("demo", once=True)
+
+    assert len(state.pulls) == 1
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    issue = store.get_healer_issue(str(issue_number))
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    attempts = store.list_healer_attempts(issue_id=str(issue_number), limit=1)
+    assert attempts[0]["test_summary"]["language_effective"] == "node"
+    assert attempts[0]["test_summary"]["docker_full_exit_code"] == 0
     store.close()
 
 
@@ -503,7 +660,13 @@ def test_e2e_retry_cleans_workspace_before_second_attempt(tmp_path: Path, monkey
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
     api = fake_github(state)
-    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        pr_actions_require_approval=True,
+        pr_auto_merge_clean=False,
+    )
     service.start("demo", once=True)
     _clear_backoff(service.config.repo_db_path("demo"), issue_id=str(issue_number))
     service.start("demo", once=True)
@@ -554,7 +717,13 @@ def test_e2e_pr_feedback_requeues_and_updates_existing_pr(tmp_path: Path, monkey
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
     api = fake_github(state)
-    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        pr_actions_require_approval=True,
+        pr_auto_merge_clean=False,
+    )
     service.start("demo", once=True)
     pr_number = next(iter(state.pulls))
     state.add_issue_comment(pr_number=pr_number, body="Please also note the review feedback.", author="bob")
@@ -629,7 +798,12 @@ def test_e2e_pending_approval_posts_issue_comment(tmp_path: Path, monkeypatch, f
     )
 
     api = fake_github(state)
-    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        pr_actions_require_approval=True,
+    )
     service.start("demo", once=True)
 
     comments = state.issue_comments[issue_number]
@@ -676,4 +850,42 @@ def test_e2e_merged_pr_closes_issue_and_marks_resolved(tmp_path: Path, monkeypat
     assert issue["pr_state"] == "merged"
     assert state.issues[issue_number].state == "closed"
     assert any("Merged and wrapped up" in comment["body"] for comment in state.issue_comments[issue_number])
+    store.close()
+
+
+def test_e2e_auto_merge_clean_pr_resolves_issue_in_same_run(
+    tmp_path: Path, monkeypatch, portable_pytest_gates, fake_github
+) -> None:
+    repo_path = _build_demo_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title="Fix addition bug quickly",
+        body="Please repair the bug in demo.py",
+        labels=["healer:ready"],
+    )
+    connector = ScriptedConnector(
+        proposer_outputs={
+            str(issue_number): [
+                _make_patch(
+                    "demo.py",
+                    "def add(a: int, b: int) -> int:\n    return a - b\n",
+                    "def add(a: int, b: int) -> int:\n    return a + b\n",
+                )
+            ]
+        },
+    )
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    api = fake_github(state)
+    service = _make_service(repo_path, state_root=tmp_path / "state", api_base_url=api.base_url)
+    service.start("demo", once=True)
+
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    issue = store.get_healer_issue(str(issue_number))
+    assert issue is not None
+    assert issue["state"] == "resolved"
+    assert issue["pr_state"] == "merged"
+    assert state.issues[issue_number].state == "closed"
     store.close()

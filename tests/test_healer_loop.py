@@ -1,8 +1,9 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from flow_healer.healer_loop import AutonomousHealerLoop
-from flow_healer.healer_tracker import HealerIssue
+from flow_healer.healer_loop import AutonomousHealerLoop, _collect_targeted_tests
+from flow_healer.healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
 from flow_healer.store import SQLiteStore
 
 
@@ -31,7 +32,11 @@ def _make_loop(store, **overrides):
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
         healer_issue_required_labels=["healer:ready"],
+        healer_pr_actions_require_approval=overrides.get("healer_pr_actions_require_approval", False),
         healer_pr_required_label=overrides.get("healer_pr_required_label", "healer:pr-approved"),
+        healer_pr_auto_approve_clean=overrides.get("healer_pr_auto_approve_clean", True),
+        healer_pr_auto_merge_clean=overrides.get("healer_pr_auto_merge_clean", True),
+        healer_pr_merge_method=overrides.get("healer_pr_merge_method", "squash"),
         healer_trusted_actors=[],
         healer_scan_enable_issue_creation=overrides.get("healer_scan_enable_issue_creation", False),
         healer_scan_poll_interval_seconds=overrides.get("healer_scan_poll_interval_seconds", 180.0),
@@ -93,6 +98,36 @@ def test_ingest_pr_feedback_requeues_issue_for_new_external_feedback(tmp_path):
     assert issue["state"] == "queued"
     assert "PR comment from @bob" in issue["feedback_context"]
     assert issue["last_issue_comment_id"] == 1001
+
+
+def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_healer_loop.py").write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+
+    targeted = _collect_targeted_tests(
+        issue_body="Please run tests/test_explicit.py and fix the issue.",
+        output_targets=["src/flow_healer/healer_loop.py"],
+        workspace=tmp_path,
+        language="python",
+    )
+
+    assert targeted == ["tests/test_explicit.py"]
+
+
+def test_collect_targeted_tests_infers_python_test_from_output_target(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_healer_loop.py").write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+
+    targeted = _collect_targeted_tests(
+        issue_body="No explicit pytest target here.",
+        output_targets=["src/flow_healer/healer_loop.py"],
+        workspace=tmp_path,
+        language="python",
+    )
+
+    assert targeted == ["tests/test_healer_loop.py"]
 
 
 def test_ingest_pr_feedback_ignores_healer_comments(tmp_path):
@@ -336,6 +371,282 @@ def test_resume_approved_pending_pr_requeues_issue(tmp_path):
     loop.tracker.add_issue_comment.assert_called_once()
 
 
+def test_auto_approve_open_pr_approves_clean_pr_from_different_author(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6011",
+        repo="owner/repo",
+        title="Issue 6011",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6011", state="pr_open", pr_number=128, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.viewer_login.return_value = "healer-reviewer"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=128,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/128",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+    loop.tracker.list_pr_reviews.return_value = []
+    loop.tracker.approve_pr.return_value = True
+
+    approved = loop._auto_approve_open_prs()
+
+    assert approved == 1
+    loop.tracker.approve_pr.assert_called_once_with(
+        pr_number=128,
+        body="Auto-approving clean PR with no merge conflicts.",
+    )
+
+
+def test_auto_approve_open_pr_skips_prs_authored_by_viewer(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6012",
+        repo="owner/repo",
+        title="Issue 6012",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6012", state="pr_open", pr_number=129, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.viewer_login.return_value = "healer-service"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=129,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/129",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+
+    approved = loop._auto_approve_open_prs()
+
+    assert approved == 0
+    loop.tracker.approve_pr.assert_not_called()
+
+
+def test_auto_merge_open_pr_merges_clean_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6013",
+        repo="owner/repo",
+        title="Issue 6013",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6013", state="pr_open", pr_number=130, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=130,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/130",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+    loop.tracker.merge_pr.return_value = True
+
+    merged = loop._auto_merge_open_prs()
+
+    assert merged == 1
+    loop.tracker.merge_pr.assert_called_once_with(pr_number=130, merge_method="squash")
+
+
+def test_auto_merge_open_pr_skips_dirty_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6014",
+        repo="owner/repo",
+        title="Issue 6014",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6014", state="pr_open", pr_number=131, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=131,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/131",
+        mergeable_state="dirty",
+        author="healer-service",
+    )
+
+    merged = loop._auto_merge_open_prs()
+
+    assert merged == 0
+    loop.tracker.merge_pr.assert_not_called()
+
+
+def test_reconcile_pr_outcomes_blocks_conflicted_pr_once(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6015",
+        repo="owner/repo",
+        title="Issue 6015",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6015", state="pr_open", pr_number=132, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "conflict"
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("6015")
+    assert resolved == 0
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["pr_number"] == 132
+    assert issue["pr_state"] == "conflict"
+    assert issue["last_failure_class"] == "pr_conflict"
+    assert "merge conflicts" in str(issue["last_failure_reason"])
+    loop.tracker.add_issue_comment.assert_called_once()
+
+
+def test_reconcile_pr_outcomes_does_not_duplicate_comment_for_blocked_conflict(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6016",
+        repo="owner/repo",
+        title="Issue 6016",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6016", state="blocked", pr_number=133, pr_state="conflict")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "conflict"
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("6016")
+    assert resolved == 0
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["pr_state"] == "conflict"
+    loop.tracker.add_issue_comment.assert_not_called()
+
+
+def test_reconcile_pr_outcomes_requeues_closed_conflicted_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6017",
+        repo="owner/repo",
+        title="Issue 6017",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6017", state="pr_open", pr_number=134, pr_state="conflict")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "closed"
+    loop.tracker.get_issue.return_value = {"issue_id": "6017", "state": "open", "labels": ["healer:ready"]}
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("6017")
+    assert resolved == 0
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["pr_number"] == 0
+    assert issue["pr_state"] == ""
+    loop.tracker.add_issue_comment.assert_called_once()
+
+
+def test_reconcile_pr_outcomes_archives_closed_conflicted_pr_for_closed_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60171",
+        repo="owner/repo",
+        title="Issue 60171",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="60171", state="pr_open", pr_number=138, pr_state="conflict")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "closed"
+    loop.tracker.get_issue.return_value = {"issue_id": "60171", "state": "closed", "labels": ["healer:ready"]}
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("60171")
+    assert resolved == 0
+    assert issue is not None
+    assert issue["state"] == "archived"
+    assert issue["pr_number"] == 138
+    assert issue["pr_state"] == "closed"
+    loop.tracker.add_issue_comment.assert_not_called()
+
+
+def test_reconcile_pr_outcomes_restores_pr_open_after_conflict_clears(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6018",
+        repo="owner/repo",
+        title="Issue 6018",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="6018",
+        state="blocked",
+        pr_number=135,
+        pr_state="conflict",
+        last_failure_class="pr_conflict",
+        last_failure_reason="old conflict",
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "open"
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("6018")
+    assert resolved == 0
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 135
+    assert issue["pr_state"] == "open"
+    assert issue["last_failure_class"] == ""
+    assert issue["last_failure_reason"] == ""
+    loop.tracker.add_issue_comment.assert_not_called()
+
+
 def test_reconcile_pr_outcomes_closes_merged_issue(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -363,6 +674,116 @@ def test_reconcile_pr_outcomes_closes_merged_issue(tmp_path):
     assert issue["pr_state"] == "merged"
     loop.tracker.close_issue.assert_called_once_with(issue_id="602")
     loop.tracker.add_issue_comment.assert_called_once()
+
+
+def test_reconcile_pr_outcomes_discovers_merged_pr_from_pending_approval(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="603",
+        repo="owner/repo",
+        title="Issue 603",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="603", state="pr_pending_approval")
+
+    loop = _make_loop(store)
+    loop.tracker.find_pr_for_issue.return_value = PullRequestResult(
+        number=127,
+        state="merged",
+        html_url="https://github.com/owner/repo/pull/127",
+    )
+    loop.tracker.close_issue.return_value = True
+
+    resolved = loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("603")
+    assert resolved == 1
+    assert issue is not None
+    assert issue["state"] == "resolved"
+    assert issue["pr_number"] == 127
+    assert issue["pr_state"] == "merged"
+    loop.tracker.find_pr_for_issue.assert_called_once_with(issue_id="603")
+    loop.tracker.close_issue.assert_called_once_with(issue_id="603")
+    loop.tracker.add_issue_comment.assert_called_once()
+
+
+def test_ingest_ready_issues_does_not_requeue_conflict_blocked_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6031",
+        repo="owner/repo",
+        title="Issue 6031",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6031", state="blocked", pr_number=136, pr_state="conflict")
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="6031",
+            repo="owner/repo",
+            title="Issue 6031",
+            body="",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/6031",
+        )
+    ]
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("6031")
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["pr_number"] == 136
+    assert issue["pr_state"] == "conflict"
+    loop.tracker.add_issue_reaction.assert_not_called()
+
+
+def test_conflicted_issue_is_ignored_by_auto_pr_actions_after_reconcile(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="6032",
+        repo="owner/repo",
+        title="Issue 6032",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="6032", state="pr_open", pr_number=137, pr_state="open")
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_state.return_value = "conflict"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=137,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/137",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+
+    loop._reconcile_pr_outcomes()
+    approved = loop._auto_approve_open_prs()
+    merged = loop._auto_merge_open_prs()
+
+    issue = store.get_healer_issue("6032")
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert approved == 0
+    assert merged == 0
+    loop.tracker.approve_pr.assert_not_called()
+    loop.tracker.merge_pr.assert_not_called()
 
 
 def test_maybe_run_scan_respects_interval(tmp_path):
@@ -598,6 +1019,35 @@ def test_backoff_or_fail_no_patch_does_not_exhaust_retry_budget(tmp_path):
     assert state == "queued"
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "no_patch"
+    assert issue["backoff_until"]
+    loop.tracker.add_issue_comment.assert_called()
+
+
+def test_backoff_or_fail_malformed_diff_does_not_exhaust_retry_budget(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="3041",
+        repo="owner/repo",
+        title="Issue 3041",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_backoff_initial_seconds=60)
+
+    state = loop._backoff_or_fail(
+        issue_id="3041",
+        attempt_no=7,
+        failure_class="malformed_diff",
+        failure_reason="Proposer returned a diff fence, but the contents were not a valid unified diff.",
+    )
+    issue = store.get_healer_issue("3041")
+    assert issue is not None
+    assert state == "queued"
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "malformed_diff"
     assert issue["backoff_until"]
     loop.tracker.add_issue_comment.assert_called()
 

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core Python code lives in `src/flow_healer/`. The CLI entry point is [`src/flow_healer/cli.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/cli.py), while service orchestration, scanning, tracking, locks, and SQLite state handling are split into focused modules such as `service.py`, `healer_loop.py`, and `store.py`. Tests live in `tests/` and mirror the module layout with files like `test_healer_runner.py` and `test_healer_scan.py`. Use `config.example.yaml` as the template for local configuration; keep machine-specific secrets and repo paths out of version control.
+Core Python code lives in `src/flow_healer/`. The CLI entry point is [`src/flow_healer/cli.py`](src/flow_healer/cli.py), while service orchestration, scanning, tracking, locks, and SQLite state handling are split into focused modules such as `service.py`, `healer_loop.py`, and `store.py`. Tests live in `tests/` and mirror the module layout with files like `test_healer_runner.py` and `test_healer_scan.py`. Use `config.example.yaml` as the template for local configuration; keep machine-specific secrets and repo paths out of version control.
 
 ## Build, Test, and Development Commands
 Create a local environment and install in editable mode:

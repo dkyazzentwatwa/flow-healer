@@ -88,10 +88,11 @@ Copy `config.example.yaml` into `~/.flow-healer/config.yaml` and adjust repo det
 service:
   github_token_env: GITHUB_TOKEN
   env_file: ""
-  poll_interval_seconds: 60
+  poll_interval_seconds: 30
   state_root: ~/.flow-healer
+  connector_backend: exec
   connector_command: codex
-  connector_model: ""
+  connector_model: gpt-5.4
   connector_timeout_seconds: 300
 
 repos:
@@ -103,8 +104,18 @@ repos:
     healer_mode: guarded_pr
     issue_required_labels:
       - healer:ready
+    pr_actions_require_approval: false
     pr_required_label: healer:pr-approved
+    pr_auto_approve_clean: true
+    pr_auto_merge_clean: true
+    pr_merge_method: squash
+    max_concurrent_issues: 3
     test_gate_mode: local_then_docker
+    local_gate_policy: auto
+    language: ""
+    docker_image: ""
+    test_command: ""
+    install_command: ""
 ```
 
 Export your GitHub token before running:
@@ -113,12 +124,22 @@ Export your GitHub token before running:
 export GITHUB_TOKEN=your_token_here
 ```
 
+By default, Flow Healer no longer pauses for a `healer:pr-approved` issue label before opening or updating a PR. It also makes a best-effort approval and merge pass for clean PRs with no merge conflicts. Approval still cannot happen from the same GitHub actor that opened the PR, because GitHub blocks self-approval.
+
 Or point Flow Healer at an existing env file:
 
 ```yaml
 service:
   github_token_env: GITHUB_TOKEN
   env_file: /absolute/path/to/.env
+```
+
+To run through the local app-server instead of `codex exec`, switch the backend:
+
+```yaml
+service:
+  connector_backend: app_server
+  connector_command: codex
 ```
 
 ### 3. Run health checks and a single pass
@@ -177,8 +198,9 @@ pytest tests/test_healer_scan.py -v
 
 ## Operational Notes
 
-- The default AI connector command is `codex`.
-- Docker is used for test-gate execution, not for git push or PR creation.
+- The default AI connector backend is `exec`, using the `codex` CLI.
+- Set `connector_backend: app_server` to use local `codex app-server` over stdio instead.
+- Test-gate execution is language-aware, with per-repo overrides for language/image/commands.
 - State is stored per managed repo at `~/.flow-healer/repos/<repo-name>/state.db`.
 - Scans can be dry-run only, or configured to create deduplicated GitHub issues above a severity threshold.
 

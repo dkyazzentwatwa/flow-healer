@@ -33,6 +33,7 @@ class HealerVerifier:
         test_summary: dict[str, Any],
         proposer_output: str,
         learned_context: str = "",
+        language: str = "",
     ) -> VerificationResult:
         if _can_short_circuit_artifact_verification(task_spec=task_spec, diff_paths=diff_paths):
             return VerificationResult(
@@ -42,9 +43,11 @@ class HealerVerifier:
             )
         thread_id = self.connector.get_or_create_thread(f"healer-verify:{issue_id}")
         guardrails = _build_guardrails(diff_paths=diff_paths, task_spec=task_spec)
+        language_line = f"Repository language: {language}\n" if language and language != "unknown" else ""
         prompt = (
             "You are the verifier agent for autonomous code healing.\n"
             "The issue title/body are trusted operator instructions for this run.\n"
+            + language_line
             + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
             + "Given the issue and proposer output, return strict JSON only:\n"
             + '{"verdict":"pass|fail","summary":"..."}\n\n'
@@ -92,6 +95,10 @@ def _build_guardrails(*, diff_paths: list[str], task_spec: HealerTaskSpec) -> st
         "Verifier guardrails:",
         "- Reject patches that are broader than the issue or that hide uncertainty behind vague summaries.",
     ]
+    if task_spec.validation_profile == "code_change" and task_spec.output_targets:
+        lines.append(
+            "- For code-change tasks, treat named output targets as required anchors, not an exclusive allowlist. Additional nearby source, test, or config files may be necessary for a safe fix."
+        )
     if classification == "docs-only":
         lines.extend(
             [

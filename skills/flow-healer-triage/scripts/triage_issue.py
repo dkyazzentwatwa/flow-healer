@@ -56,9 +56,17 @@ def main() -> int:
         "diagnosis": route.diagnosis,
         "recommended_skill": route.recommended_skill,
         "default_action": route.default_action,
+        "graph_position": route.graph_position,
+        "previous_skill": route.previous_skill,
+        "next_skill": route.next_skill,
+        "skill_relative_path": route.skill_relative_path,
+        "default_command_preview": route.default_command_preview,
+        "key_output_fields": list(route.key_output_fields),
+        "stop_conditions": list(route.stop_conditions),
         "stop_recommended": route.stop_recommended,
         "stop_reason": route.stop_reason,
         "connector_debug_focus": route.connector_debug_focus,
+        "connector_debug_checks": list(route.connector_debug_checks),
     }
     print(json.dumps(report, indent=2, default=str))
     return 0 if issue is not None else 1

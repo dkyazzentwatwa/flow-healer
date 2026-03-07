@@ -34,6 +34,15 @@ class PullRequestResult:
     html_url: str
 
 
+@dataclass(slots=True, frozen=True)
+class PullRequestDetails:
+    number: int
+    state: str
+    html_url: str
+    mergeable_state: str
+    author: str
+
+
 class GitHubHealerTracker:
     """Minimal GitHub issue + PR adapter for autonomous healer flows."""
 
@@ -213,6 +222,42 @@ class GitHubHealerTracker:
         )
         return isinstance(payload, dict) and str(payload.get("state") or "").lower() == "closed"
 
+    def find_pr_for_issue(self, *, issue_id: str, limit: int = 100) -> PullRequestResult | None:
+        if not self.enabled or not issue_id.strip():
+            return None
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/pulls?state=all&per_page={int(max(1, min(limit, 100)))}"
+        )
+        if not isinstance(payload, list):
+            return None
+
+        issue_pattern = re.compile(rf"\bissue\s*#\s*{re.escape(issue_id.strip())}\b", re.IGNORECASE)
+        matches: list[tuple[str, PullRequestResult]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "")
+            body = str(item.get("body") or "")
+            if not issue_pattern.search(title) and not issue_pattern.search(body):
+                continue
+            pr_number = int(item.get("number") or 0)
+            if pr_number <= 0:
+                continue
+            matches.append(
+                (
+                    str(item.get("merged_at") or item.get("updated_at") or ""),
+                    PullRequestResult(
+                        number=pr_number,
+                        state=self._pr_state_from_payload(item),
+                        html_url=str(item.get("html_url") or ""),
+                    ),
+                )
+            )
+        if not matches:
+            return None
+        matches.sort(key=lambda item: item[0], reverse=True)
+        return matches[0][1]
+
     def open_or_update_pr(
         self,
         *,
@@ -255,17 +300,25 @@ class GitHubHealerTracker:
         )
 
     def get_pr_state(self, *, pr_number: int) -> str:
+        details = self.get_pr_details(pr_number=pr_number)
+        return details.state if details is not None else ""
+
+    def get_pr_details(self, *, pr_number: int) -> PullRequestDetails | None:
         if not self.enabled or pr_number <= 0:
-            return ""
+            return None
         payload = self._request_json(f"/repos/{self.repo_slug}/pulls/{int(pr_number)}")
         if not isinstance(payload, dict):
-            return ""
-        if bool(payload.get("merged")):
-            return "merged"
-        mergeable_state = str(payload.get("mergeable_state") or "")
-        if mergeable_state == "dirty":
-            return "conflict"
-        return str(payload.get("state") or "")
+            return None
+        number = int(payload.get("number") or 0)
+        if number <= 0:
+            return None
+        return PullRequestDetails(
+            number=number,
+            state=self._pr_state_from_payload(payload),
+            html_url=str(payload.get("html_url") or ""),
+            mergeable_state=str(payload.get("mergeable_state") or "").strip().lower(),
+            author=str((payload.get("user") or {}).get("login") or "").strip(),
+        )
 
     def add_pr_comment(self, *, pr_number: int, body: str) -> bool:
         if not self.enabled or pr_number <= 0 or not body.strip():
@@ -276,6 +329,30 @@ class GitHubHealerTracker:
             body={"body": body},
         )
         return isinstance(payload, dict) and "id" in payload
+
+    def approve_pr(self, *, pr_number: int, body: str = "") -> bool:
+        if not self.enabled or pr_number <= 0:
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/pulls/{int(pr_number)}/reviews",
+            method="POST",
+            body={
+                "event": "APPROVE",
+                "body": body.strip(),
+            },
+        )
+        return isinstance(payload, dict) and "id" in payload
+
+    def merge_pr(self, *, pr_number: int, merge_method: str = "squash") -> bool:
+        if not self.enabled or pr_number <= 0:
+            return False
+        method = merge_method.strip().lower() or "squash"
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/pulls/{int(pr_number)}/merge",
+            method="PUT",
+            body={"merge_method": method},
+        )
+        return bool(payload.get("merged")) if isinstance(payload, dict) else False
 
     def list_pr_comments(self, *, pr_number: int) -> list[dict[str, Any]]:
         if not self.enabled or pr_number <= 0:
@@ -342,6 +419,17 @@ class GitHubHealerTracker:
             return self._viewer_login
         self._viewer_login = str(payload.get("login") or "").strip()
         return self._viewer_login
+
+    def _pr_state_from_payload(self, payload: dict[str, Any]) -> str:
+        if bool(payload.get("merged")) or str(payload.get("merged_at") or "").strip():
+            return "merged"
+        state = str(payload.get("state") or "").strip().lower()
+        if state == "closed":
+            return "closed"
+        mergeable_state = str(payload.get("mergeable_state") or "").strip().lower()
+        if mergeable_state == "dirty":
+            return "conflict"
+        return state
 
     def _request_json(self, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
         url = f"{self.api_base_url}{path}"

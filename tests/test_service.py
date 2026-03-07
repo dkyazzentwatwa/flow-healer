@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from flow_healer.codex_app_server_connector import CodexAppServerConnector
+from flow_healer.codex_cli_connector import CodexCliConnector
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
 from flow_healer.service import FlowHealerService
 
@@ -73,9 +75,17 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert recent_attempt["diagnosis"] == "operator_or_environment"
     assert recent_attempt["recommended_skill"] == "flow-healer-local-validation"
     assert recent_attempt["default_action"]
+    assert recent_attempt["graph_position"] == 1
+    assert recent_attempt["previous_skill"] == ""
+    assert recent_attempt["next_skill"] == "flow-healer-preflight"
+    assert recent_attempt["skill_relative_path"].endswith("skills/flow-healer-local-validation/SKILL.md")
+    assert recent_attempt["default_command_preview"]
+    assert recent_attempt["key_output_fields"] == ["repo_root", "checks[*].exit_code", "checks[*].output_tail"]
+    assert recent_attempt["stop_conditions"] == []
     assert recent_attempt["stop_recommended"] is True
     assert recent_attempt["stop_reason"]
     assert recent_attempt["connector_debug_focus"] == ""
+    assert recent_attempt["connector_debug_checks"] == []
 
 
 def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
@@ -106,9 +116,41 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     connector_playbook = rows[0]["skill_contracts"]["diagnosis_playbooks"]["connector_or_patch_generation"]
     assert connector_playbook["skill"] == "flow-healer-connector-debug"
     assert connector_playbook["next_step_preview"]
+    assert connector_playbook["graph_position"] == 6
     assert rows[0]["skill_contracts"]["default_action_by_diagnosis"]["repo_fixture_or_setup"].startswith("Repair")
+    connector_route = rows[0]["skill_contracts"]["diagnosis_routes"]["connector_or_patch_generation"]
+    assert connector_route["recommended_skill"] == "flow-healer-connector-debug"
+    assert connector_route["graph_position"] == 6
     triage = next(skill for skill in rows[0]["skill_contracts"]["skills"] if skill["skill"] == "flow-healer-triage")
     preflight = next(skill for skill in rows[0]["skill_contracts"]["skills"] if skill["skill"] == "flow-healer-preflight")
     assert triage["has_default_command"] is True
+    assert triage["next_skill"] == "flow-healer-pr-followup"
     assert triage["has_stop_conditions"] is False
     assert preflight["has_stop_conditions"] is True
+
+
+def test_build_runtime_uses_configured_connector_backend(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+
+    exec_service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root / "exec"), connector_backend="exec"),
+            repos=[repo],
+        )
+    )
+    exec_runtime = exec_service.build_runtime(repo)
+    assert isinstance(exec_runtime.connector, CodexCliConnector)
+    exec_service._close_runtime(exec_runtime)
+
+    app_server_service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root / "app"), connector_backend="app_server"),
+            repos=[repo],
+        )
+    )
+    app_runtime = app_server_service.build_runtime(repo)
+    assert isinstance(app_runtime.connector, CodexAppServerConnector)
+    app_server_service._close_runtime(app_runtime)

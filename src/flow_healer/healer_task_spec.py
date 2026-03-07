@@ -13,6 +13,7 @@ class HealerTaskSpec:
     tool_policy: str
     validation_profile: str
     input_context_paths: tuple[str, ...] = ()
+    language: str = ""
 
 
 _EXPLICIT_PATH_RE = re.compile(
@@ -29,16 +30,21 @@ _EDIT_HINT_RE = re.compile(r"\b(edit|revise|update|rewrite|expand|tighten|clarif
 _OUTPUT_CONTEXT_RE = re.compile(r"\b(output|deliverable|required output|required outputs|create|write|generate|report)\b", re.IGNORECASE)
 _SCOPE_CONTEXT_RE = re.compile(r"\b(scope|review|analyze|inspect|input|source files?)\b", re.IGNORECASE)
 _TASK_KIND_RE = re.compile(r"^\s*[-*]?\s*task\s*kind:\s*([a-zA-Z]+)\s*$")
+_INPUT_CONTEXT_RE = re.compile(
+    r"\b(input context|input spec|spec only|input only|input-only|not the output target|not output targets?)\b",
+    re.IGNORECASE,
+)
 
 
-def compile_task_spec(*, issue_title: str, issue_body: str) -> HealerTaskSpec:
+def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") -> HealerTaskSpec:
     issue_text = "\n".join(part for part in [issue_title.strip(), issue_body.strip()] if part).strip()
-    output_targets = tuple(_explicit_output_targets(issue_text))
     task_kind_hint = _extract_task_kind_hint(issue_text=issue_text)
-    input_context_paths: tuple[str, ...] = ()
-    if _treat_markdown_targets_as_input_hints(issue_text=issue_text, output_targets=output_targets):
+    explicit_paths = tuple(_explicit_paths(issue_text))
+    input_context_paths = _explicit_input_context_paths(issue_text=issue_text, explicit_paths=explicit_paths)
+    output_targets = tuple(path for path in explicit_paths if path not in input_context_paths)
+    if not input_context_paths and _treat_markdown_targets_as_input_hints(issue_text=issue_text, output_targets=output_targets):
         input_context_paths = tuple(path for path in output_targets if _is_artifact_path(path))
-        output_targets = ()
+        output_targets = tuple(path for path in output_targets if path not in input_context_paths)
     task_kind = task_kind_hint or _classify_task_kind(issue_text=issue_text, output_targets=output_targets)
     inferred_targets = output_targets or _default_targets(issue_title=issue_title, task_kind=task_kind)
     tool_policy = "repo_plus_web" if task_kind == "research" else "repo_only"
@@ -50,23 +56,36 @@ def compile_task_spec(*, issue_title: str, issue_body: str) -> HealerTaskSpec:
         tool_policy=tool_policy,
         validation_profile=validation_profile,
         input_context_paths=input_context_paths,
+        language=str(language or "").strip(),
     )
 
 
 def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
     targets = ", ".join(spec.output_targets) if spec.output_targets else "(infer during execution)"
     input_context = ", ".join(spec.input_context_paths) if spec.input_context_paths else "(none)"
-    return "\n".join(
+    lines = [
+        "### Task Contract",
+        f"- Task kind: {spec.task_kind}",
+        f"- Output mode: {spec.output_mode}",
+        f"- Output targets: {targets}",
+        f"- Input context: {input_context}",
+        f"- Tool policy: {spec.tool_policy}",
+        f"- Validation profile: {spec.validation_profile}",
+    ]
+    if spec.language:
+        lines.append(f"- Language: {spec.language}")
+    if spec.validation_profile == "code_change" and spec.output_targets:
+        lines.append(
+            "- Output target policy: Named targets are anchors for the fix; additional nearby code, test, or config files may also be edited when required."
+        )
+    lines.extend(
         [
-            "### Task Contract",
-            f"- Task kind: {spec.task_kind}",
-            f"- Output mode: {spec.output_mode}",
-            f"- Output targets: {targets}",
-            f"- Input context: {input_context}",
-            f"- Tool policy: {spec.tool_policy}",
-            f"- Validation profile: {spec.validation_profile}",
+            f"- Success criteria: {_success_criteria(spec)}",
+            f"- Failure handling: {_failure_handling(spec)}",
+            f"- Default next action: {_default_next_action(spec)}",
         ]
     )
+    return "\n".join(lines)
 
 
 def _classify_task_kind(*, issue_text: str, output_targets: tuple[str, ...]) -> str:
@@ -111,7 +130,7 @@ def _validation_profile(*, task_kind: str, output_targets: tuple[str, ...]) -> s
     return "code_change"
 
 
-def _explicit_output_targets(issue_text: str) -> list[str]:
+def _explicit_paths(issue_text: str) -> list[str]:
     scored: dict[str, int] = {}
     order: list[str] = []
     seen: set[str] = set()
@@ -142,6 +161,26 @@ def _explicit_output_targets(issue_text: str) -> list[str]:
             scored[candidate] += _score_path_context(line=line, heading=current_heading)
     prioritized = [path for path in order if scored.get(path, 0) >= 2]
     return prioritized or order
+
+
+def _explicit_input_context_paths(*, issue_text: str, explicit_paths: tuple[str, ...]) -> tuple[str, ...]:
+    if not explicit_paths:
+        return ()
+    current_heading = ""
+    identified: list[str] = []
+    for raw_line in issue_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            current_heading = line
+            continue
+        context = " ".join(part for part in (current_heading, line) if part).strip()
+        if not _INPUT_CONTEXT_RE.search(context):
+            continue
+        normalized_line = line.strip(" -*")
+        for path in explicit_paths:
+            if path in normalized_line and path not in identified:
+                identified.append(path)
+    return tuple(identified)
 
 
 def _score_path_context(*, line: str, heading: str) -> int:
@@ -186,9 +225,36 @@ def _is_artifact_path(path: str) -> bool:
 
 def _is_code_path(path: str) -> bool:
     suffix = Path(path).suffix.lower()
-    return suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html"}
+    return suffix in {
+        ".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html",
+        ".go", ".rs", ".java", ".kt", ".rb",
+        ".c", ".cpp", ".h", ".hpp",
+        ".swift", ".scala",
+    }
 
 
 def _slugify(value: str) -> str:
     lowered = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
     return lowered or "artifact"
+
+
+def _success_criteria(spec: HealerTaskSpec) -> str:
+    if spec.validation_profile == "artifact_only":
+        return "Write the requested artifact content directly into the target files."
+    if spec.validation_profile == "mixed":
+        return "Produce the requested artifact targets and include the required non-doc code changes."
+    return "Stage a production-safe code patch and keep the requested validation passing."
+
+
+def _failure_handling(spec: HealerTaskSpec) -> str:
+    if spec.validation_profile == "artifact_only":
+        return "If a direct edit is not possible, return file content in explicit fenced blocks for each target."
+    return "If a direct edit is not possible, return exactly one valid unified diff fenced block."
+
+
+def _default_next_action(spec: HealerTaskSpec) -> str:
+    if spec.tool_policy == "repo_plus_web":
+        return "Gather the required facts, then write the target files."
+    if spec.validation_profile == "artifact_only":
+        return "Write the requested artifact content into the named files."
+    return "Implement the smallest safe repo patch that satisfies the issue."

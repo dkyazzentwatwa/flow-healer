@@ -1,13 +1,19 @@
 import subprocess
+import sys
 from pathlib import Path
 
 from flow_healer.healer_runner import (
     HealerRunner,
+    ResolvedStrategy,
     _build_docker_test_script,
     _gate_runners_for_mode,
+    _looks_like_unified_diff,
     _normalize_test_gate_mode,
     _run_test_gates,
+    _run_tests_in_docker,
+    _run_tests_locally,
 )
+from flow_healer.language_strategies import get_strategy
 from flow_healer.healer_task_spec import HealerTaskSpec, compile_task_spec
 
 
@@ -39,22 +45,28 @@ def test_gate_runners_for_mode_local_then_docker():
 def test_run_test_gates_runs_local_then_docker(monkeypatch):
     calls: list[tuple[str, list[str]]] = []
 
-    def fake_local(workspace: Path, command: list[str], timeout_seconds: int):
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
         calls.append(("local", command))
-        return {"exit_code": 0, "output_tail": "local ok"}
+        return {"exit_code": 0, "output_tail": "local ok", "gate_status": "passed", "gate_reason": ""}
 
-    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int):
+    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
         calls.append(("docker", command))
-        return {"exit_code": 0, "output_tail": "docker ok"}
+        return {"exit_code": 0, "output_tail": "docker ok", "gate_status": "passed", "gate_reason": ""}
 
-    monkeypatch.setattr("flow_healer.healer_runner._run_pytest_locally", fake_local)
-    monkeypatch.setattr("flow_healer.healer_runner._run_pytest_in_docker", fake_docker)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_in_docker", fake_docker)
 
     summary = _run_test_gates(
         Path("."),
         targeted_tests=["tests/test_demo.py"],
         timeout_seconds=30,
         mode="local_then_docker",
+        resolved_strategy=ResolvedStrategy(
+            language_detected="python",
+            language_effective="python",
+            strategy=get_strategy("python"),
+        ),
+        local_gate_policy="auto",
     )
 
     assert calls == [
@@ -68,12 +80,154 @@ def test_run_test_gates_runs_local_then_docker(monkeypatch):
     assert summary["failed_tests"] == 0
 
 
+def test_run_tests_locally_normalizes_pytest_command(monkeypatch, tmp_path):
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["cwd"] = kwargs.get("cwd")
+        seen["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_locally(
+        tmp_path,
+        ["pytest", "-q", "tests/test_demo.py"],
+        30,
+        strategy=get_strategy("python"),
+        local_gate_policy="auto",
+    )
+
+    assert seen["cmd"] == [sys.executable, "-m", "pytest", "-q", "tests/test_demo.py"]
+    assert seen["cwd"] == str(tmp_path)
+    assert str(tmp_path) in seen["env"]["PYTHONPATH"]
+    assert summary["gate_status"] == "passed"
+
+
+def test_run_tests_in_docker_uses_posix_shell(monkeypatch, tmp_path):
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_in_docker(
+        tmp_path,
+        ["go", "test", "./..."],
+        30,
+        strategy=get_strategy("go"),
+        local_gate_policy="auto",
+    )
+
+    assert seen["cmd"][0:8] == [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{tmp_path}:/workspace",
+        "-w",
+        "/workspace",
+        "golang:1.22-alpine",
+    ]
+    assert seen["cmd"][8:10] == ["sh", "-c"]
+    assert summary["gate_status"] == "passed"
+
+
+def test_run_test_gates_marks_local_skipped_when_toolchain_unavailable(monkeypatch):
+    from flow_healer.language_strategies import LanguageStrategy
+
+    no_local_strategy = LanguageStrategy(
+        docker_image="node:20-slim",
+        docker_install_cmd="npm install",
+        docker_test_cmd=["npm", "test"],
+        local_test_cmd=[],
+        supports_targeted_paths=False,
+    )
+
+    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        return {"exit_code": 0, "output_tail": "docker ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_in_docker", fake_docker)
+
+    summary = _run_test_gates(
+        Path("."),
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_strategy=ResolvedStrategy(
+            language_detected="node",
+            language_effective="node",
+            strategy=no_local_strategy,
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert summary["local_full_status"] == "skipped"
+    assert summary["local_full_reason"] == "no_local_test_command"
+    assert summary["docker_full_status"] == "passed"
+    assert summary["failed_tests"] == 0
+
+
+def test_run_test_gates_fails_local_when_policy_force_and_tool_missing():
+    strategy = get_strategy("python", test_command="definitely-missing-test-binary")
+
+    summary = _run_test_gates(
+        Path("."),
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_only",
+        resolved_strategy=ResolvedStrategy(
+            language_detected="python",
+            language_effective="python",
+            strategy=strategy,
+        ),
+        local_gate_policy="force",
+    )
+
+    assert summary["local_full_status"] == "failed"
+    assert summary["local_full_reason"] == "tool_missing"
+    assert summary["failed_tests"] == 1
+
+
+def test_run_test_gates_fails_local_only_when_gate_is_skipped():
+    from flow_healer.language_strategies import LanguageStrategy
+
+    no_local_strategy = LanguageStrategy(
+        docker_image="node:20-slim",
+        docker_install_cmd="npm install",
+        docker_test_cmd=["npm", "test"],
+        local_test_cmd=[],
+        supports_targeted_paths=False,
+    )
+
+    summary = _run_test_gates(
+        Path("."),
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_only",
+        resolved_strategy=ResolvedStrategy(
+            language_detected="node",
+            language_effective="node",
+            strategy=no_local_strategy,
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert summary["local_full_status"] == "failed"
+    assert summary["local_full_reason"] == "no_local_test_command"
+    assert summary["failed_tests"] == 1
+
+
 class _RetryConnector:
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.reset_calls: list[str] = []
         self.turns: list[tuple[str, str]] = []
         self.timeouts: list[int | None] = []
+        self.snapshot: dict[str, object] = {}
 
     def get_or_create_thread(self, sender: str) -> str:
         return sender
@@ -92,6 +246,9 @@ class _RetryConnector:
 
     def shutdown(self) -> None:
         pass
+
+    def health_snapshot(self) -> dict[str, object]:
+        return dict(self.snapshot)
 
 
 class _WorkspaceEditingConnector(_RetryConnector):
@@ -215,6 +372,107 @@ def test_run_attempt_uses_longer_turn_timeout_for_code_change(monkeypatch, tmp_p
 
     assert result.success is True
     assert connector.timeouts == [900]
+
+
+def test_run_attempt_embeds_input_context_file_contents_in_prompt(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Flow Healer Test"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "flow-healer@example.com"], cwd=workspace, check=True, capture_output=True, text=True)
+    (workspace / "skills-suggestions.md").write_text("Implement connector-debug routing.\n", encoding="utf-8")
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="1250",
+        issue_title="Implement skills-suggestions.md",
+        issue_body="Use skills-suggestions.md as input spec only and make code changes.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            input_context_paths=("skills-suggestions.md",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    prompt = connector.turns[0][1]
+    assert "### Input Context Files" in prompt
+    assert "#### skills-suggestions.md" in prompt
+    assert "Implement connector-debug routing." in prompt
+
+
+def test_run_attempt_enriches_connector_runtime_failures_with_health_snapshot(tmp_path):
+    connector = _RetryConnector(["ConnectorRuntimeError: Codex CLI timed out after 300s."])
+    connector.snapshot = {
+        "resolved_command": "/opt/homebrew/bin/codex",
+        "last_runtime_error_kind": "timeout",
+        "last_runtime_stdout_tail": "partial proposer output",
+        "last_runtime_stderr_tail": "mcp startup hung",
+        "last_health_error": "Codex CLI timed out after 300s.",
+    }
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="1241",
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.py and pass tests.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "connector_runtime_error"
+    assert "resolved_command=/opt/homebrew/bin/codex" in result.failure_reason
+    assert "runtime_kind=timeout" in result.failure_reason
+    assert "stdout_tail=partial proposer output" in result.failure_reason
+    assert "stderr_tail=mcp startup hung" in result.failure_reason
 
 
 def test_run_attempt_rejects_docs_only_diff_for_code_change_task(tmp_path):
@@ -375,6 +633,8 @@ def test_run_attempt_marks_input_specs_as_context_in_prompt(tmp_path):
     prompt = connector.turns[0][1]
     assert "Input context: skills-suggestions.md" in prompt
     assert "Treat these files as input-only context, not output targets: skills-suggestions.md." in prompt
+    assert "Success criteria: Stage a production-safe code patch" in prompt
+    assert "Default next action: Implement the smallest safe repo patch" in prompt
 
 
 def test_run_attempt_accepts_direct_workspace_edits_without_diff(monkeypatch, tmp_path):
@@ -419,6 +679,124 @@ def test_run_attempt_accepts_direct_workspace_edits_without_diff(monkeypatch, tm
 
     assert result.success is True
     assert result.diff_paths == ["docs/create-plan-docs.md"]
+
+
+def test_run_attempt_materializes_code_file_from_path_fence_for_code_change(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Flow Healer Test"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "flow-healer@example.com"], cwd=workspace, check=True, capture_output=True, text=True)
+    (workspace / "src").mkdir()
+    (workspace / "src" / "calc.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(
+        [
+            "I could not emit a diff fence. Final file content:\n\n"
+            "```python path=src/calc.py\n"
+            "def add(a, b):\n"
+            "    return a + b\n"
+            "```\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="136",
+        issue_title="Fix calc",
+        issue_body="Fix src/calc.py and keep tests passing.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert "src/calc.py" in result.diff_paths
+    content = (workspace / "src" / "calc.py").read_text(encoding="utf-8")
+    assert "return a + b" in content
+
+
+def test_run_attempt_ignores_input_context_path_in_path_fenced_output(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Flow Healer Test"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "flow-healer@example.com"], cwd=workspace, check=True, capture_output=True, text=True)
+    (workspace / "src").mkdir()
+    (workspace / "src" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (workspace / "skills-suggestions.md").write_text("input spec\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(
+        [
+            "```markdown path=skills-suggestions.md\n"
+            "this should not be written\n"
+            "```\n"
+            "```python path=src/module.py\n"
+            "VALUE = 2\n"
+            "```\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="137",
+        issue_title="Implement upgrades",
+        issue_body="Use skills-suggestions.md as input spec only.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            input_context_paths=("skills-suggestions.md",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert "src/module.py" in result.diff_paths
+    assert "skills-suggestions.md" not in result.diff_paths
+    input_context = (workspace / "skills-suggestions.md").read_text(encoding="utf-8")
+    assert input_context == "input spec\n"
 
 
 def test_run_attempt_materializes_artifact_from_plain_prose(tmp_path):
@@ -553,6 +931,17 @@ def test_run_attempt_recovers_artifact_from_malformed_diff(tmp_path):
     assert "survive malformed patch output" in content
 
 
+def test_looks_like_unified_diff_accepts_rename_only_patch() -> None:
+    patch = (
+        "diff --git a/docs/old.md b/docs/new.md\n"
+        "similarity index 100%\n"
+        "rename from docs/old.md\n"
+        "rename to docs/new.md\n"
+    )
+
+    assert _looks_like_unified_diff(patch) is True
+
+
 def test_run_attempt_retries_when_artifact_output_is_status_summary(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -608,8 +997,6 @@ def test_run_attempt_classifies_connector_unavailable_error(tmp_path):
     connector = _RetryConnector(
         [
             "ConnectorUnavailable: Unable to resolve Codex command 'codex'. Set service.connector_command to an absolute path.",
-            "ConnectorUnavailable: Unable to resolve Codex command 'codex'. Set service.connector_command to an absolute path.",
-            "ConnectorUnavailable: Unable to resolve Codex command 'codex'. Set service.connector_command to an absolute path.",
         ]
     )
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
@@ -637,3 +1024,161 @@ def test_run_attempt_classifies_connector_unavailable_error(tmp_path):
     assert result.success is False
     assert result.failure_class == "connector_unavailable"
     assert "Unable to resolve Codex command" in result.failure_reason
+    assert len(connector.turns) == 1
+
+
+def test_run_attempt_fails_fast_for_connector_runtime_errors(tmp_path):
+    connector = _RetryConnector(
+        [
+            "ConnectorRuntimeError: Codex CLI timed out after 300s. stderr tail: mcp startup hung stdout tail: still working",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="132",
+        issue_title="Implement feature",
+        issue_body="Implement the requested repo changes.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "connector_runtime_error"
+    assert "timed out after 300s" in result.failure_reason
+    assert len(connector.turns) == 1
+
+
+def test_run_attempt_retries_empty_diff_with_targeted_guidance(tmp_path):
+    connector = _RetryConnector(["```diff\n```", "not a patch", "not a patch", "not a patch"])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="133",
+        issue_title="Implement feature",
+        issue_body="Implement the requested repo changes.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert "empty diff fenced block" in connector.turns[1][1]
+
+
+def test_run_attempt_retries_malformed_diff_before_git_apply(tmp_path):
+    connector = _RetryConnector(
+        [
+            "```diff\n--- a/demo.py\n+++ b/demo.py\n+print('missing hunk header')\n```",
+            "not a patch",
+            "not a patch",
+            "not a patch",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="134",
+        issue_title="Implement feature",
+        issue_body="Implement the requested repo changes.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert "invalid patch syntax" in connector.turns[1][1]
+
+
+def test_run_attempt_includes_language_in_prompt(tmp_path):
+    connector = _RetryConnector(["not a patch"] * 5)
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="200",
+        issue_title="Fix handler",
+        issue_body="Fix the handler in main.go",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="go",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    prompt = connector.turns[0][1]
+    assert "This repository uses go." in prompt
+    assert "This is a go project" in prompt
+
+
+def test_run_attempt_includes_path_fenced_fallback_guidance(tmp_path):
+    connector = _RetryConnector(["not a patch"] * 5)
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    result = runner.run_attempt(
+        issue_id="201",
+        issue_title="Fix calc",
+        issue_body="Fix calc.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    prompt = connector.turns[0][1]
+    assert "path-fenced blocks" in prompt

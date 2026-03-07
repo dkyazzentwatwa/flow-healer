@@ -1,4 +1,4 @@
-from flow_healer.healer_task_spec import compile_task_spec
+from flow_healer.healer_task_spec import compile_task_spec, task_spec_to_prompt_block, _is_code_path
 
 
 def test_compile_task_spec_defaults_research_issue_to_docs_artifact() -> None:
@@ -38,6 +38,24 @@ def test_compile_task_spec_leaves_build_issue_open_for_multi_file_patch() -> Non
     assert spec.input_context_paths == ()
     assert spec.tool_policy == "repo_only"
     assert spec.validation_profile == "code_change"
+
+
+def test_compile_task_spec_handles_path_prefix_directive_with_or_without_space() -> None:
+    spec = compile_task_spec(
+        issue_title="Node.js queue test",
+        issue_body="path:Node.js keeps work scoped",
+    )
+
+    assert spec.output_targets == ("Node.js",)
+    assert spec.task_kind == "edit"
+
+    spec_with_space = compile_task_spec(
+        issue_title="Node.js queue test",
+        issue_body="path: Node.js keeps work scoped",
+    )
+
+    assert spec_with_space.output_targets == ("Node.js",)
+    assert spec_with_space.task_kind == "edit"
 
 
 def test_compile_task_spec_prefers_required_outputs_over_review_scope_paths() -> None:
@@ -121,19 +139,123 @@ def test_compile_task_spec_marks_input_spec_only_markdown_as_context_not_target(
     assert spec.validation_profile == "code_change"
 
 
-def test_compile_task_spec_handles_path_prefix_directive_with_or_without_space() -> None:
+def test_compile_task_spec_honors_task_contract_kind_hint() -> None:
     spec = compile_task_spec(
-        issue_title="Node.js queue test",
-        issue_body="path:Node.js keeps work scoped",
+        issue_title="Tighten the parser",
+        issue_body=(
+            "### Task Contract\n"
+            "- Task kind: docs\n"
+            "- Output targets: docs/parser-notes.md\n"
+        ),
     )
 
-    assert spec.output_targets == ("Node.js",)
-    assert spec.task_kind == "edit"
+    assert spec.task_kind == "docs"
+    assert spec.output_targets == ("docs/parser-notes.md",)
+    assert spec.validation_profile == "artifact_only"
 
-    spec_with_space = compile_task_spec(
-        issue_title="Node.js queue test",
-        issue_body="path: Node.js keeps work scoped",
+
+def test_compile_task_spec_separates_input_context_from_explicit_code_outputs() -> None:
+    spec = compile_task_spec(
+        issue_title="Implement fixes from research-notes.md",
+        issue_body=(
+            "## Input context\n"
+            "- research-notes.md\n\n"
+            "## Required code outputs\n"
+            "- src/flow_healer/healer_task_spec.py\n"
+            "- tests/test_healer_task_spec.py\n"
+        ),
     )
 
-    assert spec_with_space.output_targets == ("Node.js",)
-    assert spec_with_space.task_kind == "edit"
+    assert spec.task_kind == "build"
+    assert spec.output_targets == (
+        "src/flow_healer/healer_task_spec.py",
+        "tests/test_healer_task_spec.py",
+    )
+    assert spec.input_context_paths == ("research-notes.md",)
+    assert spec.validation_profile == "code_change"
+
+
+def test_task_spec_prompt_block_includes_contract_guidance() -> None:
+    spec = compile_task_spec(
+        issue_title="Implement skills-suggestions.md",
+        issue_body="Use skills-suggestions.md as input spec only and do not make doc-only edits.",
+    )
+
+    prompt_block = task_spec_to_prompt_block(spec)
+
+    assert "Success criteria: Stage a production-safe code patch" in prompt_block
+    assert "Failure handling: If a direct edit is not possible, return exactly one valid unified diff fenced block." in prompt_block
+    assert "Default next action: Implement the smallest safe repo patch" in prompt_block
+
+
+def test_task_spec_prompt_block_marks_code_targets_as_anchors_not_allowlist() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix Rust smoke fixture",
+        issue_body="Fix e2e-smoke/rust/Cargo.toml so the fixture builds and passes the regression test.",
+    )
+
+    prompt_block = task_spec_to_prompt_block(spec)
+
+    assert "Output target policy: Named targets are anchors for the fix" in prompt_block
+
+
+def test_compile_task_spec_passes_language_through() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.go",
+        language="go",
+    )
+    assert spec.language == "go"
+
+
+def test_compile_task_spec_language_defaults_to_empty() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.py",
+    )
+    assert spec.language == ""
+
+
+def test_task_spec_prompt_block_includes_language_when_set() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.go",
+        language="go",
+    )
+    prompt_block = task_spec_to_prompt_block(spec)
+    assert "- Language: go" in prompt_block
+
+
+def test_task_spec_prompt_block_omits_language_when_empty() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.py",
+    )
+    prompt_block = task_spec_to_prompt_block(spec)
+    assert "Language:" not in prompt_block
+
+
+def test_is_code_path_recognizes_go() -> None:
+    assert _is_code_path("cmd/server/main.go") is True
+
+
+def test_is_code_path_recognizes_rust() -> None:
+    assert _is_code_path("src/lib.rs") is True
+
+
+def test_is_code_path_recognizes_java() -> None:
+    assert _is_code_path("src/main/java/App.java") is True
+
+
+def test_is_code_path_recognizes_c_cpp() -> None:
+    assert _is_code_path("src/util.c") is True
+    assert _is_code_path("src/util.cpp") is True
+    assert _is_code_path("include/util.h") is True
+    assert _is_code_path("include/util.hpp") is True
+
+
+def test_is_code_path_recognizes_ruby_swift_scala_kotlin() -> None:
+    assert _is_code_path("app/models/user.rb") is True
+    assert _is_code_path("Sources/App.swift") is True
+    assert _is_code_path("src/main/scala/Main.scala") is True
+    assert _is_code_path("src/main/kotlin/Main.kt") is True

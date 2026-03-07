@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .language_detector import detect_language_details
+from .language_strategies import LanguageStrategy, get_strategy
 from .protocols import ConnectorProtocol
 from .healer_task_spec import HealerTaskSpec, task_spec_to_prompt_block
 
 logger = logging.getLogger("apple_flow.healer_runner")
 _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
 _FENCE_PATH_RE = re.compile(r"(?:^|\s)path=(?P<path>[^\s`]+)")
+_NON_RETRYABLE_FAILURES = {"connector_unavailable", "connector_runtime_error"}
+_INPUT_CONTEXT_MAX_CHARS = 12_000
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,6 +36,13 @@ class HealerRunResult:
     test_summary: dict[str, Any]
 
 
+@dataclass(slots=True, frozen=True)
+class ResolvedStrategy:
+    language_detected: str
+    language_effective: str
+    strategy: LanguageStrategy
+
+
 class HealerRunner:
     def __init__(
         self,
@@ -37,10 +50,20 @@ class HealerRunner:
         *,
         timeout_seconds: int,
         test_gate_mode: str = "local_then_docker",
+        local_gate_policy: str = "auto",
+        language: str = "",
+        docker_image: str = "",
+        test_command: str = "",
+        install_command: str = "",
     ) -> None:
         self.connector = connector
         self.timeout_seconds = max(30, int(timeout_seconds))
         self.test_gate_mode = _normalize_test_gate_mode(test_gate_mode)
+        self.local_gate_policy = _normalize_local_gate_policy(local_gate_policy)
+        self._language = language.strip()
+        self._docker_image = docker_image.strip()
+        self._test_command = test_command.strip()
+        self._install_command = install_command.strip()
         self.max_proposer_retries = 1
         self.max_code_proposer_retries = 3
         self.max_artifact_proposer_retries = 2
@@ -61,21 +84,28 @@ class HealerRunner:
         max_failed_tests_allowed: int,
         targeted_tests: list[str],
     ) -> HealerRunResult:
+        self._bind_connector_workspace(workspace)
         sender = f"healer:{issue_id}"
         thread_id = self.connector.get_or_create_thread(sender)
+        language_hint = ""
+        if task_spec.language and task_spec.language != "unknown":
+            language_hint = f"This repository uses {task_spec.language}. Follow {task_spec.language} conventions for all edits.\n"
         prompt = (
             "You are the proposer agent for autonomous code healing.\n"
             "The issue title/body are trusted operator instructions for this run.\n"
             "Choose the right work mode for the task and make the requested edits directly in the workspace.\n"
+            + language_hint
             + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
             + f"Issue #{issue_id}: {issue_title}\n\n"
             + f"{issue_body}\n\n"
             + (f"### User Feedback for PR:\n{feedback_context}\n\n" if feedback_context.strip() else "")
+            + _render_input_context_block(task_spec=task_spec, workspace=workspace)
             + task_spec_to_prompt_block(task_spec)
             + "\n"
             + _task_execution_instructions(task_spec)
             + "\n"
             + "Make the edits in the checked-out repo. If you cannot edit files directly, return ONLY a unified git diff inside a ```diff fenced block.\n"
+            + "If you cannot produce a unified diff, you may also return file contents using path-fenced blocks like: ```<language> path=src/file.ext\\n<content>\\n```.\n"
             + _artifact_fallback_contract(task_spec)
             + "\n"
             + "Do not respond with plan-only prose. The run only succeeds if repo files were changed."
@@ -104,6 +134,27 @@ class HealerRunner:
                 break
             patch = _extract_diff_block(proposer_output)
             if patch.strip():
+                if not _looks_like_unified_diff(patch):
+                    failure_class = "malformed_diff"
+                    failure_reason = "Proposer returned a diff fence, but the contents were not a valid unified diff."
+                    if proposer_attempt >= max_retries:
+                        return HealerRunResult(
+                            success=False,
+                            failure_class=failure_class,
+                            failure_reason=failure_reason,
+                            proposer_output=proposer_output,
+                            diff_paths=[],
+                            diff_files=0,
+                            diff_lines=0,
+                            test_summary={},
+                        )
+                    thread_id = self.connector.reset_thread(sender)
+                    prompt = _build_retry_prompt(
+                        base_prompt=prompt,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                    )
+                    continue
                 patch_path = workspace / ".apple-flow-healer.patch"
                 patch_path.write_text(patch, encoding="utf-8")
                 try:
@@ -124,8 +175,25 @@ class HealerRunner:
                 _reset_workspace_after_failed_apply(workspace)
             else:
                 failure_class, failure_reason = _classify_non_patch_failure(proposer_output)
+                failure_reason = _augment_failure_reason_with_connector_health(
+                    connector=self.connector,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
 
-            # Artifact-first fallback: if proposer gives useful prose but no usable patch,
+            # Fallback 1: accept explicit path-fenced file outputs for any task kind.
+            # This avoids hard-failing on no_patch when the proposer returned concrete file bodies
+            # instead of unified diff syntax.
+            if _materialize_explicit_path_fenced_files(
+                task_spec=task_spec,
+                proposer_output=proposer_output,
+                workspace=workspace,
+            ) and _stage_workspace_changes(workspace):
+                failure_class = ""
+                failure_reason = ""
+                break
+
+            # Fallback 2 (artifact-first): if proposer gives useful prose but no usable patch,
             # materialize the requested docs/research file directly.
             if _materialize_artifact_from_output(
                 task_spec=task_spec,
@@ -135,6 +203,18 @@ class HealerRunner:
                 failure_class = ""
                 failure_reason = ""
                 break
+
+            if failure_class in _NON_RETRYABLE_FAILURES:
+                return HealerRunResult(
+                    success=False,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    proposer_output=proposer_output,
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary={},
+                )
 
             if proposer_attempt >= max_retries:
                 return HealerRunResult(
@@ -187,12 +267,17 @@ class HealerRunner:
                 test_summary={},
             )
 
+        resolved_strategy = self._resolve_strategy(workspace)
         if task_spec.validation_profile == "artifact_only":
             test_summary = {
                 "mode": "skipped_artifact_only",
                 "failed_tests": 0,
                 "targeted_tests": targeted_tests,
                 "skipped": True,
+                "language_detected": resolved_strategy.language_detected,
+                "language_effective": resolved_strategy.language_effective,
+                "docker_image_effective": resolved_strategy.strategy.docker_image,
+                "local_gate_policy": self.local_gate_policy,
             }
         else:
             test_summary = _run_test_gates(
@@ -200,6 +285,8 @@ class HealerRunner:
                 targeted_tests=targeted_tests,
                 timeout_seconds=self.timeout_seconds,
                 mode=self.test_gate_mode,
+                resolved_strategy=resolved_strategy,
+                local_gate_policy=self.local_gate_policy,
             )
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
@@ -224,6 +311,30 @@ class HealerRunner:
             diff_lines=diff_lines,
             test_summary=test_summary,
         )
+
+    def _resolve_strategy(self, workspace: Path) -> ResolvedStrategy:
+        detection = detect_language_details(workspace)
+        effective_language = self._language or detection.language
+        strategy = get_strategy(
+            effective_language,
+            docker_image=self._docker_image,
+            test_command=self._test_command,
+            install_command=self._install_command,
+        )
+        return ResolvedStrategy(
+            language_detected=detection.language,
+            language_effective=effective_language,
+            strategy=strategy,
+        )
+
+    def _bind_connector_workspace(self, workspace: Path) -> None:
+        # CodexCliConnector executes with cwd=self.workspace; update it per issue
+        # so direct edits land in the active healer worktree, not repo root.
+        if hasattr(self.connector, "workspace"):
+            try:
+                setattr(self.connector, "workspace", workspace)
+            except Exception:
+                pass
 
 
 def _extract_diff_block(text: str) -> str:
@@ -280,50 +391,263 @@ def _run_test_gates(
     targeted_tests: list[str],
     timeout_seconds: int,
     mode: str,
+    resolved_strategy: ResolvedStrategy | None = None,
+    local_gate_policy: str = "auto",
 ) -> dict[str, Any]:
+    if resolved_strategy is None:
+        resolved_strategy = ResolvedStrategy(
+            language_detected="unknown",
+            language_effective="unknown",
+            strategy=get_strategy("unknown"),
+        )
     summary: dict[str, Any] = {
         "mode": mode,
         "failed_tests": 0,
         "targeted_tests": targeted_tests,
+        "language_detected": resolved_strategy.language_detected,
+        "language_effective": resolved_strategy.language_effective,
+        "docker_image_effective": resolved_strategy.strategy.docker_image,
+        "local_gate_policy": local_gate_policy,
     }
     runners = _gate_runners_for_mode(mode)
+    strategy = resolved_strategy.strategy
 
     if targeted_tests:
-        targeted_cmd = ["pytest", "-q", *targeted_tests]
+        targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
         for runner_name, runner in runners:
-            targeted = runner(workspace, targeted_cmd, timeout_seconds)
+            targeted = _invoke_gate_runner(
+                runner,
+                workspace,
+                targeted_cmd,
+                timeout_seconds,
+                strategy=strategy,
+                local_gate_policy=local_gate_policy,
+            )
+            targeted_status = str(
+                targeted.get("gate_status") or ("passed" if int(targeted.get("exit_code", 1)) == 0 else "failed")
+            )
+            if mode == "local_only" and runner_name == "local" and targeted_status == "skipped":
+                targeted_status = "failed"
+                if not targeted.get("gate_reason"):
+                    targeted["gate_reason"] = "local_only_requires_local_gate"
             summary[f"{runner_name}_targeted_exit_code"] = targeted["exit_code"]
             summary[f"{runner_name}_targeted_output_tail"] = targeted["output_tail"]
-            if targeted["exit_code"] != 0:
+            summary[f"{runner_name}_targeted_status"] = targeted_status
+            if targeted.get("gate_reason"):
+                summary[f"{runner_name}_targeted_reason"] = targeted["gate_reason"]
+            if targeted_status == "failed":
                 summary["failed_tests"] += 1
 
-    full_cmd = ["pytest", "-q"]
+    full_cmd = list(strategy.docker_test_cmd)
     for runner_name, runner in runners:
-        full = runner(workspace, full_cmd, timeout_seconds)
+        full = _invoke_gate_runner(
+            runner,
+            workspace,
+            full_cmd,
+            timeout_seconds,
+            strategy=strategy,
+            local_gate_policy=local_gate_policy,
+        )
+        full_status = str(full.get("gate_status") or ("passed" if int(full.get("exit_code", 1)) == 0 else "failed"))
+        if mode == "local_only" and runner_name == "local" and full_status == "skipped":
+            full_status = "failed"
+            if not full.get("gate_reason"):
+                full["gate_reason"] = "local_only_requires_local_gate"
         summary[f"{runner_name}_full_exit_code"] = full["exit_code"]
         summary[f"{runner_name}_full_output_tail"] = full["output_tail"]
-        if full["exit_code"] != 0:
+        summary[f"{runner_name}_full_status"] = full_status
+        if full.get("gate_reason"):
+            summary[f"{runner_name}_full_reason"] = full["gate_reason"]
+        if full_status == "failed":
             summary["failed_tests"] += 1
     return summary
 
 
-def _run_pytest_locally(workspace: Path, command: list[str], timeout_seconds: int) -> dict[str, Any]:
+def _compose_targeted_command(strategy: LanguageStrategy, targeted_tests: list[str]) -> list[str]:
+    base = list(strategy.docker_test_cmd)
+    if not targeted_tests or not strategy.supports_targeted_paths:
+        return base
+    return [*base, *targeted_tests]
+
+
+def _invoke_gate_runner(
+    runner: Any,
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    *,
+    strategy: LanguageStrategy,
+    local_gate_policy: str,
+) -> dict[str, Any]:
+    try:
+        parameters = inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    supports_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+    accepts_strategy = supports_kwargs or "strategy" in parameters
+    accepts_policy = supports_kwargs or "local_gate_policy" in parameters
+    if accepts_strategy or accepts_policy:
+        return runner(
+            workspace,
+            command,
+            timeout_seconds,
+            strategy=strategy,
+            local_gate_policy=local_gate_policy,
+        )
+    return runner(workspace, command, timeout_seconds)
+
+
+def _run_tests_locally(
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    *,
+    strategy: LanguageStrategy,
+    local_gate_policy: str,
+) -> dict[str, Any]:
+    if local_gate_policy == "skip":
+        return {
+            "exit_code": 0,
+            "output_tail": "(local gate skipped by policy)",
+            "gate_status": "skipped",
+            "gate_reason": "policy_skip",
+        }
+
+    local_cmd = list(strategy.local_test_cmd)
+    if not local_cmd:
+        return {
+            "exit_code": 0,
+            "output_tail": "(local gate skipped: no local test command for this language)",
+            "gate_status": "skipped",
+            "gate_reason": "no_local_test_command",
+        }
+
+    if not _local_tool_available(local_cmd):
+        message = f"(local gate unavailable: command not found: {local_cmd[0]})"
+        if local_gate_policy == "force":
+            return {
+                "exit_code": 127,
+                "output_tail": message,
+                "gate_status": "failed",
+                "gate_reason": "tool_missing",
+            }
+        return {
+            "exit_code": 0,
+            "output_tail": message,
+            "gate_status": "skipped",
+            "gate_reason": "tool_missing",
+        }
+
+    final_cmd = _compose_local_command(local_cmd=local_cmd, command=command, strategy=strategy)
     env = os.environ.copy()
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(workspace) if not existing else f"{workspace}{os.pathsep}{existing}"
-    proc = subprocess.run(
-        [sys.executable, "-m", *command],
-        cwd=str(workspace),
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=max(30, timeout_seconds),
-    )
+    if _is_pytest_style_command(local_cmd):
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(workspace) if not existing else f"{workspace}{os.pathsep}{existing}"
+
+    try:
+        proc = subprocess.run(
+            final_cmd,
+            cwd=str(workspace),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(30, timeout_seconds),
+        )
+    except FileNotFoundError:
+        message = f"(local gate unavailable: command not found: {local_cmd[0]})"
+        if local_gate_policy == "force":
+            return {
+                "exit_code": 127,
+                "output_tail": message,
+                "gate_status": "failed",
+                "gate_reason": "tool_missing",
+            }
+        return {
+            "exit_code": 0,
+            "output_tail": message,
+            "gate_status": "skipped",
+            "gate_reason": "tool_missing",
+        }
+
+    status = "passed" if int(proc.returncode) == 0 else "failed"
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     return {
         "exit_code": int(proc.returncode),
         "output_tail": output[-2000:],
+        "gate_status": status,
+        "gate_reason": "",
+    }
+
+
+def _local_tool_available(command: list[str]) -> bool:
+    if not command:
+        return False
+    executable = command[0]
+    if executable in {"pytest", "py.test"}:
+        return True
+    if executable.startswith(("/", "./")):
+        return True
+    return shutil.which(executable) is not None
+
+
+def _compose_local_command(*, local_cmd: list[str], command: list[str], strategy: LanguageStrategy) -> list[str]:
+    extra_args: list[str] = []
+    if strategy.supports_targeted_paths and len(command) > len(strategy.docker_test_cmd):
+        extra_args = command[len(strategy.docker_test_cmd):]
+    merged = [*local_cmd, *extra_args]
+    if _starts_with_any(merged, ["pytest"], ["py.test"]):
+        return [sys.executable, "-m", *merged]
+    return merged
+
+
+def _starts_with_any(command: list[str], *prefixes: list[str]) -> bool:
+    return any(command[: len(prefix)] == prefix for prefix in prefixes)
+
+
+def _is_pytest_style_command(command: list[str]) -> bool:
+    return _starts_with_any(command, ["pytest"], ["py.test"]) or (
+        _starts_with_any(command, ["python"]) and "pytest" in command
+    )
+
+
+def _run_tests_in_docker(
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    *,
+    strategy: LanguageStrategy,
+    local_gate_policy: str,
+) -> dict[str, Any]:
+    del local_gate_policy
+    bash_script = _build_docker_test_script(command, strategy)
+    docker_cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{workspace}:/workspace",
+        "-w",
+        "/workspace",
+        strategy.docker_image,
+        "sh",
+        "-c",
+        bash_script,
+    ]
+    proc = subprocess.run(
+        docker_cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=max(60, timeout_seconds),
+    )
+    status = "passed" if int(proc.returncode) == 0 else "failed"
+    output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    return {
+        "exit_code": int(proc.returncode),
+        "output_tail": output[-2000:],
+        "gate_status": status,
+        "gate_reason": "",
     }
 
 
@@ -335,6 +659,14 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
         )
         tailored_lines.append(
             "If direct edits are unavailable, return exactly one valid unified diff fenced block (```diff ... ```)."
+        )
+    if failure_class == "empty_diff":
+        tailored_lines.append(
+            "The previous response used a diff fence but left it empty. Return a complete patch body inside the fence."
+        )
+    if failure_class == "malformed_diff":
+        tailored_lines.append(
+            "The previous response used a diff fence with invalid patch syntax. Include real unified diff headers and hunks."
         )
     if failure_class == "no_code_diff":
         tailored_lines.append(
@@ -368,6 +700,10 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
         "If the issue asks for edits or revisions, update the named files directly.",
         "If the issue asks for a build or fix, make the minimum necessary multi-file patch to satisfy it.",
     ]
+    if task_spec.language and task_spec.language != "unknown":
+        lines.append(
+            f"This is a {task_spec.language} project — follow its conventions for imports, dependencies, and file organization."
+        )
     if task_spec.input_context_paths:
         input_context = ", ".join(task_spec.input_context_paths)
         lines.append(f"Treat these files as input-only context, not output targets: {input_context}.")
@@ -384,6 +720,40 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
             "Do not return status updates like 'Updated file X' or testing notes; return actual file content only."
         )
     return "\n".join(lines)
+
+
+def _render_input_context_block(*, task_spec: HealerTaskSpec, workspace: Path) -> str:
+    if not task_spec.input_context_paths:
+        return ""
+    entries: list[str] = []
+    for relative_path in task_spec.input_context_paths:
+        rendered = _render_input_context_file(relative_path=relative_path, workspace=workspace)
+        if rendered:
+            entries.append(rendered)
+    if not entries:
+        return ""
+    return "### Input Context Files\n" + "\n\n".join(entries) + "\n\n"
+
+
+def _render_input_context_file(*, relative_path: str, workspace: Path) -> str:
+    candidate = (workspace / relative_path).resolve()
+    try:
+        candidate.relative_to(workspace.resolve())
+    except ValueError:
+        logger.warning("Skipping input context outside workspace: %s", relative_path)
+        return f"#### {relative_path}\n- Unable to load: path resolved outside the workspace."
+    if not candidate.exists() or not candidate.is_file():
+        return f"#### {relative_path}\n- Unable to load: file is missing."
+    try:
+        text = candidate.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return f"#### {relative_path}\n- Unable to load: file is not UTF-8 text."
+    body = text.strip()
+    if not body:
+        return f"#### {relative_path}\n- File is empty."
+    if len(body) > _INPUT_CONTEXT_MAX_CHARS:
+        body = body[:_INPUT_CONTEXT_MAX_CHARS].rstrip() + "\n...[truncated]"
+    return f"#### {relative_path}\n```text\n{body}\n```"
 
 
 def _proposer_retry_budget_for_task(
@@ -471,7 +841,82 @@ def _classify_non_patch_failure(proposer_output: str) -> tuple[str, str]:
         return "connector_runtime_error", text[:500]
     if lowered.startswith("error:") and "codex" in lowered:
         return "connector_runtime_error", text[:500]
+    if _contains_diff_fence(text):
+        return "empty_diff", "Proposer returned an empty diff fenced block."
     return "no_patch", "Proposer did not return a unified diff block."
+
+
+def _augment_failure_reason_with_connector_health(
+    *,
+    connector: ConnectorProtocol,
+    failure_class: str,
+    failure_reason: str,
+) -> str:
+    if failure_class not in {"connector_unavailable", "connector_runtime_error"}:
+        return failure_reason
+    snapshot_fn = getattr(connector, "health_snapshot", None)
+    if not callable(snapshot_fn):
+        return failure_reason
+    try:
+        snapshot = snapshot_fn()
+    except Exception:
+        return failure_reason
+    if not isinstance(snapshot, dict):
+        return failure_reason
+
+    details: list[str] = []
+    resolved_command = str(snapshot.get("resolved_command") or "").strip()
+    if resolved_command:
+        details.append(f"resolved_command={resolved_command}")
+    runtime_kind = str(snapshot.get("last_runtime_error_kind") or "").strip()
+    if runtime_kind:
+        details.append(f"runtime_kind={runtime_kind}")
+    stdout_tail = str(snapshot.get("last_runtime_stdout_tail") or "").strip()
+    if stdout_tail:
+        details.append(f"stdout_tail={stdout_tail}")
+    stderr_tail = str(snapshot.get("last_runtime_stderr_tail") or "").strip()
+    if stderr_tail:
+        details.append(f"stderr_tail={stderr_tail}")
+    availability_reason = str(snapshot.get("availability_reason") or "").strip()
+    if failure_class == "connector_unavailable" and availability_reason:
+        details.append(f"availability_reason={availability_reason}")
+    last_health_error = str(snapshot.get("last_health_error") or "").strip()
+    if last_health_error:
+        details.append(f"last_health_error={last_health_error}")
+    if not details:
+        return failure_reason
+
+    summary = f"{failure_reason} | " + " | ".join(details)
+    return summary[:500]
+
+
+def _contains_diff_fence(text: str) -> bool:
+    return bool(re.search(r"```diff(?:[^\n`]*)\n", text or "", re.IGNORECASE))
+
+
+def _looks_like_unified_diff(patch: str) -> bool:
+    normalized = (patch or "").strip()
+    if not normalized:
+        return False
+    has_diff_header = "diff --git " in normalized
+    has_file_headers = "--- " in normalized and "+++ " in normalized
+    has_hunks = "@@ " in normalized or "\n@@" in normalized
+    has_metadata_change = any(
+        marker in normalized
+        for marker in (
+            "new file mode ",
+            "deleted file mode ",
+            "rename from ",
+            "rename to ",
+            "copy from ",
+            "copy to ",
+            "Binary files ",
+            "GIT binary patch",
+        )
+    )
+    if has_file_headers and (has_hunks or has_metadata_change or has_diff_header):
+        return True
+    return has_diff_header and has_metadata_change
 
 
 def _materialize_artifact_from_output(
@@ -520,6 +965,58 @@ def _materialize_artifact_from_output(
         existing = target_abs.read_text(encoding="utf-8") if target_abs.exists() else None
         if existing == content:
             continue
+        target_abs.write_text(content, encoding="utf-8")
+        wrote_any = True
+    return wrote_any
+
+
+def _materialize_explicit_path_fenced_files(
+    *,
+    task_spec: HealerTaskSpec,
+    proposer_output: str,
+    workspace: Path,
+) -> bool:
+    text = (proposer_output or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith("connectorunavailable:") or lowered.startswith("connectorruntimeerror:"):
+        return False
+    if lowered.startswith("error:") and "codex" in lowered:
+        return False
+
+    fenced = _extract_path_fenced_bodies(text)
+    if not fenced:
+        return False
+
+    workspace_root = workspace.resolve()
+    disallowed_targets = {
+        rel.as_posix()
+        for rel in (
+            _safe_rel_path(path)
+            for path in (task_spec.input_context_paths or ())
+        )
+        if rel is not None
+    }
+    wrote_any = False
+    for rel_path, body in fenced.items():
+        if rel_path in disallowed_targets:
+            continue
+        target_rel = _safe_rel_path(rel_path)
+        if target_rel is None:
+            continue
+        target_abs = (workspace / target_rel).resolve()
+        if not _is_within_workspace(path=target_abs, workspace=workspace_root):
+            continue
+        if not body.strip():
+            continue
+        if _looks_like_status_update_summary(body):
+            continue
+        content = body if body.endswith("\n") else f"{body}\n"
+        existing = target_abs.read_text(encoding="utf-8") if target_abs.exists() else None
+        if existing == content:
+            continue
+        target_abs.parent.mkdir(parents=True, exist_ok=True)
         target_abs.write_text(content, encoding="utf-8")
         wrote_any = True
     return wrote_any
@@ -708,45 +1205,13 @@ def _reset_workspace_after_failed_apply(workspace: Path) -> None:
     )
 
 
-def _run_pytest_in_docker(workspace: Path, command: list[str], timeout_seconds: int) -> dict[str, Any]:
-    bash_script = _build_docker_test_script(command)
-    docker_cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "-v",
-        f"{workspace}:/workspace",
-        "-w",
-        "/workspace",
-        "python:3.11-slim",
-        "bash",
-        "-lc",
-        bash_script,
-    ]
-    proc = subprocess.run(
-        docker_cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=max(60, timeout_seconds),
-    )
-    output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
-    return {
-        "exit_code": int(proc.returncode),
-        "output_tail": output[-2000:],
-    }
-
-
-def _build_docker_test_script(command: list[str]) -> str:
-    bootstrap = [
-        "python -m pip install --disable-pip-version-check -q pytest",
-        (
-            "if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then "
-            "python -m pip install --disable-pip-version-check -q -e .; "
-            "fi"
-        ),
-    ]
-    return " && ".join([*bootstrap, " ".join(_shell_quote(part) for part in command)])
+def _build_docker_test_script(command: list[str], strategy: LanguageStrategy | None = None) -> str:
+    active_strategy = strategy or get_strategy("unknown")
+    parts: list[str] = []
+    if active_strategy.docker_install_cmd:
+        parts.append(active_strategy.docker_install_cmd)
+    parts.append(" ".join(_shell_quote(part) for part in command))
+    return " && ".join(parts)
 
 
 def _shell_quote(value: str) -> str:
@@ -760,6 +1225,13 @@ def _normalize_test_gate_mode(mode: str) -> str:
     return "local_then_docker"
 
 
+def _normalize_local_gate_policy(policy: str) -> str:
+    candidate = str(policy or "").strip().lower().replace("-", "_")
+    if candidate in {"auto", "skip", "force"}:
+        return candidate
+    return "auto"
+
+
 def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:
     if mode == "local_only":
         return [("local", _run_pytest_locally)]
@@ -769,3 +1241,42 @@ def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:
         ("local", _run_pytest_locally),
         ("docker", _run_pytest_in_docker),
     ]
+
+
+def _run_tests_locally_gate(
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    *,
+    strategy: LanguageStrategy | None = None,
+    local_gate_policy: str = "auto",
+) -> dict[str, Any]:
+    return _run_tests_locally(
+        workspace,
+        command,
+        timeout_seconds,
+        strategy=strategy or get_strategy("unknown"),
+        local_gate_policy=_normalize_local_gate_policy(local_gate_policy),
+    )
+
+
+def _run_tests_in_docker_gate(
+    workspace: Path,
+    command: list[str],
+    timeout_seconds: int,
+    *,
+    strategy: LanguageStrategy | None = None,
+    local_gate_policy: str = "auto",
+) -> dict[str, Any]:
+    return _run_tests_in_docker(
+        workspace,
+        command,
+        timeout_seconds,
+        strategy=strategy or get_strategy("unknown"),
+        local_gate_policy=_normalize_local_gate_policy(local_gate_policy),
+    )
+
+
+# Preserve old names as aliases for backward compatibility in tests.
+_run_pytest_locally = _run_tests_locally_gate
+_run_pytest_in_docker = _run_tests_in_docker_gate

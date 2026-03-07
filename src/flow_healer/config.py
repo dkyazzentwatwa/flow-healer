@@ -13,8 +13,9 @@ class ServiceSettings:
     github_token_env: str = "GITHUB_TOKEN"
     env_file: str = ""
     github_api_base_url: str = "https://api.github.com"
-    poll_interval_seconds: float = 60.0
+    poll_interval_seconds: float = 30.0
     state_root: str = "~/.flow-healer"
+    connector_backend: str = "exec"
     connector_command: str = "codex"
     connector_model: str = "gpt-5.4"
     connector_reasoning_effort: str = "medium"
@@ -71,12 +72,15 @@ class RelaySettings:
     healer_default_branch: str = "main"
     enable_autonomous_healer: bool = True
     healer_mode: str = "guarded_pr"
-    healer_poll_interval_seconds: float = 60.0
-    healer_max_concurrent_issues: int = 1
+    healer_poll_interval_seconds: float = 30.0
+    healer_max_concurrent_issues: int = 3
     healer_max_wall_clock_seconds_per_issue: int = 300
     healer_issue_required_labels: list[str] = field(default_factory=lambda: ["healer:ready"])
-    healer_pr_actions_require_approval: bool = True
+    healer_pr_actions_require_approval: bool = False
     healer_pr_required_label: str = "healer:pr-approved"
+    healer_pr_auto_approve_clean: bool = True
+    healer_pr_auto_merge_clean: bool = True
+    healer_pr_merge_method: str = "squash"
     healer_trusted_actors: list[str] = field(default_factory=list)
     healer_retry_budget: int = 2
     healer_backoff_initial_seconds: int = 60
@@ -87,6 +91,11 @@ class RelaySettings:
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
     healer_test_gate_mode: str = "local_then_docker"
+    healer_local_gate_policy: str = "auto"
+    healer_language: str = ""
+    healer_docker_image: str = ""
+    healer_test_command: str = ""
+    healer_install_command: str = ""
     healer_max_diff_files: int = 8
     healer_max_diff_lines: int = 400
     healer_max_failed_tests_allowed: int = 0
@@ -116,8 +125,9 @@ class AppConfig:
             github_token_env=str(service_raw.get("github_token_env") or "GITHUB_TOKEN"),
             env_file=str(env_file) if env_file else "",
             github_api_base_url=str(service_raw.get("github_api_base_url") or "https://api.github.com"),
-            poll_interval_seconds=float(service_raw.get("poll_interval_seconds") or 60.0),
+            poll_interval_seconds=float(service_raw.get("poll_interval_seconds") or 30.0),
             state_root=str(service_raw.get("state_root") or "~/.flow-healer"),
+            connector_backend=_normalize_connector_backend(service_raw.get("connector_backend")),
             connector_command=str(service_raw.get("connector_command") or "codex"),
             connector_model=str(service_raw.get("connector_model") or "gpt-5.4"),
             connector_reasoning_effort=str(service_raw.get("connector_reasoning_effort") or "medium"),
@@ -143,13 +153,16 @@ class AppConfig:
                     healer_poll_interval_seconds=float(
                         item.get("poll_interval_seconds") or service.poll_interval_seconds
                     ),
-                    healer_max_concurrent_issues=int(item.get("max_concurrent_issues") or 1),
+                    healer_max_concurrent_issues=int(item.get("max_concurrent_issues") or 3),
                     healer_max_wall_clock_seconds_per_issue=int(
                         item.get("max_wall_clock_seconds_per_issue") or service.connector_timeout_seconds
                     ),
                     healer_issue_required_labels=_list_of_str(item.get("issue_required_labels"), ["healer:ready"]),
-                    healer_pr_actions_require_approval=bool(item.get("pr_actions_require_approval", True)),
+                    healer_pr_actions_require_approval=bool(item.get("pr_actions_require_approval", False)),
                     healer_pr_required_label=str(item.get("pr_required_label") or "healer:pr-approved"),
+                    healer_pr_auto_approve_clean=bool(item.get("pr_auto_approve_clean", True)),
+                    healer_pr_auto_merge_clean=bool(item.get("pr_auto_merge_clean", True)),
+                    healer_pr_merge_method=str(item.get("pr_merge_method") or "squash"),
                     healer_trusted_actors=_list_of_str(item.get("trusted_actors"), []),
                     healer_retry_budget=int(item.get("retry_budget") or 2),
                     healer_backoff_initial_seconds=int(item.get("backoff_initial_seconds") or 60),
@@ -162,6 +175,11 @@ class AppConfig:
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
                     healer_test_gate_mode=str(item.get("test_gate_mode") or "local_then_docker"),
+                    healer_local_gate_policy=str(item.get("local_gate_policy") or "auto"),
+                    healer_language=str(item.get("language") or ""),
+                    healer_docker_image=str(item.get("docker_image") or ""),
+                    healer_test_command=str(item.get("test_command") or ""),
+                    healer_install_command=str(item.get("install_command") or ""),
                     healer_max_diff_files=int(item.get("max_diff_files") or 8),
                     healer_max_diff_lines=int(item.get("max_diff_lines") or 400),
                     healer_max_failed_tests_allowed=int(item.get("max_failed_tests_allowed") or 0),
@@ -228,6 +246,15 @@ def _list_of_str(value: Any, default: list[str]) -> list[str]:
     if not isinstance(value, list):
         return list(default)
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _normalize_connector_backend(value: Any) -> str:
+    raw = str(value or "exec").strip().lower().replace("-", "_")
+    if raw in {"exec", "app_server"}:
+        return raw
+    if raw == "appserver":
+        return "app_server"
+    return "exec"
 
 
 def _resolve_env_file(config_path: Path, value: Any) -> Path | None:

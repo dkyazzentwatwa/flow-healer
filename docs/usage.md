@@ -21,11 +21,12 @@ Once claimed, Flow Healer:
 - Creates an isolated git worktree.
 - Analyzes the issue and predicts which files need locking.
 - Generates a fix via the AI connector.
-- Runs tests in a Docker container.
+- Resolves a language strategy (auto-detected or pinned in config).
+- Runs tests via local and/or Docker gates per `test_gate_mode`.
 - Verifies the fix doesn't introduce regressions.
 
 ### 3. Review and Approval
-If `pr_actions_require_approval` is enabled, Flow Healer waits for the `healer:pr-approved` label before opening or updating a Pull Request.
+By default, Flow Healer opens or updates the Pull Request as soon as verification passes. If `pr_actions_require_approval` is enabled, it waits for the `healer:pr-approved` label before continuing. When `pr_auto_approve_clean` and `pr_auto_merge_clean` are enabled, Flow Healer also makes a best-effort approval and merge pass for clean PRs with no merge conflicts. GitHub still blocks self-approval from the same actor that opened the PR, and branch protection can still block auto-merge.
 
 ### 4. PR Feedback Loop
 If a human reviewer leaves a comment on the generated PR, Flow Healer:
@@ -55,6 +56,26 @@ flow-healer status --repo my-project
 The scanner identifies deterministic breakage patterns (e.g., failed CI, linting errors). If `scan_enable_issue_creation` is set to `true`, it will create deduplicated GitHub issues for these findings, labeled with `kind:scan` and `healer:ready` to trigger the healing loop automatically.
 
 > **Note**: Labels can be customized per-repo in the configuration to match your project's workflow. Standardizing labels across repos is recommended for consistent multi-repo orchestration.
+
+## Language Strategy Overrides
+
+Per repo, you can pin language behavior or keep auto-detection:
+
+~~~yaml
+repos:
+  - name: my-project
+    # ...
+    test_gate_mode: local_then_docker
+    local_gate_policy: auto
+    language: ""
+    docker_image: ""
+    test_command: ""
+    install_command: ""
+~~~
+
+- `language`: pin strategy (`python`, `node`, `go`, `rust`, `java_maven`, `java_gradle`, `ruby`) or leave empty for auto-detect.
+- `local_gate_policy`: `auto`, `force`, or `skip`.
+- `docker_image`, `test_command`, `install_command`: optional strategy overrides.
 
 ## Failure Recovery
 

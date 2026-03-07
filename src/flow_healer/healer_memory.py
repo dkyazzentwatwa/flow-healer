@@ -36,6 +36,8 @@ _STOPWORDS = {
     "with",
 }
 _NEGATIVE_FAILURES = {
+    "empty_diff",
+    "malformed_diff",
     "no_patch",
     "no_workspace_change",
     "patch_apply_failed",

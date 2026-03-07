@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -124,10 +125,17 @@ class CodexCliConnector:
         effective_timeout = float(timeout_seconds) if timeout_seconds is not None else float(self.timeout)
         effective_timeout = max(30.0, effective_timeout)
         proc: subprocess.Popen[str] | None = None
+        cwd_value: str | None = None
+        try:
+            candidate = Path(self.workspace).expanduser()
+            if candidate.exists():
+                cwd_value = str(candidate)
+        except Exception:
+            cwd_value = None
         try:
             proc = subprocess.Popen(
                 cmd,
-                cwd=self.workspace,
+                cwd=cwd_value,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

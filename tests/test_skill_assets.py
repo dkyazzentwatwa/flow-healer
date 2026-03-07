@@ -107,6 +107,10 @@ def test_triage_script_classifies_connector_failure(tmp_path):
     assert payload["diagnosis"] == "connector_or_patch_generation"
     assert payload["recommended_skill"] == "flow-healer-connector-debug"
     assert "connector-debug" in payload["default_action"]
+    assert payload["graph_position"] == 6
+    assert payload["skill_relative_path"].endswith("skills/flow-healer-connector-debug/SKILL.md")
+    assert payload["connector_debug_focus"] == "patch_apply"
+    assert payload["connector_debug_checks"][0] == "Reproduce patch application with the raw patch output"
 
 
 def test_followup_inspector_reads_issue_state(tmp_path):

@@ -12,9 +12,21 @@ def test_classify_issue_route_sends_connector_failures_to_debug_skill() -> None:
     assert route.diagnosis == "connector_or_patch_generation"
     assert route.recommended_skill == "flow-healer-connector-debug"
     assert "connector-debug" in route.default_action
+    assert route.graph_position == 6
+    assert route.previous_skill == "flow-healer-pr-followup"
+    assert route.next_skill == ""
+    assert route.skill_relative_path.endswith("skills/flow-healer-connector-debug/SKILL.md")
+    assert "scripts/inspect_issue_state.py" not in route.default_command_preview
+    assert "Diff fence validity" in route.key_output_fields
+    assert route.stop_conditions == ()
     assert route.stop_recommended is True
     assert route.stop_reason.startswith("Stop before another live run")
     assert route.connector_debug_focus == "command_resolution"
+    assert route.connector_debug_checks == (
+        "Validate connector command resolution",
+        "Confirm the configured binary or wrapper is executable",
+        "Capture the resolved command and invocation path before retrying",
+    )
 
 
 def test_classify_issue_route_detects_fixture_setup_failures() -> None:
@@ -25,6 +37,12 @@ def test_classify_issue_route_detects_fixture_setup_failures() -> None:
 
     assert route.diagnosis == "repo_fixture_or_setup"
     assert route.recommended_skill == "flow-healer-preflight"
+    assert route.graph_position == 2
+    assert route.previous_skill == "flow-healer-local-validation"
+    assert route.next_skill == "flow-healer-live-smoke"
+    assert route.skill_relative_path.endswith("skills/flow-healer-preflight/SKILL.md")
+    assert route.default_command_preview
+    assert route.stop_conditions
     assert route.stop_recommended is True
     assert route.connector_debug_focus == ""
 
@@ -33,6 +51,30 @@ def test_classify_issue_route_maps_diff_contract_failures_to_connector_focus() -
     route = classify_issue_route(
         {"state": "failed"},
         {"failure_class": "diff_limit_exceeded", "failure_reason": "Malformed diff fence from proposer"},
+    )
+
+    assert route.diagnosis == "connector_or_patch_generation"
+    assert route.connector_debug_focus == "diff_fence"
+    assert route.connector_debug_checks[0] == "Validate diff fence validity"
+
+
+def test_classify_issue_route_maps_empty_diff_failures_to_empty_diff_focus() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {"failure_class": "empty_diff", "failure_reason": "Proposer returned an empty diff fenced block."},
+    )
+
+    assert route.diagnosis == "connector_or_patch_generation"
+    assert route.connector_debug_focus == "empty_diff"
+
+
+def test_classify_issue_route_maps_malformed_diff_failures_to_diff_fence_focus() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {
+            "failure_class": "malformed_diff",
+            "failure_reason": "Proposer returned a diff fence, but the contents were not a valid unified diff.",
+        },
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
@@ -48,6 +90,7 @@ def test_classify_issue_route_maps_runtime_connector_failures_to_runtime_crash_f
     assert route.diagnosis == "connector_or_patch_generation"
     assert route.recommended_skill == "flow-healer-connector-debug"
     assert route.connector_debug_focus == "runtime_crash"
+    assert route.connector_debug_checks[0] == "Rerun the connector against a fixed prompt fixture"
 
 
 def test_classify_issue_route_maps_docs_only_code_change_failures_to_contract_comparison() -> None:
@@ -62,3 +105,19 @@ def test_classify_issue_route_maps_docs_only_code_change_failures_to_contract_co
     assert route.diagnosis == "connector_or_patch_generation"
     assert route.recommended_skill == "flow-healer-connector-debug"
     assert route.connector_debug_focus == "contract_comparison"
+    assert route.connector_debug_checks[0] == "Compare proposer and verifier contracts"
+
+
+def test_classify_issue_route_maps_verifier_payload_failures_to_json_checks() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {"failure_class": "verifier_failed", "failure_reason": "Invalid JSON payload: missing verdict field"},
+    )
+
+    assert route.diagnosis == "connector_or_patch_generation"
+    assert route.connector_debug_focus == "verifier_payload"
+    assert route.connector_debug_checks == (
+        "Validate any verifier payload as JSON",
+        "Confirm the expected verdict and summary fields are present",
+        "Compare verifier output with the expected strict JSON contract",
+    )

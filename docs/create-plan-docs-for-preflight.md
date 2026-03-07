@@ -8,10 +8,10 @@ Introduce stronger preflight checks before any proposal run so autonomous code h
 
 Flow Healer already has the right seams for a dedicated preflight layer:
 
-- [`src/flow_healer/healer_runner.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_runner.py) runs the proposer, stages edits, applies fallback patches, and decides whether to run tests, but it does not yet gate the run on repository or environment safety before spending a proposer turn.
-- [`src/flow_healer/healer_workspace.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_workspace.py) creates isolated issue worktrees and can verify whether a path is under the healer-managed worktree root.
-- [`src/flow_healer/healer_loop.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_loop.py) already distinguishes task kind and validation profile, which makes it a natural place to pass preflight requirements into the runner.
-- [`src/flow_healer/service.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/service.py) already exposes lightweight `doctor` checks, but those checks are separate from the runtime enforcement path.
+- [`src/flow_healer/healer_runner.py`](src/flow_healer/healer_runner.py) runs the proposer, stages edits, applies fallback patches, and decides whether to run tests, but it does not yet gate the run on repository or environment safety before spending a proposer turn.
+- [`src/flow_healer/healer_workspace.py`](src/flow_healer/healer_workspace.py) creates isolated issue worktrees and can verify whether a path is under the healer-managed worktree root.
+- [`src/flow_healer/healer_loop.py`](src/flow_healer/healer_loop.py) already distinguishes task kind and validation profile, which makes it a natural place to pass preflight requirements into the runner.
+- [`src/flow_healer/service.py`](src/flow_healer/service.py) already exposes lightweight `doctor` checks, but those checks are separate from the runtime enforcement path.
 
 The best next step is not a broad redesign. It is a shared preflight engine that both runtime and diagnostics call, with strict universal defaults and small repo-level overrides.
 
@@ -230,10 +230,10 @@ Suggested responsibilities:
 
 ### Recommended integration points
 
-- [`src/flow_healer/healer_runner.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_runner.py): run proposal preflight before the first proposer turn and short-circuit on hard failures
-- [`src/flow_healer/healer_loop.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_loop.py): pass task kind and validation profile into preflight and avoid burning proposer retries on deterministic setup failures
-- [`src/flow_healer/healer_workspace.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/healer_workspace.py): reuse worktree-root and branch-shape knowledge for workspace safety checks
-- [`src/flow_healer/service.py`](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/service.py): reuse the same engine for `doctor` so operator diagnostics match live runtime behavior
+- [`src/flow_healer/healer_runner.py`](src/flow_healer/healer_runner.py): run proposal preflight before the first proposer turn and short-circuit on hard failures
+- [`src/flow_healer/healer_loop.py`](src/flow_healer/healer_loop.py): pass task kind and validation profile into preflight and avoid burning proposer retries on deterministic setup failures
+- [`src/flow_healer/healer_workspace.py`](src/flow_healer/healer_workspace.py): reuse worktree-root and branch-shape knowledge for workspace safety checks
+- [`src/flow_healer/service.py`](src/flow_healer/service.py): reuse the same engine for `doctor` so operator diagnostics match live runtime behavior
 
 ## Implementation Plan
 

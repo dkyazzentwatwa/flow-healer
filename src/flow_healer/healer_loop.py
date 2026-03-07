@@ -22,6 +22,7 @@ from .healer_runner import HealerRunner
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue
 from .healer_task_spec import compile_task_spec
+from .language_detector import detect_language
 from .healer_verifier import HealerVerifier
 from .protocols import ConnectorProtocol
 from .store import SQLiteStore
@@ -35,6 +36,8 @@ _FLOW_COMMENT_PERSONA = (
 )
 _INFRA_FAILURE_CLASSES = {"connector_unavailable", "connector_runtime_error"}
 _ALWAYS_REQUEUE_FAILURE_CLASSES = {
+    "empty_diff",
+    "malformed_diff",
     "no_patch",
     "no_workspace_change",
     "patch_apply_failed",
@@ -84,6 +87,11 @@ class AutonomousHealerLoop:
             connector=connector,
             timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
             test_gate_mode=settings.healer_test_gate_mode,
+            local_gate_policy=settings.healer_local_gate_policy,
+            language=settings.healer_language,
+            docker_image=settings.healer_docker_image,
+            test_command=settings.healer_test_command,
+            install_command=settings.healer_install_command,
         )
         self.verifier = HealerVerifier(connector=connector)
         self.reviewer = HealerReviewer(connector=connector)
@@ -142,6 +150,9 @@ class AutonomousHealerLoop:
         self._maybe_run_scan()
         self._ingest_ready_issues()
         self._reconcile_pr_outcomes()
+        self._auto_approve_open_prs()
+        self._auto_merge_open_prs()
+        self._reconcile_pr_outcomes()
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
         breaker = self._circuit_breaker_status()
@@ -170,6 +181,7 @@ class AutonomousHealerLoop:
             if not issue:
                 break
             self._process_claimed_issue(issue)
+            self._reconcile_pr_outcomes()
             processed += 1
 
     def _ingest_pr_feedback(self) -> None:
@@ -287,25 +299,62 @@ class AutonomousHealerLoop:
             return None
 
     def _reconcile_pr_outcomes(self) -> int:
-        active_prs = self.store.list_healer_issues(states=["pr_open"], limit=100)
+        active_prs = self.store.list_healer_issues(states=["pr_open", "pr_pending_approval", "blocked"], limit=100)
         resolved = 0
         for row in active_prs:
-            pr_number = int(row.get("pr_number") or 0)
-            if pr_number <= 0:
-                continue
-
-            pr_state = self.tracker.get_pr_state(pr_number=pr_number).strip().lower()
-            if pr_state != "merged":
-                if pr_state and pr_state != str(row.get("pr_state") or "").strip().lower():
-                    self.store.set_healer_issue_state(
-                        issue_id=str(row.get("issue_id") or ""),
-                        state="pr_open",
-                        pr_state=pr_state,
-                    )
-                continue
-
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
+                continue
+            current_state = str(row.get("state") or "").strip().lower()
+            current_pr_state = str(row.get("pr_state") or "").strip().lower()
+            current_pr_number = int(row.get("pr_number") or 0)
+            if current_state == "blocked" and current_pr_state != "conflict":
+                continue
+            pr_number = int(row.get("pr_number") or 0)
+            pr_state = ""
+            if pr_number > 0:
+                pr_state = self.tracker.get_pr_state(pr_number=pr_number).strip().lower()
+            else:
+                discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
+                if discovered_pr is None:
+                    continue
+                pr_number = discovered_pr.number
+                pr_state = discovered_pr.state.strip().lower()
+
+            if pr_state == "conflict":
+                if not self._is_conflict_blocked_row(row, pr_number=pr_number):
+                    self._block_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
+                continue
+
+            if pr_state == "closed" and current_pr_state == "conflict":
+                snapshot = self.tracker.get_issue(issue_id=issue_id)
+                remote_state = str((snapshot or {}).get("state") or "").strip().lower()
+                if remote_state and remote_state != "open":
+                    self.store.set_healer_issue_state(
+                        issue_id=issue_id,
+                        state="archived",
+                        pr_number=pr_number,
+                        pr_state="closed",
+                        clear_lease=True,
+                    )
+                    continue
+                self._requeue_closed_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
+                continue
+
+            if pr_state != "merged":
+                if pr_state and (
+                    pr_state != current_pr_state
+                    or current_state != "pr_open"
+                    or current_pr_number != pr_number
+                ):
+                    self.store.set_healer_issue_state(
+                        issue_id=issue_id,
+                        state="pr_open",
+                        pr_number=pr_number,
+                        pr_state=pr_state,
+                        last_failure_class="" if current_pr_state == "conflict" else None,
+                        last_failure_reason="" if current_pr_state == "conflict" else None,
+                    )
                 continue
 
             if not self.tracker.close_issue(issue_id=issue_id):
@@ -317,6 +366,7 @@ class AutonomousHealerLoop:
                 self.store.set_healer_issue_state(
                     issue_id=issue_id,
                     state="pr_open",
+                    pr_number=pr_number,
                     pr_state="merged",
                 )
                 continue
@@ -324,6 +374,7 @@ class AutonomousHealerLoop:
             self.store.set_healer_issue_state(
                 issue_id=issue_id,
                 state="resolved",
+                pr_number=pr_number,
                 pr_state="merged",
                 clear_lease=True,
             )
@@ -340,6 +391,124 @@ class AutonomousHealerLoop:
             )
             resolved += 1
         return resolved
+
+    @staticmethod
+    def _is_conflict_blocked_row(row: dict[str, object], *, pr_number: int) -> bool:
+        return (
+            str(row.get("state") or "").strip().lower() == "blocked"
+            and str(row.get("pr_state") or "").strip().lower() == "conflict"
+            and int(row.get("pr_number") or 0) == pr_number
+        )
+
+    def _block_conflicted_pr(self, *, issue_id: str, pr_number: int) -> None:
+        reason = f"PR #{pr_number} has merge conflicts and needs manual resolution or closure."
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="blocked",
+            pr_number=pr_number,
+            pr_state="conflict",
+            last_failure_class="pr_conflict",
+            last_failure_reason=reason[:500],
+            clear_lease=True,
+        )
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Merge conflict needs a hand 🧩",
+                "This PR is blocked on merge conflicts, so I'm stepping back until it's resolved or closed.",
+                [
+                    "Status: `blocked`",
+                    f"PR: `#{pr_number}`",
+                    "PR state: `conflict`",
+                ],
+                outro="Resolve the conflicts in that PR, or close it if you want me to queue a fresh attempt.",
+            ),
+        )
+
+    def _requeue_closed_conflicted_pr(self, *, issue_id: str, pr_number: int) -> None:
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="queued",
+            pr_number=0,
+            pr_state="",
+            clear_lease=True,
+        )
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Fresh retry queued up 🔁",
+                "The conflicted PR was closed without merge, so I'm putting this back in the queue for a clean pass.",
+                [
+                    "Status: `queued`",
+                    f"Previous PR: `#{pr_number}`",
+                ],
+            ),
+        )
+
+    def _auto_approve_open_prs(self) -> int:
+        if not getattr(self.settings, "healer_pr_auto_approve_clean", True):
+            return 0
+        viewer_login = self.tracker.viewer_login().strip().lower()
+        approved = 0
+        for row in self.store.list_healer_issues(states=["pr_open"], limit=100):
+            pr_number = int(row.get("pr_number") or 0)
+            if pr_number <= 0:
+                continue
+            approved += int(self._maybe_auto_approve_pr(pr_number=pr_number, viewer_login=viewer_login))
+        return approved
+
+    def _maybe_auto_approve_pr(self, *, pr_number: int, viewer_login: str | None = None) -> bool:
+        if not getattr(self.settings, "healer_pr_auto_approve_clean", True):
+            return False
+        details = self.tracker.get_pr_details(pr_number=pr_number)
+        if details is None or details.state != "open":
+            return False
+        if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
+            return False
+        reviewer = (viewer_login if viewer_login is not None else self.tracker.viewer_login()).strip().lower()
+        if reviewer and details.author.strip().lower() == reviewer:
+            return False
+        for review in self.tracker.list_pr_reviews(pr_number=pr_number):
+            author = str(review.get("author") or "").strip().lower()
+            state = str(review.get("state") or "").strip().lower()
+            if reviewer and author == reviewer and state == "approved":
+                return False
+        try:
+            return self.tracker.approve_pr(
+                pr_number=pr_number,
+                body="Auto-approving clean PR with no merge conflicts.",
+            )
+        except Exception as exc:
+            logger.warning("Failed to auto-approve PR #%d: %s", pr_number, exc)
+            return False
+
+    def _auto_merge_open_prs(self) -> int:
+        if not getattr(self.settings, "healer_pr_auto_merge_clean", True):
+            return 0
+        merged = 0
+        for row in self.store.list_healer_issues(states=["pr_open"], limit=100):
+            pr_number = int(row.get("pr_number") or 0)
+            if pr_number <= 0:
+                continue
+            merged += int(self._maybe_auto_merge_pr(pr_number=pr_number))
+        return merged
+
+    def _maybe_auto_merge_pr(self, *, pr_number: int) -> bool:
+        if not getattr(self.settings, "healer_pr_auto_merge_clean", True):
+            return False
+        details = self.tracker.get_pr_details(pr_number=pr_number)
+        if details is None or details.state != "open":
+            return False
+        if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
+            return False
+        try:
+            return self.tracker.merge_pr(
+                pr_number=pr_number,
+                merge_method=str(getattr(self.settings, "healer_pr_merge_method", "squash") or "squash"),
+            )
+        except Exception as exc:
+            logger.warning("Failed to auto-merge PR #%d: %s", pr_number, exc)
+            return False
 
     def _ingest_ready_issues(self) -> None:
         issues = self.tracker.list_ready_issues(
@@ -361,7 +530,9 @@ class AutonomousHealerLoop:
             if existing_issue is not None:
                 existing_state = str(existing_issue.get("state") or "").strip().lower()
                 existing_pr_state = str(existing_issue.get("pr_state") or "").strip().lower()
-                if existing_state in {"archived", "blocked"} or (
+                if existing_state == "archived" or (
+                    existing_state == "blocked" and existing_pr_state != "conflict"
+                ) or (
                     existing_state == "resolved" and existing_pr_state == "closed"
                 ):
                     self.store.set_healer_issue_state(
@@ -387,10 +558,10 @@ class AutonomousHealerLoop:
             if not issue_id:
                 continue
             pr_number = int(row.get("pr_number") or 0)
-            if not self._has_pr_approved_label(
+            if not self._issue_has_approval_label(
                 issue_id=issue_id,
                 pr_number=pr_number,
-                required_label=self.settings.healer_pr_required_label,
+                local_labels=row.get("labels"),
             ):
                 continue
             self.store.set_healer_issue_state(
@@ -451,6 +622,7 @@ class AutonomousHealerLoop:
             return
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
+        detected_language = ""
         self.store.set_healer_issue_state(issue_id=issue.issue_id, state="running")
         lease_stop = threading.Event()
         lease_thread = threading.Thread(
@@ -507,6 +679,12 @@ class AutonomousHealerLoop:
                 workspace_path=workspace.path,
                 branch=workspace.branch,
             )
+            detected_language = detect_language(workspace.path)
+            task_spec = compile_task_spec(
+                issue_title=issue.title,
+                issue_body=issue.body,
+                language=detected_language,
+            )
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
                 state="running",
@@ -537,7 +715,12 @@ class AutonomousHealerLoop:
                     ],
                 ),
             )
-            targeted_tests = sorted(set(_TARGETED_TEST_RE.findall(issue.body or "")))
+            targeted_tests = _collect_targeted_tests(
+                issue_body=issue.body,
+                output_targets=list(task_spec.output_targets),
+                workspace=workspace.path,
+                language=detected_language,
+            )
             learned_context = self.memory.build_prompt_context(
                 issue_text=f"{issue.title}\n{issue.body}",
                 predicted_lock_set=prediction.keys,
@@ -611,6 +794,7 @@ class AutonomousHealerLoop:
                 test_summary=run_result.test_summary,
                 proposer_output=run_result.proposer_output,
                 learned_context=learned_context,
+                language=detected_language,
             )
             verifier_summary = {"passed": verification.passed, "summary": verification.summary}
             if not verification.passed:
@@ -632,9 +816,9 @@ class AutonomousHealerLoop:
 
             if (
                 self.settings.healer_pr_actions_require_approval
-                and not self.tracker.issue_has_label(
+                and not self._issue_has_approval_label(
                     issue_id=issue.issue_id,
-                    label=self.settings.healer_pr_required_label,
+                    local_labels=row.get("labels"),
                 )
             ):
                 self.store.set_healer_issue_state(
@@ -723,6 +907,8 @@ class AutonomousHealerLoop:
             )
             issue_state = "pr_open"
             attempt_state = "pr_open"
+            self._maybe_auto_approve_pr(pr_number=pr.number)
+            self._maybe_auto_merge_pr(pr_number=pr.number)
             logger.info("Issue #%s opened/updated PR #%s", issue.issue_id, pr.number)
             if self.settings.healer_enable_review:
                 try:
@@ -838,10 +1024,59 @@ class AutonomousHealerLoop:
             return False
         return True
 
-
     @staticmethod
     def _normalize_label(label: str) -> str:
         return (label or "").strip().lower()
+
+    def _issue_has_approval_label(
+        self,
+        *,
+        issue_id: str,
+        pr_number: int = 0,
+        local_labels: object | None = None,
+    ) -> bool:
+        required_label = self._normalize_label(self.settings.healer_pr_required_label)
+        if not required_label:
+            return True
+        if required_label in self._normalize_labels(local_labels):
+            return True
+        try:
+            if self.tracker.issue_has_label(issue_id=issue_id, label=required_label):
+                return True
+        except Exception as exc:
+            logger.warning("Failed to verify approval label for issue #%s: %s", issue_id, exc)
+        if pr_number <= 0:
+            return False
+        try:
+            pr_issue = self.tracker.get_issue(issue_id=str(pr_number))
+        except Exception as exc:
+            logger.warning("Failed to load PR #%s while checking approval label: %s", pr_number, exc)
+            return False
+        if not isinstance(pr_issue, dict):
+            return False
+        pr_labels = {
+            self._normalize_label(str((entry or {}).get("name") or ""))
+            for entry in (pr_issue.get("labels") or [])
+        }
+        return required_label in pr_labels
+
+    @staticmethod
+    def _normalize_labels(labels: object | None) -> set[str]:
+        if labels is None:
+            return set()
+        if isinstance(labels, str):
+            return {
+                normalized
+                for label in labels.split(",")
+                if (normalized := (label or "").strip().lower())
+            }
+        if not isinstance(labels, (list, tuple, set)):
+            return set()
+        return {
+            normalized
+            for label in labels
+            if (normalized := str(label or "").strip().lower())
+        }
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
@@ -1169,3 +1404,53 @@ def _is_actionable_feedback_author(author: str, self_actor: str) -> bool:
     if normalized.endswith("[bot]"):
         return False
     return True
+
+
+def _collect_targeted_tests(
+    *,
+    issue_body: str,
+    output_targets: list[str] | tuple[str, ...],
+    workspace: Path,
+    language: str,
+) -> list[str]:
+    explicit = {path.strip() for path in _TARGETED_TEST_RE.findall(issue_body or "") if path.strip()}
+    candidates = set(explicit)
+    if not explicit:
+        candidates.update(
+            _infer_targeted_tests_from_targets(
+                output_targets=output_targets,
+                workspace=workspace,
+                language=language,
+            )
+        )
+    return sorted(path for path in candidates if path)
+
+
+def _infer_targeted_tests_from_targets(
+    *,
+    output_targets: list[str] | tuple[str, ...],
+    workspace: Path,
+    language: str,
+) -> set[str]:
+    if (language or "").strip().lower() != "python":
+        return set()
+    inferred: set[str] = set()
+    for raw_target in output_targets or ():
+        target = str(raw_target or "").strip()
+        if not target:
+            continue
+        target_path = Path(target)
+        if target.startswith("tests/") and (workspace / target_path).exists():
+            inferred.add(target)
+            continue
+        if not target.startswith("src/") or target_path.suffix != ".py":
+            continue
+        src_relative = target_path.relative_to("src")
+        candidates = [
+            Path("tests") / f"test_{target_path.stem}.py",
+            Path("tests") / src_relative.parent / f"test_{target_path.stem}.py",
+        ]
+        for candidate in candidates:
+            if (workspace / candidate).exists():
+                inferred.add(candidate.as_posix())
+    return inferred

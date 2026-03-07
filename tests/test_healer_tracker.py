@@ -64,6 +64,21 @@ def test_add_pr_comment(monkeypatch):
     assert ok is True
 
 
+def test_merge_pr(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/pulls/123/merge"
+        assert method == "PUT"
+        assert body == {"merge_method": "squash"}
+        return {"merged": True}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.merge_pr(pr_number=123)
+    assert ok is True
+
+
 def test_add_issue_reaction(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
@@ -163,6 +178,52 @@ def test_close_issue(monkeypatch):
     monkeypatch.setattr(tracker, "_request_json", fake_request)
     ok = tracker.close_issue(issue_id="123")
     assert ok is True
+
+
+def test_find_pr_for_issue_uses_all_prs_and_detects_merged(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/pulls?state=all&per_page=100"
+        assert method == "GET"
+        return [
+            {
+                "number": 11,
+                "title": "healer: fix issue #123 - older",
+                "state": "closed",
+                "html_url": "https://github.com/owner/repo/pull/11",
+                "merged_at": "2026-03-06T00:00:00Z",
+            },
+            {
+                "number": 12,
+                "title": "healer: fix issue #123 - latest",
+                "state": "closed",
+                "html_url": "https://github.com/owner/repo/pull/12",
+                "merged_at": "2026-03-07T00:00:00Z",
+            },
+        ]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    pr = tracker.find_pr_for_issue(issue_id="123")
+    assert pr is not None
+    assert pr.number == 12
+    assert pr.state == "merged"
+    assert pr.html_url == "https://github.com/owner/repo/pull/12"
+
+
+def test_pr_state_from_payload_prefers_closed_over_dirty():
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+
+    assert (
+        tracker._pr_state_from_payload(
+            {
+                "state": "closed",
+                "mergeable_state": "dirty",
+            }
+        )
+        == "closed"
+    )
 
 
 def test_list_pr_comments(monkeypatch):

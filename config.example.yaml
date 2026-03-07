@@ -2,8 +2,9 @@ service:
   github_token_env: GITHUB_TOKEN
   env_file: ""
   github_api_base_url: https://api.github.com
-  poll_interval_seconds: 60
+  poll_interval_seconds: 30
   state_root: ~/.flow-healer
+  connector_backend: exec
   connector_command: codex
   connector_model: gpt-5.4
   connector_reasoning_effort: medium
@@ -43,10 +44,13 @@ repos:
     healer_mode: guarded_pr
     issue_required_labels:
       - healer:ready
-    pr_actions_require_approval: true
+    pr_actions_require_approval: false
     pr_required_label: healer:pr-approved
+    pr_auto_approve_clean: true
+    pr_auto_merge_clean: true
+    pr_merge_method: squash
     trusted_actors: []
-    max_concurrent_issues: 1
+    max_concurrent_issues: 3
     retry_budget: 2
     backoff_initial_seconds: 60
     backoff_max_seconds: 3600
@@ -56,6 +60,19 @@ repos:
     learning_enabled: true
     enable_review: true
     test_gate_mode: local_then_docker
+    # local gate policy:
+    # - auto  -> skip local gate when toolchain is unavailable
+    # - force -> fail if local toolchain is unavailable
+    # - skip  -> always skip local gate
+    local_gate_policy: auto
+    # Language/runtime strategy:
+    # Supported: python | node | go | rust | java_maven | java_gradle | ruby
+    # Leave blank to auto-detect from repo marker files.
+    language: ""
+    # Optional overrides for the resolved language strategy.
+    docker_image: ""
+    test_command: ""
+    install_command: ""
     max_diff_files: 8
     max_diff_lines: 400
     max_failed_tests_allowed: 0
