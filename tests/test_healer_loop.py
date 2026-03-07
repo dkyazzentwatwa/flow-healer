@@ -744,6 +744,73 @@ def test_circuit_breaker_closes_after_cooldown(tmp_path):
     assert status.cooldown_remaining_seconds == 0
 
 
+def test_tick_once_allows_pr_approved_queue_while_breaker_open(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="1004",
+        repo="owner/repo",
+        title="Issue 1004",
+        body="",
+        author="alice",
+        labels=["healer:ready", "healer:pr-approved"],
+        priority=5,
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = []
+    loop._reconcile_pr_outcomes = MagicMock()
+    loop._resume_approved_pending_prs = MagicMock(return_value=0)
+    loop._ingest_pr_feedback = MagicMock()
+    loop._circuit_breaker_status = MagicMock(
+        return_value=SimpleNamespace(
+            open=True,
+            failures=4,
+            attempts_considered=5,
+            threshold=0.5,
+            cooldown_remaining_seconds=120,
+        )
+    )
+    loop.dispatcher.claim_next_issue.return_value = None
+
+    loop._tick_once()
+
+    loop.dispatcher.claim_next_issue.assert_called_once()
+
+
+def test_tick_once_skips_non_approved_queue_while_breaker_open(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="1005",
+        repo="owner/repo",
+        title="Issue 1005",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = []
+    loop._reconcile_pr_outcomes = MagicMock()
+    loop._resume_approved_pending_prs = MagicMock(return_value=0)
+    loop._ingest_pr_feedback = MagicMock()
+    loop._circuit_breaker_status = MagicMock(
+        return_value=SimpleNamespace(
+            open=True,
+            failures=4,
+            attempts_considered=5,
+            threshold=0.5,
+            cooldown_remaining_seconds=120,
+        )
+    )
+
+    loop._tick_once()
+
+    loop.dispatcher.claim_next_issue.assert_not_called()
+
+
 def test_cleanup_workspace_clears_failed_run_paths(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

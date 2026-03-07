@@ -145,7 +145,8 @@ class AutonomousHealerLoop:
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
         breaker = self._circuit_breaker_status()
-        if breaker.open and resumed_approved == 0:
+        approved_queue_ready = self._has_breaker_exempt_ready_issue()
+        if breaker.open and resumed_approved == 0 and not approved_queue_ready:
             logger.warning(
                 "Healer circuit breaker open; skipping this cycle. "
                 "(failures=%d/%d threshold=%.2f cooldown_remaining=%ss)",
@@ -407,6 +408,20 @@ class AutonomousHealerLoop:
             )
             resumed += 1
         return resumed
+
+    def _has_breaker_exempt_ready_issue(self) -> bool:
+        approval_label = self.settings.healer_pr_required_label.strip()
+        if not approval_label:
+            return False
+        queued = self.store.list_healer_issues(
+            states=["queued"],
+            limit=max(10, self.settings.healer_max_concurrent_issues * 5),
+        )
+        for row in queued:
+            labels = {str(label).strip() for label in (row.get("labels") or []) if str(label).strip()}
+            if approval_label in labels:
+                return True
+        return False
 
     def _process_claimed_issue(self, row: dict[str, object]) -> None:
         issue = HealerIssue(
