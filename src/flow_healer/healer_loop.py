@@ -347,6 +347,7 @@ class AutonomousHealerLoop:
             limit=max(10, self.settings.healer_max_concurrent_issues * 5),
         )
         for issue in issues:
+            issue_labels = self._normalize_label_set(issue.labels)
             existing_issue = self.store.get_healer_issue(issue.issue_id)
             self.store.upsert_healer_issue(
                 issue_id=issue.issue_id,
@@ -371,6 +372,19 @@ class AutonomousHealerLoop:
                         last_failure_reason="",
                         clear_lease=True,
                     )
+                elif (
+                    existing_state == "pr_pending_approval"
+                    and self.settings.healer_pr_actions_require_approval
+                    and self.settings.healer_pr_required_label in issue_labels
+                ):
+                    self.store.set_healer_issue_state(
+                        issue_id=issue.issue_id,
+                        state="queued",
+                        pr_state="",
+                        last_failure_class="",
+                        last_failure_reason="",
+                        clear_lease=True,
+                    )
             if existing_issue is None:
                 try:
                     self.tracker.add_issue_reaction(issue_id=issue.issue_id, reaction="eyes")
@@ -384,28 +398,33 @@ class AutonomousHealerLoop:
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
                 continue
-            if not self.tracker.issue_has_label(
-                issue_id=issue_id,
-                label=self.settings.healer_pr_required_label,
+            cached_labels = self._normalize_label_set(row.get("labels"))
+            if self.settings.healer_pr_required_label and (
+                self.settings.healer_pr_required_label in cached_labels
+                or self.tracker.issue_has_label(
+                    issue_id=issue_id,
+                    label=self.settings.healer_pr_required_label,
+                )
             ):
+                self.store.set_healer_issue_state(
+                    issue_id=issue_id,
+                    state="queued",
+                    clear_lease=True,
+                )
+                self._post_issue_status(
+                    issue_id=issue_id,
+                    body=self._format_flow_status_comment(
+                        "Approval's in, we're back on the move 🌊",
+                        "Picking this up again now that the PR label is on the issue.",
+                        [
+                            f"Status: `queued`",
+                            f"Approval label found: `{self.settings.healer_pr_required_label}`",
+                        ],
+                    ),
+                )
+                resumed += 1
+            else:
                 continue
-            self.store.set_healer_issue_state(
-                issue_id=issue_id,
-                state="queued",
-                clear_lease=True,
-            )
-            self._post_issue_status(
-                issue_id=issue_id,
-                body=self._format_flow_status_comment(
-                    "Approval's in, we're back on the move 🌊",
-                    "Picking this up again now that the PR label is on the issue.",
-                    [
-                        f"Status: `queued`",
-                        f"Approval label found: `{self.settings.healer_pr_required_label}`",
-                    ],
-                ),
-            )
-            resumed += 1
         return resumed
 
     def _process_claimed_issue(self, row: dict[str, object]) -> None:
@@ -770,11 +789,7 @@ class AutonomousHealerLoop:
             return True
 
         remote_state = str(snapshot.get("state") or "").strip().lower()
-        remote_labels = {
-            str(label).strip()
-            for label in (snapshot.get("labels") or [])
-            if str(label).strip()
-        }
+        remote_labels = self._normalize_label_set(snapshot.get("labels") or [])
         if remote_state and remote_state != "open":
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -804,6 +819,19 @@ class AutonomousHealerLoop:
             )
             return False
         return True
+
+    @staticmethod
+    def _normalize_label_set(labels: object) -> set[str]:
+        normalized: set[str] = set()
+        if not isinstance(labels, list):
+            return normalized
+        for label in labels:
+            if isinstance(label, dict):
+                label = label.get("name")
+            value = str(label or "").strip()
+            if value:
+                normalized.add(value)
+        return normalized
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
