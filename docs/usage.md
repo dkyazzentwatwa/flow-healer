@@ -73,9 +73,44 @@ repos:
     install_command: ""
 ~~~
 
-- `language`: pin strategy (`python`, `node`, `go`, `rust`, `java_maven`, `java_gradle`, `ruby`) or leave empty for auto-detect.
+- `language`: pin strategy (`python`, `node`, `swift`) or leave empty for auto-detect.
 - `local_gate_policy`: `auto`, `force`, or `skip`.
 - `docker_image`, `test_command`, `install_command`: optional strategy overrides.
+
+### test_gate_mode Options
+
+| Mode | Behavior |
+| --- | --- |
+| `local_only` | Run tests using local toolchain only |
+| `local_then_docker` | Try local first, fall back to Docker (default) |
+| `docker_only` | Skip local, use Docker exclusively |
+
+### docker_only Example
+
+When local Node toolchains are unavailable, use `docker_only`:
+
+~~~yaml
+repos:
+  - name: node-project
+    test_gate_mode: docker_only
+    local_gate_policy: skip
+    language: node
+    # Docker image and test command are auto-selected based on language
+~~~
+
+### Custom Docker Image
+
+Override the default Docker image for any language:
+
+~~~yaml
+repos:
+  - name: custom-project
+    test_gate_mode: docker_only
+    language: python
+    docker_image: python:3.12-slim
+    test_command: pytest -v
+    install_command: python -m pip install -q pytest
+~~~
 
 ## Failure Recovery
 

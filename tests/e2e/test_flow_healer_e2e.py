@@ -162,26 +162,31 @@ def _build_mixed_sandbox_repo(tmp_path: Path) -> Path:
     )
 
     _write(
-        repo_path / "e2e-smoke" / "java-gradle" / "build.gradle",
-        "plugins { id 'java' }\nrepositories { mavenCentral() }\n",
-    )
-    _write(repo_path / "e2e-smoke" / "java-gradle" / "gradlew", "#!/bin/sh\nexit 0\n")
-    _write(
-        repo_path / "e2e-smoke" / "java-gradle" / "src" / "main" / "java" / "example" / "App.java",
-        "package example;\npublic class App { public static int add(int a, int b) { return a - b; } }\n",
-    )
-
-    _write(
-        repo_path / "e2e-smoke" / "ruby" / "Gemfile",
-        "source 'https://rubygems.org'\ngem 'rspec'\n",
-    )
-    _write(
-        repo_path / "e2e-smoke" / "ruby" / "add.rb",
-        "def add(a, b)\n  a - b\nend\n",
+        repo_path / "e2e-smoke" / "swift" / "Package.swift",
+        "// swift-tools-version: 6.0\n"
+        "import PackageDescription\n\n"
+        "let package = Package(\n"
+        '    name: "FlowHealerAdd",\n'
+        "    products: [\n"
+        '        .library(name: "FlowHealerAdd", targets: ["FlowHealerAdd"]),\n'
+        "    ],\n"
+        "    targets: [\n"
+        '        .target(name: "FlowHealerAdd"),\n'
+        '        .testTarget(name: "FlowHealerAddTests", dependencies: ["FlowHealerAdd"]),\n'
+        "    ]\n"
+        ")\n",
     )
     _write(
-        repo_path / "e2e-smoke" / "ruby" / "spec" / "add_spec.rb",
-        "RSpec.describe '#add' do\nend\n",
+        repo_path / "e2e-smoke" / "swift" / "Sources" / "FlowHealerAdd" / "Add.swift",
+        "public func add(_ a: Int, _ b: Int) -> Int {\n    a - b\n}\n",
+    )
+    _write(
+        repo_path / "e2e-smoke" / "swift" / "Tests" / "FlowHealerAddTests" / "AddTests.swift",
+        "import Testing\n"
+        "@testable import FlowHealerAdd\n\n"
+        "@Test func addAddsNumbers() {\n"
+        "    #expect(add(2, 3) == 5)\n"
+        "}\n",
     )
 
     _git(["add", "."], cwd=repo_path)
@@ -701,31 +706,18 @@ def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> 
             ["npm", "test", "--", "--passWithNoTests"],
         ),
         (
-            "Java Gradle sandbox regression",
+            "Swift sandbox regression",
             "Required code outputs:\n"
-            "- e2e-smoke/java-gradle/src/main/java/example/App.java\n\n"
+            "- e2e-smoke/swift/Sources/FlowHealerAdd/Add.swift\n"
+            "- e2e-smoke/swift/Tests/FlowHealerAddTests/AddTests.swift\n\n"
             "Validation:\n"
-            "- cd e2e-smoke/java-gradle && ./gradlew test --no-daemon\n",
-            "e2e-smoke/java-gradle/src/main/java/example/App.java",
-            "package example;\npublic class App { public static int add(int a, int b) { return a - b; } }\n",
-            "package example;\npublic class App { public static int add(int a, int b) { return a + b; } }\n",
-            "java_gradle",
-            "e2e-smoke/java-gradle",
-            ["./gradlew", "test", "--no-daemon"],
-        ),
-        (
-            "Ruby sandbox regression",
-            "Required code outputs:\n"
-            "- e2e-smoke/ruby/add.rb\n"
-            "- e2e-smoke/ruby/spec/add_spec.rb\n\n"
-            "Validation:\n"
-            "- cd e2e-smoke/ruby && bundle exec rspec\n",
-            "e2e-smoke/ruby/add.rb",
-            "def add(a, b)\n  a - b\nend\n",
-            "def add(a, b)\n  a + b\nend\n",
-            "ruby",
-            "e2e-smoke/ruby",
-            ["bundle", "_2.5.23_", "exec", "rspec"],
+            "- cd e2e-smoke/swift && swift test\n",
+            "e2e-smoke/swift/Sources/FlowHealerAdd/Add.swift",
+            "public func add(_ a: Int, _ b: Int) -> Int {\n    a - b\n}\n",
+            "public func add(_ a: Int, _ b: Int) -> Int {\n    a + b\n}\n",
+            "swift",
+            "e2e-smoke/swift",
+            ["swift", "test"],
         ),
     ],
 )

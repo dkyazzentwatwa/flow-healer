@@ -20,32 +20,10 @@ def test_all_supported_language_sandboxes_exist() -> None:
             "src/add.js",
             "test/add.test.js",
         ],
-        "go": [
-            "go.mod",
-            "add/add.go",
-            "add/add_test.go",
-        ],
-        "rust": [
-            "Cargo.toml",
-            "src/lib.rs",
-            "tests/add.rs",
-        ],
-        "java-maven": [
-            "pom.xml",
-            "src/main/java/com/flowhealer/Add.java",
-            "src/test/java/com/flowhealer/AddTest.java",
-        ],
-        "java-gradle": [
-            "build.gradle",
-            "settings.gradle",
-            "gradlew",
-            "src/main/java/com/flowhealer/Add.java",
-            "src/test/java/com/flowhealer/AddTest.java",
-        ],
-        "ruby": [
-            "Gemfile",
-            "add.rb",
-            "spec/add_spec.rb",
+        "swift": [
+            "Package.swift",
+            "Sources/FlowHealerAdd/Add.swift",
+            "Tests/FlowHealerAddTests/AddTests.swift",
         ],
     }
 
@@ -60,11 +38,7 @@ def test_sandbox_layout_matches_supported_language_strategies() -> None:
     expected = {
         "python": "python",
         "node": "node",
-        "go": "go",
-        "rust": "rust",
-        "java-maven": "java_maven",
-        "java-gradle": "java_gradle",
-        "ruby": "ruby",
+        "swift": "swift",
     }
 
     for sandbox, strategy_name in expected.items():
@@ -72,6 +46,3 @@ def test_sandbox_layout_matches_supported_language_strategies() -> None:
         strategy = get_strategy(strategy_name)
         assert base.exists()
         assert strategy.local_test_cmd, f"{strategy_name} should have a local test command"
-
-    assert get_strategy("java_gradle").local_test_cmd[0] == "./gradlew"
-    assert (E2E_SMOKE / "java-gradle" / "gradlew").exists()

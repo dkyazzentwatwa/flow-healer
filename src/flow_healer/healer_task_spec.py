@@ -43,7 +43,7 @@ _DIRECTORY_RE = re.compile(
 )
 _COMMAND_LINE_RE = re.compile(
     r"(?:^|\b)(?:cd\s+[^\n&|;]+&&\s*)?"
-    r"(?:npm\s+test|pytest\b|python\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|mvn\s+test\b|\./gradlew\s+test\b)"
+    r"(?:npm\s+test|pytest\b|python\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b)"
     r"[^\n]*",
     re.IGNORECASE,
 )
@@ -55,6 +55,7 @@ _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bbundle\s+exec\s+rspec\b|\brspec\b", re.IGNORECASE), "ruby"),
     (re.compile(r"\bcargo\s+test\b", re.IGNORECASE), "rust"),
     (re.compile(r"\bgo\s+test\b", re.IGNORECASE), "go"),
+    (re.compile(r"\bswift\s+test\b", re.IGNORECASE), "swift"),
     (re.compile(r"\bmvn\s+test\b", re.IGNORECASE), "java_maven"),
     (re.compile(r"\./gradlew\s+test\b", re.IGNORECASE), "java_gradle"),
 )
@@ -64,6 +65,7 @@ _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-smoke/python", "python"),
     ("e2e-smoke/go", "go"),
     ("e2e-smoke/rust", "rust"),
+    ("e2e-smoke/swift", "swift"),
     ("e2e-smoke/ruby", "ruby"),
     ("e2e-smoke/java-gradle", "java_gradle"),
     ("e2e-smoke/java-maven", "java_maven"),
@@ -356,12 +358,16 @@ def _infer_issue_language(
         if hinted:
             return hinted
         suffix = Path(target).suffix.lower()
+        if suffix == ".py":
+            return "python"
         if suffix == ".rb":
             return "ruby"
         if suffix == ".go":
             return "go"
         if suffix == ".rs":
             return "rust"
+        if suffix == ".swift":
+            return "swift"
         if suffix == ".java":
             if "gradle" in issue_text.lower():
                 return "java_gradle"

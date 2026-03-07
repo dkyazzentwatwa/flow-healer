@@ -13,13 +13,14 @@ class LanguageDetection:
 
 # Ordered by specificity: first match is the default when markers are mixed.
 _LANGUAGE_MARKERS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("package.json",), "node"),
+    (("Package.swift",), "swift"),
+    (("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"), "python"),
     (("go.mod",), "go"),
     (("Cargo.toml",), "rust"),
     (("pom.xml",), "java_maven"),
     (("build.gradle", "build.gradle.kts"), "java_gradle"),
     (("Gemfile",), "ruby"),
-    (("package.json",), "node"),
-    (("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"), "python"),
 )
 
 

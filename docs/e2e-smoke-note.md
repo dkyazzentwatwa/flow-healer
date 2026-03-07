@@ -5,10 +5,6 @@
 Current sandboxes:
 - `python`
 - `node`
-- `go`
-- `rust`
-- `java-maven`
-- `java-gradle`
-- `ruby`
+- `swift`
 
 Each sandbox is intentionally minimal and is meant to match the default test command shape for its language strategy.

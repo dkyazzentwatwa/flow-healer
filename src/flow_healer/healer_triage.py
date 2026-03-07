@@ -41,6 +41,7 @@ _CONNECTOR_FAILURE_CLASSES = {
     "no_code_diff",
     "no_workspace_change",
     "patch_apply_failed",
+    "generated_artifact_contamination",
     "verifier_failed",
 }
 _FIXTURE_FAILURE_MARKERS = (

@@ -1,7 +1,12 @@
-flow-healer start --once
-~~~
+# Operations
+
+## Workspace Reconciliation
 
 The reconciler runs at the start of every tick and sweeps any workspace directory not associated with an active issue in the `healer_issues` table.
+
+~~~bash
+flow-healer start --once
+~~~
 
 ## Failure Recovery
 
@@ -22,42 +27,62 @@ flow-healer start --once --repo demo
 ## Common Issues
 
 ### "Docker not available"
-diff --git a/docs/usage.md b/docs/usage.md
-index 9ab9f4c..3ea9db1 100644
-The scanner identifies deterministic breakage patterns (e.g., failed CI, linting errors). If `scan_enable_issue_creation` is set to `true`, it will create deduplicated GitHub issues for these findings, labeled with `kind:scan` and `healer:ready` to trigger the healing loop automatically.
 
-> **Note**: Labels can be customized per-repo in the configuration to match your project's workflow. Standardizing labels across repos is recommended for consistent multi-repo orchestration.
+**Symptom**: Test gate fails with "Docker not available" or "exec: docker: not found"
 
-## Failure Recovery
+**Solution**: Ensure Docker is running and accessible. For repos without local toolchains, configure Docker-only mode:
 
-If a healing attempt finishes with `no_patch` or `verifier_failed`, stop and recover in this sequence:
+```yaml
+repos:
+  - name: my-project
+    test_gate_mode: docker_only
+    local_gate_policy: skip
+```
 
-1. Verify the issue is still visible and has context for retry.
-2. Confirm temporary blockers are fixed (for example: dependency version drift, transient test flakiness, or missing credentials).
-3. Trigger one controlled pass so the operator can review retry behavior before allowing normal cadence.
+### Local toolchain missing
+
+**Symptom**: Tests fail because local Go/Rust/Java is not installed
+
+**Solution**: Use `docker_only` mode to skip local testing entirely:
+
+```yaml
+repos:
+  - name: node-project
+    test_gate_mode: docker_only
+    local_gate_policy: skip
+    language: node
+```
+
+### Docker image pull failure
+
+**Symptom**: "Unable to find image" or network timeout during Docker operations
+
+**Solution**:
+1. Check Docker is running: `docker ps`
+2. Pull the image manually: `docker pull node:20-slim`
+3. Verify network connectivity to Docker Hub
+
+### Test command timeout
+
+**Symptom**: Tests hang or timeout during Docker execution
+
+**Solution**: Increase `connector_timeout_seconds` in config:
+
+```yaml
+service:
+  connector_timeout_seconds: 600
+```
+
+## Monitoring
+
+Check healer status:
 
 ~~~bash
-flow-healer start --repo my-project --once
+flow-healer status --repo demo
 ~~~
-diff --git a/docs/README.md b/docs/README.md
-index 6e7d9a1..f4e0d2b 100644
-## Doc Map
 
-- [installation.md](installation.md): local environment setup and config
-- [usage.md](usage.md): CLI flows and examples
-- [usage.md - Failure Recovery](usage.md#failure-recovery): handling `no_patch` and `verifier_failed` retries
-- [architecture.md](architecture.md): control loop and module map
-- [operations.md](operations.md): common maintenance tasks and troubleshooting
-- [operations.md - Failure Recovery](operations.md#failure-recovery): incident response for failed healing attempts
-- [contributing.md](contributing.md): development and review expectations
-
-## Failure Recovery
-
-For production runs, use the dedicated recovery sections when a healing attempt ends with `no_patch` or `verifier_failed`:
-
-- [Usage Failure Recovery](usage.md#failure-recovery)
-- [Operations Failure Recovery](operations.md#failure-recovery)
+Review recent attempts:
 
 ~~~bash
-flow-healer start --repo demo --once
+sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT issue_id, status, failure_reason, started_at FROM healer_attempts ORDER BY started_at DESC LIMIT 20;"
 ~~~

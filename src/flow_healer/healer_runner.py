@@ -13,7 +13,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .language_detector import detect_language_details
-from .language_strategies import LanguageStrategy, get_strategy
+from .language_strategies import (
+    LanguageStrategy,
+    UnsupportedLanguageError,
+    ensure_supported_language,
+    get_strategy,
+    is_removed_language,
+)
 from .protocols import ConnectorProtocol
 from .healer_task_spec import HealerTaskSpec, task_spec_to_prompt_block
 
@@ -23,6 +29,7 @@ _FENCE_PATH_RE = re.compile(r"(?:^|\s)path=(?P<path>[^\s`]+)")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 _NON_RETRYABLE_FAILURES = {"connector_unavailable", "connector_runtime_error"}
 _INPUT_CONTEXT_MAX_CHARS = 12_000
+_DOCKER_UNSUPPORTED_REASON = "docker_unsupported_for_language"
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,11 +37,13 @@ class HealerRunResult:
     success: bool
     failure_class: str
     failure_reason: str
+    failure_fingerprint: str
     proposer_output: str
     diff_paths: list[str]
     diff_files: int
     diff_lines: int
     test_summary: dict[str, Any]
+    workspace_status: dict[str, Any]
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,6 +62,12 @@ class FilteredStageResult:
     excluded_paths: list[str]
 
 
+@dataclass(slots=True, frozen=True)
+class WorkspaceStatusEntry:
+    status: str
+    path: str
+
+
 class HealerRunner:
     def __init__(
         self,
@@ -65,6 +80,7 @@ class HealerRunner:
         docker_image: str = "",
         test_command: str = "",
         install_command: str = "",
+        auto_clean_generated_artifacts: bool = True,
     ) -> None:
         self.connector = connector
         self.timeout_seconds = max(30, int(timeout_seconds))
@@ -74,10 +90,12 @@ class HealerRunner:
         self._docker_image = docker_image.strip()
         self._test_command = test_command.strip()
         self._install_command = install_command.strip()
+        self.auto_clean_generated_artifacts = bool(auto_clean_generated_artifacts)
         self.max_proposer_retries = 1
         self.max_code_proposer_retries = 3
         self.max_artifact_proposer_retries = 2
         self.code_change_turn_timeout_seconds = max(900, self.timeout_seconds)
+        self.max_generated_artifact_cleanup_cycles = 1
 
     def run_attempt(
         self,
@@ -96,6 +114,8 @@ class HealerRunner:
     ) -> HealerRunResult:
         self._bind_connector_workspace(workspace)
         resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
+        workspace_status = _empty_workspace_status(execution_root=resolved_execution.execution_root)
+        cleanup_cycles_used = 0
         sender = f"healer:{issue_id}"
         thread_id = self.connector.get_or_create_thread(sender)
         language_hint = ""
@@ -154,11 +174,13 @@ class HealerRunner:
                             success=False,
                             failure_class=failure_class,
                             failure_reason=failure_reason,
+                            failure_fingerprint="",
                             proposer_output=proposer_output,
                             diff_paths=[],
                             diff_files=0,
                             diff_lines=0,
                             test_summary={},
+                            workspace_status=workspace_status,
                         )
                     thread_id = self.connector.reset_thread(sender)
                     prompt = _build_retry_prompt(
@@ -239,11 +261,13 @@ class HealerRunner:
                     success=False,
                     failure_class=failure_class,
                     failure_reason=failure_reason,
+                    failure_fingerprint="",
                     proposer_output=proposer_output,
                     diff_paths=[],
                     diff_files=0,
                     diff_lines=0,
                     test_summary={},
+                    workspace_status=workspace_status,
                 )
 
             if proposer_attempt >= max_retries:
@@ -251,15 +275,52 @@ class HealerRunner:
                     success=False,
                     failure_class=failure_class,
                     failure_reason=failure_reason,
+                    failure_fingerprint="",
                     proposer_output=proposer_output,
                     diff_paths=[],
                     diff_files=0,
                     diff_lines=0,
                     test_summary={},
+                    workspace_status=workspace_status,
                 )
 
             thread_id = self.connector.reset_thread(sender)
             prompt = _build_retry_prompt(base_prompt=prompt, failure_class=failure_class, failure_reason=failure_reason)
+
+        workspace_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
+            workspace,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=resolved_execution.language_effective,
+            execution_root=resolved_execution.execution_root,
+            allow_cleanup=self.auto_clean_generated_artifacts and cleanup_cycles_used < self.max_generated_artifact_cleanup_cycles,
+        )
+        if cleaned_paths:
+            cleanup_cycles_used += 1
+        workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
+        if contamination_reason:
+            fingerprint = _generated_artifact_failure_fingerprint(
+                workspace_status.get("contamination_paths") or workspace_status.get("cleaned_paths") or [],
+                execution_root=resolved_execution.execution_root,
+            )
+            test_summary = _with_workspace_status(
+                {},
+                workspace_status=workspace_status,
+                failure_fingerprint=fingerprint,
+            )
+            return HealerRunResult(
+                success=False,
+                failure_class="generated_artifact_contamination",
+                failure_reason=contamination_reason,
+                failure_fingerprint=fingerprint,
+                proposer_output=proposer_output,
+                diff_paths=[],
+                diff_files=0,
+                diff_lines=0,
+                test_summary=test_summary,
+                workspace_status=workspace_status,
+            )
 
         diff_paths = _changed_paths(workspace)
         diff_files, diff_lines = _diff_stats(workspace)
@@ -268,33 +329,39 @@ class HealerRunner:
                 success=False,
                 failure_class="no_workspace_change",
                 failure_reason="Proposer finished without producing any staged file changes.",
+                failure_fingerprint="",
                 proposer_output=proposer_output,
                 diff_paths=[],
                 diff_files=0,
                 diff_lines=0,
                 test_summary={},
+                workspace_status=workspace_status,
             )
         if _requires_non_artifact_diff(task_spec=task_spec) and not _has_non_artifact_diff(diff_paths):
             return HealerRunResult(
                 success=False,
                 failure_class="no_code_diff",
                 failure_reason="Code-change task produced only docs/artifact edits.",
+                failure_fingerprint="",
                 proposer_output=proposer_output,
                 diff_paths=diff_paths,
                 diff_files=diff_files,
                 diff_lines=diff_lines,
                 test_summary={},
+                workspace_status=workspace_status,
             )
         if diff_files > max_diff_files or diff_lines > max_diff_lines:
             return HealerRunResult(
                 success=False,
                 failure_class="diff_limit_exceeded",
                 failure_reason=f"Diff too large: files={diff_files}/{max_diff_files}, lines={diff_lines}/{max_diff_lines}",
+                failure_fingerprint="",
                 proposer_output=proposer_output,
                 diff_paths=diff_paths,
                 diff_files=diff_files,
                 diff_lines=diff_lines,
                 test_summary={},
+                workspace_status=workspace_status,
             )
 
         if task_spec.validation_profile == "artifact_only":
@@ -304,11 +371,13 @@ class HealerRunner:
                     success=False,
                     failure_class="artifact_validation_failed",
                     failure_reason=str(artifact_summary.get("summary") or "Artifact validation failed."),
+                    failure_fingerprint="",
                     proposer_output=proposer_output,
                     diff_paths=diff_paths,
                     diff_files=diff_files,
                     diff_lines=diff_lines,
                     test_summary=artifact_summary,
+                    workspace_status=workspace_status,
                 )
             test_summary = {
                 "mode": "skipped_artifact_only",
@@ -329,28 +398,187 @@ class HealerRunner:
                 task_spec=task_spec,
                 targeted_tests=targeted_tests,
             )
+        test_summary = _with_workspace_status(
+            test_summary,
+            workspace_status=workspace_status,
+            failure_fingerprint="",
+        )
+        post_validation_status = _workspace_status_summary(
+            workspace,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=resolved_execution.language_effective,
+            execution_root=resolved_execution.execution_root,
+        )
+        if post_validation_status["contamination_paths"]:
+            workspace_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=resolved_execution.language_effective,
+                execution_root=resolved_execution.execution_root,
+                allow_cleanup=self.auto_clean_generated_artifacts and cleanup_cycles_used < self.max_generated_artifact_cleanup_cycles,
+            )
+            if cleaned_paths:
+                cleanup_cycles_used += 1
+            workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
+            if contamination_reason:
+                fingerprint = _generated_artifact_failure_fingerprint(
+                    workspace_status.get("contamination_paths") or workspace_status.get("cleaned_paths") or [],
+                    execution_root=resolved_execution.execution_root,
+                )
+                test_summary = _with_workspace_status(
+                    test_summary,
+                    workspace_status=workspace_status,
+                    failure_fingerprint=fingerprint,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="generated_artifact_contamination",
+                    failure_reason=contamination_reason,
+                    failure_fingerprint=fingerprint,
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=test_summary,
+                    workspace_status=workspace_status,
+                )
+            diff_paths = _changed_paths(workspace)
+            diff_files, diff_lines = _diff_stats(workspace)
+            if not diff_paths:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="no_workspace_change",
+                    failure_reason="Proposer finished without producing any staged file changes.",
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        {},
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            if task_spec.validation_profile == "artifact_only":
+                artifact_summary = _validate_artifact_outputs(workspace=workspace, diff_paths=diff_paths)
+                artifact_summary["workspace_hygiene_rerun"] = True
+                test_summary = {
+                    "mode": "skipped_artifact_only",
+                    "failed_tests": 0,
+                    "targeted_tests": targeted_tests,
+                    "skipped": True,
+                    "language_detected": resolved_execution.language_detected,
+                    "language_effective": resolved_execution.language_effective,
+                    "docker_image_effective": resolved_execution.strategy.docker_image,
+                    "execution_root": resolved_execution.execution_root,
+                    "execution_root_source": resolved_execution.execution_root_source,
+                    "local_gate_policy": self.local_gate_policy,
+                    "artifact_validation": artifact_summary,
+                    "workspace_hygiene_rerun": True,
+                }
+                if not artifact_summary["passed"]:
+                    return HealerRunResult(
+                        success=False,
+                        failure_class="artifact_validation_failed",
+                        failure_reason=str(artifact_summary.get("summary") or "Artifact validation failed."),
+                        failure_fingerprint="",
+                        proposer_output=proposer_output,
+                        diff_paths=diff_paths,
+                        diff_files=diff_files,
+                        diff_lines=diff_lines,
+                        test_summary=_with_workspace_status(
+                            test_summary,
+                            workspace_status=workspace_status,
+                            failure_fingerprint="",
+                        ),
+                        workspace_status=workspace_status,
+                    )
+            else:
+                test_summary = self.validate_workspace(
+                    workspace,
+                    task_spec=task_spec,
+                    targeted_tests=targeted_tests,
+                )
+                test_summary["workspace_hygiene_rerun"] = True
+            final_workspace_status = _workspace_status_summary(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=resolved_execution.language_effective,
+                execution_root=resolved_execution.execution_root,
+            )
+            if final_workspace_status["contamination_paths"]:
+                final_workspace_status["contamination_paths"] = [
+                    path
+                    for path in final_workspace_status["contamination_paths"]
+                    if not _is_tolerated_runtime_artifact(path, language=resolved_execution.language_effective)
+                ]
+            if final_workspace_status["contamination_paths"]:
+                final_workspace_status["cleanup_performed"] = True
+                final_workspace_status["cleaned_paths"] = list(workspace_status.get("cleaned_paths") or [])
+                final_workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
+                fingerprint = _generated_artifact_failure_fingerprint(
+                    final_workspace_status["contamination_paths"],
+                    execution_root=resolved_execution.execution_root,
+                )
+                test_summary = _with_workspace_status(
+                    test_summary,
+                    workspace_status=final_workspace_status,
+                    failure_fingerprint=fingerprint,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="generated_artifact_contamination",
+                    failure_reason=_generated_artifact_contamination_reason(
+                        list(final_workspace_status["contamination_paths"]),
+                        execution_root=resolved_execution.execution_root,
+                    ),
+                    failure_fingerprint=fingerprint,
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=test_summary,
+                    workspace_status=final_workspace_status,
+                )
+            test_summary = _with_workspace_status(
+                test_summary,
+                workspace_status=workspace_status,
+                failure_fingerprint="",
+            )
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
             return HealerRunResult(
                 success=False,
                 failure_class="tests_failed",
                 failure_reason=f"Failed tests={failed_tests} exceeds cap={max_failed_tests_allowed}",
+                failure_fingerprint="",
                 proposer_output=proposer_output,
                 diff_paths=diff_paths,
                 diff_files=diff_files,
                 diff_lines=diff_lines,
                 test_summary=test_summary,
+                workspace_status=workspace_status,
             )
 
         return HealerRunResult(
             success=True,
             failure_class="",
             failure_reason="",
+            failure_fingerprint="",
             proposer_output=proposer_output,
             diff_paths=diff_paths,
             diff_files=diff_files,
             diff_lines=diff_lines,
             test_summary=test_summary,
+            workspace_status=workspace_status,
         )
 
     def resolve_execution(self, *, workspace: Path, task_spec: HealerTaskSpec) -> ResolvedExecution:
@@ -364,12 +592,20 @@ class HealerRunner:
         repo_detection = detect_language_details(workspace)
         issue_language = task_spec.language if task_spec.language else ""
         config_override_allowed = not issue_language
+        ensure_supported_language(issue_language, source="issue instructions")
+        if config_override_allowed:
+            ensure_supported_language(self._language, source="repo config")
         effective_language = (
             issue_language
             or (self._language if config_override_allowed else "")
             or execution_detection.language
             or repo_detection.language
         )
+        if is_removed_language(effective_language):
+            raise UnsupportedLanguageError(
+                f"Unsupported language '{effective_language}'. "
+                "Flow Healer supports only python, node, and swift."
+            )
         if effective_language == "unknown":
             effective_language = ""
         strategy = get_strategy(
@@ -530,14 +766,17 @@ def _run_test_gates(
     if targeted_tests:
         targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
         for runner_name, runner in runners:
-            targeted = _invoke_gate_runner(
-                runner,
-                execution_path,
-                targeted_cmd,
-                timeout_seconds,
-                strategy=strategy,
-                local_gate_policy=local_gate_policy,
-            )
+            if runner_name == "docker" and not strategy.supports_docker:
+                targeted = _unsupported_docker_gate_result(mode=mode)
+            else:
+                targeted = _invoke_gate_runner(
+                    runner,
+                    execution_path,
+                    targeted_cmd,
+                    timeout_seconds,
+                    strategy=strategy,
+                    local_gate_policy=local_gate_policy,
+                )
             targeted_status = str(
                 targeted.get("gate_status") or ("passed" if int(targeted.get("exit_code", 1)) == 0 else "failed")
             )
@@ -555,14 +794,17 @@ def _run_test_gates(
 
     full_cmd = list(strategy.docker_test_cmd)
     for runner_name, runner in runners:
-        full = _invoke_gate_runner(
-            runner,
-            execution_path,
-            full_cmd,
-            timeout_seconds,
-            strategy=strategy,
-            local_gate_policy=local_gate_policy,
-        )
+        if runner_name == "docker" and not strategy.supports_docker:
+            full = _unsupported_docker_gate_result(mode=mode)
+        else:
+            full = _invoke_gate_runner(
+                runner,
+                execution_path,
+                full_cmd,
+                timeout_seconds,
+                strategy=strategy,
+                local_gate_policy=local_gate_policy,
+            )
         full_status = str(full.get("gate_status") or ("passed" if int(full.get("exit_code", 1)) == 0 else "failed"))
         if mode == "local_only" and runner_name == "local" and full_status == "skipped":
             full_status = "failed"
@@ -583,6 +825,15 @@ def _compose_targeted_command(strategy: LanguageStrategy, targeted_tests: list[s
     if not targeted_tests or not strategy.supports_targeted_paths:
         return base
     return [*base, *targeted_tests]
+
+
+def _unsupported_docker_gate_result(*, mode: str) -> dict[str, Any]:
+    return {
+        "exit_code": 1 if mode == "docker_only" else 0,
+        "output_tail": "(docker gate unsupported for this language)",
+        "gate_status": "failed" if mode == "docker_only" else "skipped",
+        "gate_reason": _DOCKER_UNSUPPORTED_REASON,
+    }
 
 
 def _invoke_gate_runner(
@@ -735,6 +986,8 @@ def _run_tests_in_docker(
     local_gate_policy: str,
 ) -> dict[str, Any]:
     del local_gate_policy
+    if not strategy.supports_docker:
+        return _unsupported_docker_gate_result(mode="docker_only")
     bash_script = _build_docker_test_script(command, strategy)
     docker_cmd = [
         "docker",
@@ -1126,17 +1379,11 @@ _GENERIC_ARTIFACT_SUFFIXES = {
 _LANGUAGE_ARTIFACT_DIRS = {
     "python": {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "env", "dist", "build", "pip-wheel-metadata"},
     "node": {"node_modules", "dist", "build", "coverage", ".next", ".nuxt"},
-    "ruby": {"vendor", ".bundle"},
-    "rust": {"target"},
-    "java_maven": {"target"},
-    "java_gradle": {"build", ".gradle"},
 }
 _LOCKFILE_GROUPS = {
-    "gemfile.lock": {"gemfile", "dependency", "dependencies", "lockfile"},
     "package-lock.json": {"package.json", "dependency", "dependencies", "lockfile"},
     "pnpm-lock.yaml": {"package.json", "dependency", "dependencies", "lockfile"},
     "yarn.lock": {"package.json", "dependency", "dependencies", "lockfile"},
-    "cargo.lock": {"cargo.toml", "crate", "crates", "dependency", "dependencies", "lockfile"},
 }
 
 
@@ -1201,6 +1448,230 @@ def _filter_staged_changes(
         kept_paths=_changed_paths(workspace),
         excluded_paths=excluded_paths,
     )
+
+
+def _workspace_status_entries(workspace: Path) -> list[WorkspaceStatusEntry]:
+    proc = subprocess.run(
+        ["git", "-C", str(workspace), "status", "--short", "--untracked-files=all"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return []
+    entries: list[WorkspaceStatusEntry] = []
+    for raw_line in (proc.stdout or "").splitlines():
+        line = raw_line.rstrip()
+        if len(line) < 4:
+            continue
+        status = line[:2]
+        path = line[3:].strip()
+        if " -> " in path and status[0] in {"R", "C"}:
+            path = path.split(" -> ", 1)[1].strip()
+        if not path:
+            continue
+        entries.append(WorkspaceStatusEntry(status=status, path=path))
+    return entries
+
+
+def _empty_workspace_status(*, execution_root: str) -> dict[str, Any]:
+    return {
+        "execution_root": execution_root,
+        "staged_paths": [],
+        "unstaged_paths": [],
+        "untracked_paths": [],
+        "contamination_paths": [],
+        "cleanup_performed": False,
+        "cleaned_paths": [],
+        "cleanup_cycles_used": 0,
+    }
+
+
+def _workspace_status_summary(
+    workspace: Path,
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec | None,
+    language: str,
+    execution_root: str,
+) -> dict[str, Any]:
+    entries = _workspace_status_entries(workspace)
+    staged_paths: list[str] = []
+    unstaged_paths: list[str] = []
+    untracked_paths: list[str] = []
+    contamination_paths: list[str] = []
+    for entry in entries:
+        status = entry.status
+        path = entry.path
+        if status == "??":
+            untracked_paths.append(path)
+        else:
+            if status[0] not in {" ", "?"}:
+                staged_paths.append(path)
+            if status[1] not in {" ", "?"}:
+                unstaged_paths.append(path)
+        if _should_exclude_generated_artifact(
+            path,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=language,
+        ):
+            contamination_paths.append(path)
+    return {
+        "execution_root": execution_root,
+        "staged_paths": sorted(set(staged_paths)),
+        "unstaged_paths": sorted(set(unstaged_paths)),
+        "untracked_paths": sorted(set(untracked_paths)),
+        "contamination_paths": sorted(set(contamination_paths)),
+        "cleanup_performed": False,
+        "cleaned_paths": [],
+        "cleanup_cycles_used": 0,
+    }
+
+
+def _cleanup_workspace_paths(workspace: Path, paths: list[str]) -> None:
+    for path in paths:
+        full_path = workspace / path
+        try:
+            if full_path.is_symlink() or full_path.is_file():
+                full_path.unlink(missing_ok=True)
+            elif full_path.is_dir():
+                shutil.rmtree(full_path, ignore_errors=True)
+        except Exception:
+            pass
+        subprocess.run(
+            ["git", "-C", str(workspace), "restore", "--staged", "--worktree", "--", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "clean", "-fdx", "--", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+
+def _generated_artifact_contamination_reason(paths: list[str], *, execution_root: str) -> str:
+    label = execution_root or "repo"
+    preview = ", ".join(paths[:5])
+    if len(paths) > 5:
+        preview += ", ..."
+    return (
+        f"Workspace contains generated artifact contamination outside the requested diff in {label}: "
+        f"{preview}. Clean the artifact(s) or keep them out of the worktree."
+    )
+
+
+def _generated_artifact_failure_fingerprint(paths: list[str], *, execution_root: str) -> str:
+    normalized_paths = [str(path).strip().lower() for path in paths if str(path).strip()]
+    normalized_paths = sorted(set(normalized_paths))
+    root = execution_root.strip().lower() or "repo"
+    return f"generated_artifact_contamination|{root}|{'|'.join(normalized_paths)}"
+
+
+def _stabilize_workspace_hygiene(
+    workspace: Path,
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec | None,
+    language: str,
+    execution_root: str,
+    allow_cleanup: bool,
+) -> tuple[dict[str, Any], list[str], str]:
+    summary = _workspace_status_summary(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+        execution_root=execution_root,
+    )
+    contamination_paths = list(summary["contamination_paths"])
+    if not contamination_paths:
+        return summary, [], ""
+    if not allow_cleanup:
+        return summary, [], _generated_artifact_contamination_reason(contamination_paths, execution_root=execution_root)
+    _cleanup_workspace_paths(workspace, contamination_paths)
+    _stage_workspace_changes(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+    )
+    refreshed = _workspace_status_summary(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+        execution_root=execution_root,
+    )
+    refreshed["cleanup_performed"] = True
+    refreshed["cleaned_paths"] = contamination_paths
+    if refreshed["contamination_paths"]:
+        tolerated_paths = [
+            path
+            for path in refreshed["contamination_paths"]
+            if _is_tolerated_runtime_artifact(path, language=language)
+        ]
+        if tolerated_paths:
+            refreshed["contamination_paths"] = [
+                path for path in refreshed["contamination_paths"] if path not in tolerated_paths
+            ]
+    if refreshed["contamination_paths"]:
+        return (
+            refreshed,
+            contamination_paths,
+            _generated_artifact_contamination_reason(list(refreshed["contamination_paths"]), execution_root=execution_root),
+        )
+    return refreshed, contamination_paths, ""
+
+
+def _is_tolerated_runtime_artifact(path: str, *, language: str) -> bool:
+    normalized = str(path or "").strip().lstrip("./")
+    if not normalized:
+        return False
+    normalized_lower = normalized.lower()
+    lockfile_name = PurePosixPath(normalized_lower).name
+    if lockfile_name in _LOCKFILE_GROUPS:
+        return False
+
+    parts = [part.lower() for part in PurePosixPath(normalized).parts]
+    filename = parts[-1] if parts else normalized_lower
+    if filename in _GENERIC_ARTIFACT_FILES:
+        return True
+    if any(part in _GENERIC_ARTIFACT_DIRS for part in parts[:-1]):
+        return True
+    if any(filename.endswith(suffix) for suffix in _GENERIC_ARTIFACT_SUFFIXES):
+        return True
+    if any(part.endswith(".egg-info") for part in parts):
+        return True
+
+    effective_language = str(language or "").strip().lower()
+    language_dirs = _LANGUAGE_ARTIFACT_DIRS.get(effective_language, set())
+    return any(part in language_dirs for part in parts[:-1])
+
+
+def _with_workspace_status(
+    summary: dict[str, Any],
+    *,
+    workspace_status: dict[str, Any],
+    failure_fingerprint: str,
+) -> dict[str, Any]:
+    enriched = dict(summary or {})
+    enriched["workspace_status"] = dict(workspace_status or {})
+    if failure_fingerprint:
+        enriched["failure_fingerprint"] = failure_fingerprint
+    return enriched
 
 
 def _unstage_paths(workspace: Path, paths: list[str]) -> None:

@@ -9,6 +9,7 @@ env/
 *.egg-info/
 pip-wheel-metadata/
 node_modules/
+.build/
 .bundle/
 vendor/
 .gradle/

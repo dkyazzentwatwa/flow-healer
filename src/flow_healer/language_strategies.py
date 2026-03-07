@@ -4,7 +4,10 @@ import shlex
 from dataclasses import dataclass, field
 
 
-_RUBY_BUNDLER_VERSION = "2.5.23"
+SUPPORTED_LANGUAGES: tuple[str, ...] = ("python", "node", "swift")
+REMOVED_LANGUAGES: tuple[str, ...] = ("go", "rust", "java_maven", "java_gradle", "ruby")
+SUPPORTED_LANGUAGE_SET = frozenset(SUPPORTED_LANGUAGES)
+REMOVED_LANGUAGE_SET = frozenset(REMOVED_LANGUAGES)
 
 
 @dataclass(slots=True, frozen=True)
@@ -14,6 +17,11 @@ class LanguageStrategy:
     docker_test_cmd: list[str] = field(default_factory=list)
     local_test_cmd: list[str] = field(default_factory=list)
     supports_targeted_paths: bool = False
+    supports_docker: bool = True
+
+
+class UnsupportedLanguageError(ValueError):
+    pass
 
 
 _STRATEGIES: dict[str, LanguageStrategy] = {
@@ -35,43 +43,13 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
         local_test_cmd=["npm", "test", "--", "--passWithNoTests"],
         supports_targeted_paths=False,
     ),
-    "go": LanguageStrategy(
-        docker_image="golang:1.22-alpine",
+    "swift": LanguageStrategy(
+        docker_image="",
         docker_install_cmd="",
-        docker_test_cmd=["go", "test", "./..."],
-        local_test_cmd=["go", "test", "./..."],
+        docker_test_cmd=["swift", "test"],
+        local_test_cmd=["swift", "test"],
         supports_targeted_paths=False,
-    ),
-    "rust": LanguageStrategy(
-        docker_image="rust:1-slim",
-        docker_install_cmd="",
-        docker_test_cmd=["cargo", "test"],
-        local_test_cmd=["cargo", "test"],
-        supports_targeted_paths=False,
-    ),
-    "java_maven": LanguageStrategy(
-        docker_image="maven:3.9-eclipse-temurin-17",
-        docker_install_cmd="",
-        docker_test_cmd=["mvn", "test", "-q", "--no-transfer-progress"],
-        local_test_cmd=["mvn", "test", "-q", "--no-transfer-progress"],
-        supports_targeted_paths=False,
-    ),
-    "java_gradle": LanguageStrategy(
-        docker_image="gradle:8-jdk17",
-        docker_install_cmd="",
-        docker_test_cmd=["./gradlew", "test", "--no-daemon"],
-        local_test_cmd=["./gradlew", "test", "--no-daemon"],
-        supports_targeted_paths=False,
-    ),
-    "ruby": LanguageStrategy(
-        docker_image="ruby:3.2-slim",
-        docker_install_cmd=(
-            f"gem install bundler -v {_RUBY_BUNDLER_VERSION} && "
-            f"bundle _{_RUBY_BUNDLER_VERSION}_ install -j4 --quiet"
-        ),
-        docker_test_cmd=["bundle", f"_{_RUBY_BUNDLER_VERSION}_", "exec", "rspec"],
-        local_test_cmd=["bundle", "exec", "rspec"],
-        supports_targeted_paths=True,
+        supports_docker=False,
     ),
     # Conservative fallback preserves the historical Python execution path.
     "unknown": LanguageStrategy(
@@ -98,6 +76,32 @@ def parse_command(command: str) -> list[str]:
         return raw.split()
 
 
+def normalize_language(language: str) -> str:
+    return str(language or "").strip().lower()
+
+
+def is_supported_language(language: str) -> bool:
+    return normalize_language(language) in SUPPORTED_LANGUAGE_SET
+
+
+def is_removed_language(language: str) -> bool:
+    return normalize_language(language) in REMOVED_LANGUAGE_SET
+
+
+def ensure_supported_language(language: str, *, source: str = "configuration") -> str:
+    normalized = normalize_language(language)
+    if not normalized or normalized == "unknown":
+        return normalized
+    if is_supported_language(normalized):
+        return normalized
+    if is_removed_language(normalized):
+        raise UnsupportedLanguageError(
+            f"Unsupported language '{normalized}' from {source}. "
+            "Flow Healer supports only python, node, and swift."
+        )
+    return normalized
+
+
 def get_strategy(
     language: str,
     *,
@@ -118,6 +122,7 @@ def get_strategy(
             docker_test_cmd=custom_test,
             local_test_cmd=custom_test,
             supports_targeted_paths=_supports_targeted_paths(custom_test),
+            supports_docker=base.supports_docker,
         )
 
     return LanguageStrategy(
@@ -126,6 +131,7 @@ def get_strategy(
         docker_test_cmd=list(base.docker_test_cmd),
         local_test_cmd=list(base.local_test_cmd),
         supports_targeted_paths=base.supports_targeted_paths,
+        supports_docker=base.supports_docker,
     )
 
 

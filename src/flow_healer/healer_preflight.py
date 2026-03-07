@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .healer_task_spec import HealerTaskSpec
+from .language_strategies import get_strategy
 
 if TYPE_CHECKING:
     from .healer_runner import HealerRunner, ResolvedExecution
@@ -19,11 +20,7 @@ _DEFAULT_PREFLIGHT_TTL_SECONDS = 900
 _SUPPORTED_SANDBOXES: tuple[tuple[str, str], ...] = (
     ("python", "e2e-smoke/python"),
     ("node", "e2e-smoke/node"),
-    ("go", "e2e-smoke/go"),
-    ("rust", "e2e-smoke/rust"),
-    ("java_maven", "e2e-smoke/java-maven"),
-    ("java_gradle", "e2e-smoke/java-gradle"),
-    ("ruby", "e2e-smoke/ruby"),
+    ("swift", "e2e-smoke/swift"),
 )
 
 
@@ -152,6 +149,7 @@ class HealerPreflight:
     def _run_preflight(self, *, language: str, execution_root: str) -> PreflightReport:
         sandbox_path = self.repo_path / execution_root
         checked_at = _now_store_timestamp()
+        strategy = get_strategy(language)
         if not sandbox_path.is_dir():
             return PreflightReport(
                 language=language,
@@ -164,7 +162,22 @@ class HealerPreflight:
                 checked_at=checked_at,
                 test_summary={},
             )
-        if self.runner.test_gate_mode != "local_only" and shutil.which("docker") is None:
+        if self.runner.test_gate_mode == "docker_only" and not strategy.supports_docker:
+            return PreflightReport(
+                language=language,
+                execution_root=execution_root,
+                gate_mode=self.runner.test_gate_mode,
+                status="failed",
+                failure_class="unsupported_gate_mode",
+                summary=(
+                    f"Preflight does not support docker_only for {language}; "
+                    "use local_only or local_then_docker."
+                ),
+                output_tail="(docker gate unsupported for this language)",
+                checked_at=checked_at,
+                test_summary={},
+            )
+        if self.runner.test_gate_mode != "local_only" and strategy.supports_docker and shutil.which("docker") is None:
             return PreflightReport(
                 language=language,
                 execution_root=execution_root,

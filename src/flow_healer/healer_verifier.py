@@ -34,6 +34,7 @@ class HealerVerifier:
         proposer_output: str,
         learned_context: str = "",
         language: str = "",
+        workspace_status: dict[str, Any] | None = None,
     ) -> VerificationResult:
         if _can_short_circuit_artifact_verification(task_spec=task_spec, diff_paths=diff_paths):
             return VerificationResult(
@@ -56,6 +57,7 @@ class HealerVerifier:
             + f"Issue #{issue_id}: {issue_title}\n\n"
             + f"{issue_body}\n\n"
             + f"Changed files: {', '.join(diff_paths) if diff_paths else '(none)'}\n"
+            + f"Workspace status: {json.dumps(workspace_status or {}, ensure_ascii=True)}\n"
             + f"Test summary: {json.dumps(test_summary, ensure_ascii=True)}\n\n"
             + f"Proposer output:\n{proposer_output[:6000]}"
         )

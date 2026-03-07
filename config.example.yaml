@@ -66,13 +66,15 @@ repos:
     # - skip  -> always skip local gate
     local_gate_policy: auto
     # Language/runtime strategy:
-    # Supported: python | node | go | rust | java_maven | java_gradle | ruby
+    # Supported: python | node | swift
     # Leave blank to auto-detect from repo marker files.
     language: ""
     # Optional overrides for the resolved language strategy.
     docker_image: ""
     test_command: ""
     install_command: ""
+    auto_clean_generated_artifacts: true
+    failure_fingerprint_quarantine_threshold: 2
     max_diff_files: 8
     max_diff_lines: 400
     max_failed_tests_allowed: 0

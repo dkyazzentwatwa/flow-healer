@@ -68,6 +68,32 @@ src/flow_healer/
 └── store.py              # SQLite persistence
 ```
 
+## Supported Languages
+
+Flow Healer supports 3 core languages:
+
+| Language | Docker Image | Test Command |
+| --- | --- | --- |
+| Python | `python:3.11-slim` | `pytest -q` |
+| Node.js | `node:20-slim` | `npm test -- --passWithNoTests` |
+| Swift | local toolchain | `swift test` |
+
+### Docker-First Testing
+
+By default, Flow Healer uses `test_gate_mode: local_then_docker`, which tries local toolchains first and falls back to Docker for Python and Node. Swift is local-first and intentionally does not use Docker.
+
+```yaml
+repos:
+  - name: my-node-project
+    test_gate_mode: docker_only
+    local_gate_policy: skip
+```
+
+The `local_gate_policy` options are:
+- `auto` - skip if unavailable (default)
+- `force` - fail if unavailable
+- `skip` - always skip local testing
+
 ## Quickstart
 
 ### 1. Install

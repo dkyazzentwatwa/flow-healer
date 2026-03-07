@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from flow_healer.config import AppConfig
 
 
@@ -84,6 +86,25 @@ def test_load_reads_language_strategy_overrides(tmp_path) -> None:
     assert relay.healer_docker_image == "node:22"
     assert relay.healer_test_command == "npm run test:ci -- --watch=false"
     assert relay.healer_install_command == "npm ci"
+
+
+def test_load_rejects_removed_language_override(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    language: ruby",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="supports only python, node, and swift"):
+        AppConfig.load(config_path)
 
 
 def test_load_normalizes_connector_backend(tmp_path) -> None:

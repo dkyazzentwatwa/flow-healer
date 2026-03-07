@@ -24,6 +24,7 @@ flow-healer start --once
 - [operations.md](operations.md): common maintenance tasks and troubleshooting
 - [operations.md - Failure Recovery](operations.md#failure-recovery): incident response for failed healing attempts
 - [contributing.md](contributing.md): development and review expectations
+- [e2e-smoke/](../e2e-smoke/): Multi-language test sandboxes for validating language strategies
 
 ## Failure Recovery
 

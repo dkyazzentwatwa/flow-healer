@@ -45,6 +45,10 @@ def _make_loop(store, **overrides):
         healer_retry_budget=overrides.get("healer_retry_budget", 2),
         healer_backoff_initial_seconds=overrides.get("healer_backoff_initial_seconds", 60),
         healer_backoff_max_seconds=overrides.get("healer_backoff_max_seconds", 3600),
+        healer_auto_clean_generated_artifacts=overrides.get("healer_auto_clean_generated_artifacts", True),
+        healer_failure_fingerprint_quarantine_threshold=overrides.get(
+            "healer_failure_fingerprint_quarantine_threshold", 2
+        ),
         healer_circuit_breaker_window=overrides.get("healer_circuit_breaker_window", 4),
         healer_circuit_breaker_failure_rate=overrides.get("healer_circuit_breaker_failure_rate", 0.5),
         healer_circuit_breaker_cooldown_seconds=overrides.get("healer_circuit_breaker_cooldown_seconds", 900),
@@ -156,22 +160,6 @@ def test_collect_targeted_tests_infers_python_test_from_output_target(tmp_path):
     )
 
     assert targeted == ["tests/test_healer_loop.py"]
-
-
-def test_collect_targeted_tests_infers_ruby_spec_relative_to_execution_root(tmp_path):
-    spec_dir = tmp_path / "e2e-smoke" / "ruby" / "spec"
-    spec_dir.mkdir(parents=True)
-    (spec_dir / "add_spec.rb").write_text("RSpec.describe '#add' do\nend\n", encoding="utf-8")
-
-    targeted = _collect_targeted_tests(
-        issue_body="No explicit rspec target here.",
-        output_targets=["e2e-smoke/ruby/add.rb"],
-        workspace=tmp_path,
-        language="ruby",
-        execution_root="e2e-smoke/ruby",
-    )
-
-    assert targeted == ["spec/add_spec.rb"]
 
 
 def test_ingest_pr_feedback_ignores_healer_comments(tmp_path):
@@ -1282,6 +1270,68 @@ def test_backoff_or_fail_no_code_diff_does_not_exhaust_retry_budget(tmp_path):
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "no_code_diff"
     assert issue["backoff_until"]
+    loop.tracker.add_issue_comment.assert_called()
+
+
+def test_quarantine_failure_loop_blocks_repeated_generated_artifact_fingerprint(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="390",
+        repo="owner/repo",
+        title="Issue 390",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.create_healer_attempt(
+        attempt_id="hat_prev",
+        issue_id="390",
+        attempt_no=1,
+        state="failed",
+        predicted_lock_set=["repo:*"],
+        prediction_source="test",
+        task_kind="fix",
+        output_targets=["e2e-smoke/ruby/add.rb"],
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+    store.finish_healer_attempt(
+        attempt_id="hat_prev",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={
+            "failure_fingerprint": "generated_artifact_contamination|e2e-smoke/ruby|e2e-smoke/ruby/gemfile.lock"
+        },
+        verifier_summary={},
+        failure_class="generated_artifact_contamination",
+        failure_reason="Gemfile.lock contamination",
+    )
+
+    loop = _make_loop(store, healer_failure_fingerprint_quarantine_threshold=2)
+
+    blocked = loop._maybe_quarantine_failure_loop(
+        issue_id="390",
+        failure_class="generated_artifact_contamination",
+        failure_reason="Gemfile.lock contamination",
+        failure_fingerprint="generated_artifact_contamination|e2e-smoke/ruby|e2e-smoke/ruby/gemfile.lock",
+        workspace_status={
+            "contamination_paths": ["e2e-smoke/ruby/Gemfile.lock"],
+            "execution_root": "e2e-smoke/ruby",
+        },
+    )
+
+    issue = store.get_healer_issue("390")
+    assert blocked is True
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["last_failure_class"] == "generated_artifact_contamination"
+    assert "Repeated failure fingerprint" in issue["feedback_context"]
+    assert store.get_state("healer_last_failure_fingerprint") == (
+        "generated_artifact_contamination|e2e-smoke/ruby|e2e-smoke/ruby/gemfile.lock"
+    )
+    assert store.get_state("healer_last_contamination_paths") == "e2e-smoke/ruby/Gemfile.lock"
     loop.tracker.add_issue_comment.assert_called()
 
 

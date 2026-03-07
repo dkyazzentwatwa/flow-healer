@@ -28,13 +28,14 @@ from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue
 from .healer_task_spec import compile_task_spec
 from .healer_verifier import HealerVerifier
+from .language_strategies import UnsupportedLanguageError
 from .protocols import ConnectorProtocol
 from .store import SQLiteStore
 
 logger = logging.getLogger("apple_flow.healer_loop")
 
 _TARGETED_TEST_RE = re.compile(
-    r"\b(?:tests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py|spec/[A-Za-z0-9_./\-]*_spec\.rb)\b"
+    r"\btests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py\b"
 )
 _FLOW_COMMENT_PERSONA = (
     "Laid-back tech bro vibes, light emoji use, concise status updates, "
@@ -58,6 +59,7 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "pr_open_failed":        {"backoff_multiplier": 2.0, "feedback_hint": "Could not open PR last time."},
     "lock_upgrade_conflict": {"backoff_multiplier": 1.0, "feedback_hint": "Previous fix expanded beyond predicted scope. Keep changes narrow."},
     "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
+    "generated_artifact_contamination": {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt left generated artifacts in the worktree. Clean workspace noise before retrying."},
 }
 
 
@@ -119,6 +121,7 @@ class AutonomousHealerLoop:
             docker_image=settings.healer_docker_image,
             test_command=settings.healer_test_command,
             install_command=settings.healer_install_command,
+            auto_clean_generated_artifacts=settings.healer_auto_clean_generated_artifacts,
         )
         self.verifier = HealerVerifier(connector=connector)
         self.reviewer = HealerReviewer(connector=connector)
@@ -494,7 +497,10 @@ class AutonomousHealerLoop:
         issue_title = str(issue_snapshot.get("title") or "").strip()
         issue_body = str(issue_snapshot.get("body") or "").strip()
         task_spec = compile_task_spec(issue_title=issue_title, issue_body=issue_body)
-        resolved_execution = self.runner.resolve_execution(workspace=Path(workspace_path), task_spec=task_spec)
+        try:
+            resolved_execution = self.runner.resolve_execution(workspace=Path(workspace_path), task_spec=task_spec)
+        except UnsupportedLanguageError:
+            return False
         targeted_tests = _collect_targeted_tests(
             issue_body=issue_body,
             output_targets=list(task_spec.output_targets),
@@ -915,7 +921,18 @@ class AutonomousHealerLoop:
         attempt_state = "failed"
         workspace = None
         try:
-            resolved_execution = self.runner.resolve_execution(workspace=self.repo_path, task_spec=task_spec)
+            try:
+                resolved_execution = self.runner.resolve_execution(workspace=self.repo_path, task_spec=task_spec)
+            except UnsupportedLanguageError as exc:
+                failure_class = "unsupported_language"
+                failure_reason = str(exc)
+                issue_state = self._backoff_or_fail(
+                    issue_id=issue.issue_id,
+                    attempt_no=attempt_no,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
+                return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
             preflight_execution_root = (
                 resolved_execution.execution_root
@@ -959,7 +976,18 @@ class AutonomousHealerLoop:
                 issue_title=issue.title,
                 issue_body=issue.body,
             )
-            resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
+            try:
+                resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
+            except UnsupportedLanguageError as exc:
+                failure_class = "unsupported_language"
+                failure_reason = str(exc)
+                issue_state = self._backoff_or_fail(
+                    issue_id=issue.issue_id,
+                    attempt_no=attempt_no,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
+                return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -1034,6 +1062,22 @@ class AutonomousHealerLoop:
                     failure_class,
                     failure_reason,
                 )
+                self._record_failure_fingerprint(
+                    issue_id=issue.issue_id,
+                    failure_class=failure_class,
+                    failure_fingerprint=run_result.failure_fingerprint,
+                    workspace_status=run_result.workspace_status,
+                )
+                if self._maybe_quarantine_failure_loop(
+                    issue_id=issue.issue_id,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    failure_fingerprint=run_result.failure_fingerprint,
+                    workspace_status=run_result.workspace_status,
+                ):
+                    issue_state = "blocked"
+                    attempt_state = "blocked"
+                    return
                 issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
@@ -1073,6 +1117,7 @@ class AutonomousHealerLoop:
                 proposer_output=run_result.proposer_output,
                 learned_context=learned_context,
                 language=detected_language,
+                workspace_status=run_result.workspace_status,
             )
             verifier_summary = {"passed": verification.passed, "summary": verification.summary}
             if not verification.passed:
@@ -1533,6 +1578,82 @@ class AutonomousHealerLoop:
         self.store.set_state("healer_connector_availability_reason", str(health.get("availability_reason") or ""))
         self.store.set_state("healer_connector_last_checked_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
 
+    def _record_failure_fingerprint(
+        self,
+        *,
+        issue_id: str,
+        failure_class: str,
+        failure_fingerprint: str,
+        workspace_status: dict[str, object] | None,
+    ) -> None:
+        if not failure_fingerprint:
+            return
+        self.store.set_state("healer_last_failure_fingerprint", failure_fingerprint)
+        self.store.set_state("healer_last_failure_fingerprint_issue_id", issue_id)
+        self.store.set_state("healer_last_failure_fingerprint_class", failure_class)
+        contamination = workspace_status or {}
+        contamination_paths = contamination.get("contamination_paths") or contamination.get("cleaned_paths") or []
+        rendered = ", ".join(str(item).strip() for item in contamination_paths if str(item).strip())
+        self.store.set_state("healer_last_contamination_paths", rendered)
+
+    def _maybe_quarantine_failure_loop(
+        self,
+        *,
+        issue_id: str,
+        failure_class: str,
+        failure_reason: str,
+        failure_fingerprint: str,
+        workspace_status: dict[str, object] | None,
+    ) -> bool:
+        if not failure_fingerprint:
+            return False
+        threshold = max(2, int(getattr(self.settings, "healer_failure_fingerprint_quarantine_threshold", 2)))
+        attempts = self.store.list_healer_attempts(issue_id=issue_id, limit=max(threshold, 5))
+        matches = 1
+        for attempt in attempts:
+            summary = attempt.get("test_summary") or {}
+            if str(summary.get("failure_fingerprint") or "").strip() != failure_fingerprint:
+                break
+            matches += 1
+            if matches >= threshold:
+                break
+        if matches < threshold:
+            return False
+        self._record_failure_fingerprint(
+            issue_id=issue_id,
+            failure_class=failure_class,
+            failure_fingerprint=failure_fingerprint,
+            workspace_status=workspace_status,
+        )
+        reason = f"{failure_reason} Repeated failure fingerprint hit threshold={threshold}."
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="blocked",
+            last_failure_class=failure_class,
+            last_failure_reason=reason[:500],
+            feedback_context=f"Repeated failure fingerprint: {failure_fingerprint}"[:500],
+            clear_lease=True,
+        )
+        contamination = workspace_status or {}
+        contamination_paths = contamination.get("contamination_paths") or contamination.get("cleaned_paths") or []
+        details = [
+            "Status: `blocked`",
+            f"Failure class: `{failure_class}`",
+            f"Fingerprint: `{failure_fingerprint}`",
+        ]
+        if contamination_paths:
+            details.append(f"Contamination: `{', '.join(str(item) for item in contamination_paths)}`")
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Repeated failure loop paused ⏸️",
+                "I hit the same deterministic failure pattern again, so I'm blocking this issue instead of churning retries.",
+                details,
+                outro="Clear the workspace hygiene issue or adjust the guardrails, then requeue for another pass.",
+            ),
+        )
+        return True
+
     def _circuit_breaker_status(self) -> CircuitBreakerStatus:
         window = max(5, self.settings.healer_circuit_breaker_window)
         attempts = self.store.list_recent_healer_attempts(limit=window)
@@ -1739,7 +1860,7 @@ def _infer_targeted_tests_from_targets(
     execution_root: str = "",
 ) -> set[str]:
     normalized_language = (language or "").strip().lower()
-    if normalized_language not in {"python", "ruby"}:
+    if normalized_language != "python":
         return set()
     execution_path = workspace / execution_root if execution_root else workspace
     inferred: set[str] = set()
@@ -1765,18 +1886,6 @@ def _infer_targeted_tests_from_targets(
                 if (execution_path / candidate).exists():
                     inferred.add(candidate.as_posix())
             continue
-
-        if normalized_language == "ruby":
-            if local_target.startswith("spec/") and (execution_path / local_path).exists():
-                inferred.add(local_target)
-                continue
-            if local_path.suffix != ".rb":
-                continue
-            spec_candidate = Path("spec") / f"{local_path.stem}_spec.rb"
-            nested_spec_candidate = Path("spec") / local_path.parent / f"{local_path.stem}_spec.rb"
-            for candidate in (spec_candidate, nested_spec_candidate):
-                if (execution_path / candidate).exists():
-                    inferred.add(candidate.as_posix())
     return inferred
 
 

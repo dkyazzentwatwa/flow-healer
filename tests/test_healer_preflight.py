@@ -13,7 +13,7 @@ from flow_healer.store import SQLiteStore
 
 class _FakeRunner:
     def __init__(self) -> None:
-        self.test_gate_mode = "docker_only"
+        self.test_gate_mode = "local_only"
         self.local_gate_policy = "auto"
         self.calls: list[tuple[Path, str]] = []
 
@@ -26,11 +26,7 @@ def test_preflight_refresh_all_caches_reports_for_supported_languages(tmp_path) 
     for relative in (
         "e2e-smoke/python",
         "e2e-smoke/node",
-        "e2e-smoke/go",
-        "e2e-smoke/rust",
-        "e2e-smoke/java-maven",
-        "e2e-smoke/java-gradle",
-        "e2e-smoke/ruby",
+        "e2e-smoke/swift",
     ):
         (tmp_path / relative).mkdir(parents=True)
 
@@ -41,19 +37,15 @@ def test_preflight_refresh_all_caches_reports_for_supported_languages(tmp_path) 
 
     reports = preflight.refresh_all(force=True)
 
-    assert len(reports) == 7
+    assert len(reports) == 3
     assert all(report.status == "ready" for report in reports)
-    cached = list_cached_preflight_reports(store=store, gate_mode="docker_only")
+    cached = list_cached_preflight_reports(store=store, gate_mode=runner.test_gate_mode)
     assert [report.language for report in cached] == [
         "python",
         "node",
-        "go",
-        "rust",
-        "java_maven",
-        "java_gradle",
-        "ruby",
+        "swift",
     ]
-    assert len(runner.calls) == 7
+    assert len(runner.calls) == 3
 
 
 def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
@@ -65,7 +57,7 @@ def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
     cached = PreflightReport(
         language="node",
         execution_root="e2e-smoke/node",
-        gate_mode="docker_only",
+        gate_mode=runner.test_gate_mode,
         status="ready",
         failure_class="",
         summary="cached",
@@ -73,9 +65,24 @@ def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
         checked_at="2099-01-01 00:00:00",
         test_summary={"failed_tests": 0},
     )
-    store.set_state(preflight_cache_key(gate_mode="docker_only", language="node"), cached.to_state_value())
+    store.set_state(preflight_cache_key(gate_mode=runner.test_gate_mode, language="node"), cached.to_state_value())
 
     report = preflight.ensure_language_ready(language="node", execution_root="e2e-smoke/node")
 
     assert report.summary == "cached"
+    assert runner.calls == []
+
+
+def test_preflight_reports_unsupported_docker_only_mode_for_swift(tmp_path) -> None:
+    (tmp_path / "e2e-smoke" / "swift").mkdir(parents=True)
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    runner = _FakeRunner()
+    runner.test_gate_mode = "docker_only"
+    preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
+
+    report = preflight.ensure_language_ready(language="swift", execution_root="e2e-smoke/swift", force=True)
+
+    assert report.status == "failed"
+    assert report.failure_class == "unsupported_gate_mode"
     assert runner.calls == []

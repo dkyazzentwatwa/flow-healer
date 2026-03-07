@@ -206,8 +206,8 @@ def test_task_spec_prompt_block_includes_contract_guidance() -> None:
 
 def test_task_spec_prompt_block_marks_code_targets_as_anchors_not_allowlist() -> None:
     spec = compile_task_spec(
-        issue_title="Fix Rust smoke fixture",
-        issue_body="Fix e2e-smoke/rust/Cargo.toml so the fixture builds and passes the regression test.",
+        issue_title="Fix Swift smoke fixture",
+        issue_body="Fix e2e-smoke/swift/Package.swift so the fixture builds and passes the regression test.",
     )
 
     prompt_block = task_spec_to_prompt_block(spec)
@@ -220,35 +220,36 @@ def test_task_spec_prompt_block_marks_code_targets_as_anchors_not_allowlist() ->
 def test_compile_task_spec_passes_language_through() -> None:
     spec = compile_task_spec(
         issue_title="Fix addition bug",
-        issue_body="Fix demo.go",
-        language="go",
+        issue_body="Fix demo.py",
+        language="python",
     )
-    assert spec.language == "go"
+    assert spec.language == "python"
     assert spec.language_source == "issue"
 
 
-def test_compile_task_spec_language_defaults_to_empty() -> None:
+def test_compile_task_spec_infers_python_from_py_target() -> None:
     spec = compile_task_spec(
         issue_title="Fix addition bug",
         issue_body="Fix demo.py",
     )
-    assert spec.language == ""
+    assert spec.language == "python"
+    assert spec.language_source == "issue"
 
 
 def test_task_spec_prompt_block_includes_language_when_set() -> None:
     spec = compile_task_spec(
         issue_title="Fix addition bug",
-        issue_body="Fix demo.go",
-        language="go",
+        issue_body="Fix demo.py",
+        language="python",
     )
     prompt_block = task_spec_to_prompt_block(spec)
-    assert "- Language: go" in prompt_block
+    assert "- Language: python" in prompt_block
 
 
 def test_task_spec_prompt_block_omits_language_when_empty() -> None:
     spec = compile_task_spec(
-        issue_title="Fix addition bug",
-        issue_body="Fix demo.py",
+        issue_title="Write notes",
+        issue_body="Document the plan in docs/notes.md",
     )
     prompt_block = task_spec_to_prompt_block(spec)
     assert "Language:" not in prompt_block
@@ -272,46 +273,34 @@ def test_compile_task_spec_infers_node_execution_root_and_validation_command() -
     assert spec.validation_commands == ("cd e2e-smoke/node && npm test -- --passWithNoTests",)
 
 
-def test_compile_task_spec_infers_java_gradle_from_validation_line() -> None:
+def test_compile_task_spec_infers_swift_execution_root_and_validation_command() -> None:
     spec = compile_task_spec(
-        issue_title="Java Gradle sandbox regression",
+        issue_title="Swift sandbox regression",
         issue_body=(
             "Required code outputs:\n"
-            "- e2e-smoke/java-gradle/src/main/java/example/App.java\n\n"
+            "- e2e-smoke/swift/Sources/FlowHealerAdd/Add.swift\n"
+            "- e2e-smoke/swift/Tests/FlowHealerAddTests/AddTests.swift\n\n"
             "Validation:\n"
-            "- cd e2e-smoke/java-gradle && ./gradlew test --no-daemon\n"
+            "- cd e2e-smoke/swift && swift test\n"
         ),
     )
 
-    assert spec.language == "java_gradle"
+    assert spec.language == "swift"
     assert spec.language_source == "issue"
-    assert spec.execution_root == "e2e-smoke/java-gradle"
-
-
-def test_compile_task_spec_infers_ruby_execution_root_from_sandbox_path() -> None:
-    spec = compile_task_spec(
-        issue_title="Ruby sandbox regression",
-        issue_body=(
-            "Fix the bug in e2e-smoke/ruby/add.rb and keep the sandbox green.\n"
-            "Validation: cd e2e-smoke/ruby && bundle exec rspec\n"
-        ),
-    )
-
-    assert spec.language == "ruby"
-    assert spec.language_source == "issue"
-    assert spec.execution_root == "e2e-smoke/ruby"
+    assert spec.execution_root == "e2e-smoke/swift"
+    assert spec.validation_commands == ("cd e2e-smoke/swift && swift test",)
 
 
 def test_task_spec_prompt_block_includes_execution_root_and_validation_commands() -> None:
     spec = compile_task_spec(
-        issue_title="Ruby sandbox regression",
-        issue_body="Validation: cd e2e-smoke/ruby && bundle exec rspec",
+        issue_title="Swift sandbox regression",
+        issue_body="Validation: cd e2e-smoke/swift && swift test",
     )
 
     prompt_block = task_spec_to_prompt_block(spec)
 
-    assert "- Execution root: e2e-smoke/ruby" in prompt_block
-    assert "Validation commands: cd e2e-smoke/ruby && bundle exec rspec" in prompt_block
+    assert "- Execution root: e2e-smoke/swift" in prompt_block
+    assert "Validation commands: cd e2e-smoke/swift && swift test" in prompt_block
 
 
 def test_is_code_path_recognizes_go() -> None:
@@ -333,8 +322,7 @@ def test_is_code_path_recognizes_c_cpp() -> None:
     assert _is_code_path("include/util.hpp") is True
 
 
-def test_is_code_path_recognizes_ruby_swift_scala_kotlin() -> None:
-    assert _is_code_path("app/models/user.rb") is True
+def test_is_code_path_recognizes_swift_scala_kotlin() -> None:
     assert _is_code_path("Sources/App.swift") is True
     assert _is_code_path("src/main/scala/Main.scala") is True
     assert _is_code_path("src/main/kotlin/Main.kt") is True

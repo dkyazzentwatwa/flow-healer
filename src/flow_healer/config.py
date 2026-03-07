@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from .language_strategies import ensure_supported_language
+
 
 @dataclass(slots=True)
 class ServiceSettings:
@@ -96,6 +98,8 @@ class RelaySettings:
     healer_docker_image: str = ""
     healer_test_command: str = ""
     healer_install_command: str = ""
+    healer_auto_clean_generated_artifacts: bool = True
+    healer_failure_fingerprint_quarantine_threshold: int = 2
     healer_max_diff_files: int = 8
     healer_max_diff_lines: int = 400
     healer_max_failed_tests_allowed: int = 0
@@ -177,10 +181,17 @@ class AppConfig:
                     healer_enable_review=bool(item.get("enable_review", True)),
                     healer_test_gate_mode=str(item.get("test_gate_mode") or "local_then_docker"),
                     healer_local_gate_policy=str(item.get("local_gate_policy") or "auto"),
-                    healer_language=str(item.get("language") or ""),
+                    healer_language=_validate_healer_language(
+                        item.get("language"),
+                        repo_name=name,
+                    ),
                     healer_docker_image=str(item.get("docker_image") or ""),
                     healer_test_command=str(item.get("test_command") or ""),
                     healer_install_command=str(item.get("install_command") or ""),
+                    healer_auto_clean_generated_artifacts=bool(item.get("auto_clean_generated_artifacts", True)),
+                    healer_failure_fingerprint_quarantine_threshold=int(
+                        item.get("failure_fingerprint_quarantine_threshold") or 2
+                    ),
                     healer_max_diff_files=int(item.get("max_diff_files") or 8),
                     healer_max_diff_lines=int(item.get("max_diff_lines") or 400),
                     healer_max_failed_tests_allowed=int(item.get("max_failed_tests_allowed") or 0),
@@ -282,3 +293,10 @@ def _load_env_file(path: Path | None) -> None:
             continue
         cleaned = value.strip().strip("\"'")
         os.environ.setdefault(name, cleaned)
+
+
+def _validate_healer_language(value: Any, *, repo_name: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return ensure_supported_language(raw, source=f"repo '{repo_name}' config")
