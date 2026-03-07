@@ -99,3 +99,21 @@ def test_compile_task_spec_marks_input_spec_only_markdown_as_context_not_target(
     assert spec.output_targets == ()
     assert spec.input_context_paths == ("research-notes.md",)
     assert spec.validation_profile == "code_change"
+
+
+def test_compile_task_spec_handles_path_prefix_directive_with_or_without_space() -> None:
+    spec = compile_task_spec(
+        issue_title="Node.js queue test",
+        issue_body="path:Node.js keeps work scoped",
+    )
+
+    assert spec.output_targets == ("Node.js",)
+    assert spec.task_kind == "edit"
+
+    spec_with_space = compile_task_spec(
+        issue_title="Node.js queue test",
+        issue_body="path: Node.js keeps work scoped",
+    )
+
+    assert spec_with_space.output_targets == ("Node.js",)
+    assert spec_with_space.task_kind == "edit"
