@@ -384,9 +384,11 @@ class AutonomousHealerLoop:
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
                 continue
-            if not self.tracker.issue_has_label(
+            pr_number = int(row.get("pr_number") or 0)
+            if not self._has_pr_approved_label(
                 issue_id=issue_id,
-                label=self.settings.healer_pr_required_label,
+                pr_number=pr_number,
+                required_label=self.settings.healer_pr_required_label,
             ):
                 continue
             self.store.set_healer_issue_state(
@@ -407,6 +409,29 @@ class AutonomousHealerLoop:
             )
             resumed += 1
         return resumed
+
+    def _has_pr_approved_label(self, *, issue_id: str, pr_number: int, required_label: str) -> bool:
+        if not required_label:
+            return False
+        try:
+            if self.tracker.issue_has_label(issue_id=issue_id, label=required_label):
+                return True
+        except Exception:
+            return False
+
+        if pr_number <= 0:
+            return False
+        try:
+            pr_issue = self.tracker.get_issue(issue_id=str(pr_number))
+            if not isinstance(pr_issue, dict):
+                return False
+            pr_labels = {
+                str((entry or {}).get("name") or "").strip()
+                for entry in (pr_issue.get("labels") or [])
+            }
+            return required_label in pr_labels
+        except Exception:
+            return False
 
     def _process_claimed_issue(self, row: dict[str, object]) -> None:
         issue = HealerIssue(
