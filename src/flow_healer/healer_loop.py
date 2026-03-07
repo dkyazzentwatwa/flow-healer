@@ -384,9 +384,10 @@ class AutonomousHealerLoop:
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
                 continue
-            if not self.tracker.issue_has_label(
+            if not self._has_issue_label(
                 issue_id=issue_id,
-                label=self.settings.healer_pr_required_label,
+                issue_labels=list(row.get("labels") or []),
+                required_label=self.settings.healer_pr_required_label,
             ):
                 continue
             self.store.set_healer_issue_state(
@@ -604,9 +605,10 @@ class AutonomousHealerLoop:
 
             if (
                 self.settings.healer_pr_actions_require_approval
-                and not self.tracker.issue_has_label(
+                and not self._has_issue_label(
                     issue_id=issue.issue_id,
-                    label=self.settings.healer_pr_required_label,
+                    issue_labels=issue.labels,
+                    required_label=self.settings.healer_pr_required_label,
                 )
             ):
                 self.store.set_healer_issue_state(
@@ -788,7 +790,9 @@ class AutonomousHealerLoop:
             return False
 
         required_labels = [label for label in self.settings.healer_issue_required_labels if label.strip()]
-        missing_labels = [label for label in required_labels if label not in remote_labels]
+        missing_labels = [
+            label for label in required_labels if not _label_set_match(remote_labels, label)
+        ]
         if missing_labels:
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -804,6 +808,23 @@ class AutonomousHealerLoop:
             )
             return False
         return True
+
+    def _has_issue_label(
+        self,
+        *,
+        issue_id: str,
+        issue_labels: list[str],
+        required_label: str,
+    ) -> bool:
+        if not issue_id.strip() or not required_label.strip():
+            return True
+        if _label_set_match(issue_labels, required_label):
+            return True
+        try:
+            return self.tracker.issue_has_label(issue_id=issue_id, label=required_label.strip())
+        except Exception as exc:
+            logger.warning("Failed to check issue label for #%s: %s", issue_id, exc)
+        return False
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
@@ -1122,6 +1143,18 @@ def _format_store_timestamp(value: datetime | None) -> str:
     if value is None:
         return ""
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _label_set_match(labels: list[str], target: str) -> bool:
+    normalized_target = (target or "").strip().lower()
+    if not normalized_target:
+        return True
+    normalized_labels = {
+        str(label).strip().lower()
+        for label in labels
+        if str(label).strip()
+    }
+    return normalized_target in normalized_labels
 
 
 def _is_actionable_feedback_author(author: str, self_actor: str) -> bool:
