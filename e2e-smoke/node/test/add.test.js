@@ -30,3 +30,7 @@ test('add handles negative numbers', () => {
   assert.equal(add(3, -2), 1);
   assert.equal(add(-2, -3), -5);
 });
+
+test('add handles two negative numbers', () => {
+  assert.equal(add(-2, -3), -5);
+});
