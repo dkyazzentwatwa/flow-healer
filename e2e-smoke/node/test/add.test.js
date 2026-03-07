@@ -13,4 +13,6 @@ test('add handles zero correctly', () => {
 
 test('add handles negative numbers', () => {
   assert.equal(add(-2, 3), 1);
+  assert.equal(add(2, -3), -1);
+  assert.equal(add(-2, -3), -5);
 });
