@@ -1,5 +1,6 @@
 import signal
 import subprocess
+from io import StringIO
 
 from flow_healer.codex_cli_connector import CodexCliConnector
 
@@ -13,6 +14,16 @@ class _FakeProcess:
 
     def communicate(self, timeout: float | None = None) -> tuple[str, str]:
         return self._stdout, self._stderr
+
+
+class _TimeoutProcess(_FakeProcess):
+    def __init__(self, *, stdout: str = "", stderr: str = "") -> None:
+        super().__init__(stdout=stdout, stderr=stderr)
+        self.stdout = StringIO(stdout)
+        self.stderr = StringIO(stderr)
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout or 0)
 
 
 def test_run_turn_cleans_process_group_after_success(monkeypatch, tmp_path) -> None:
@@ -103,3 +114,53 @@ def test_health_snapshot_reports_resolved_command(tmp_path) -> None:
     assert "configured_command" in snapshot
     assert "resolved_command" in snapshot
     assert "available" in snapshot
+    assert "last_runtime_error_kind" in snapshot
+    assert "last_runtime_stdout_tail" in snapshot
+    assert "last_runtime_stderr_tail" in snapshot
+
+
+def test_run_turn_includes_raw_output_when_process_times_out(monkeypatch, tmp_path) -> None:
+    connector = CodexCliConnector(workspace=str(tmp_path), timeout=45)
+    connector._available = True
+    connector._resolved_command = "codex"
+    connector.ensure_started = lambda: None  # type: ignore[method-assign]
+    proc = _TimeoutProcess(stdout="still working", stderr="mcp startup hung")
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr("flow_healer.codex_cli_connector.os.killpg", lambda pid, sig: None)
+    monkeypatch.setattr("flow_healer.codex_cli_connector.time.sleep", lambda _seconds: None)
+
+    output = connector.run_turn("thread-1", "fix it")
+
+    assert "ConnectorRuntimeError:" in output
+    assert "timed out after 45s" in output
+    assert "stderr tail: mcp startup hung" in output
+    assert "stdout tail: still working" in output
+    snapshot = connector.health_snapshot()
+    assert "mcp startup hung" in snapshot["last_health_error"]
+    assert snapshot["last_runtime_error_kind"] == "timeout"
+    assert snapshot["last_runtime_stdout_tail"] == "still working"
+    assert snapshot["last_runtime_stderr_tail"] == "mcp startup hung"
+
+
+def test_run_turn_includes_exit_code_and_stream_tails_for_runtime_failures(monkeypatch, tmp_path) -> None:
+    connector = CodexCliConnector(workspace=str(tmp_path))
+    connector._available = True
+    connector._resolved_command = "codex"
+    connector.ensure_started = lambda: None  # type: ignore[method-assign]
+    proc = _FakeProcess(returncode=7, stdout="partial stdout", stderr="fatal stderr")
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr("flow_healer.codex_cli_connector.os.killpg", lambda pid, sig: None)
+    monkeypatch.setattr("flow_healer.codex_cli_connector.time.sleep", lambda _seconds: None)
+
+    output = connector.run_turn("thread-1", "fix it")
+
+    assert output == (
+        "ConnectorRuntimeError: Codex CLI exited with code 7. "
+        "stderr tail: fatal stderr stdout tail: partial stdout"
+    )
+    snapshot = connector.health_snapshot()
+    assert snapshot["last_runtime_error_kind"] == "nonzero_exit"
+    assert snapshot["last_runtime_stdout_tail"] == "partial stdout"
+    assert snapshot["last_runtime_stderr_tail"] == "fatal stderr"

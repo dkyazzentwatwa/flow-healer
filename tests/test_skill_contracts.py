@@ -35,12 +35,19 @@ def test_audit_skill_contracts_passes_for_repo_skill_docs() -> None:
     assert audit["healthy_skills"] == audit["expected_skills"]
     recommended = audit["recommended_skill_by_diagnosis"]
     default_actions = audit["default_action_by_diagnosis"]
+    diagnosis_playbooks = audit["diagnosis_playbooks"]
     assert recommended["connector_or_patch_generation"] == "flow-healer-connector-debug"
     assert recommended["operator_or_environment"] == "flow-healer-local-validation"
     assert "connector-debug" in default_actions["connector_or_patch_generation"]
+    connector_playbook = diagnosis_playbooks["connector_or_patch_generation"]
+    assert connector_playbook["skill"] == "flow-healer-connector-debug"
+    assert "flow-healer-connector-debug/SKILL.md" in connector_playbook["relative_path"]
+    assert "Patch-apply outcome" in connector_playbook["key_output_fields"]
+    assert connector_playbook["next_step_preview"]
 
     skills = {skill["skill"]: skill for skill in audit["skills"]}
     triage = skills["flow-healer-triage"]
+    preflight = skills["flow-healer-preflight"]
     assert triage["has_script"] is True
     assert triage["script_output_alignment"] is True
     assert triage["sections_complete"] is True
@@ -48,6 +55,12 @@ def test_audit_skill_contracts_passes_for_repo_skill_docs() -> None:
     assert "recommended_skill" in triage["script_output_fields"]
     assert "diagnosis" in triage["key_output_fields"]
     assert triage["next_step_preview"].startswith("`operator_or_environment`")
+    assert triage["has_default_command"] is True
+    assert triage["default_command_preview"]
+    assert triage["has_stop_conditions"] is False
+    assert triage["stop_condition_preview"] == ""
+    assert preflight["has_stop_conditions"] is True
+    assert preflight["stop_condition_preview"]
 
 
 def test_audit_skill_contracts_flags_output_mismatch_for_scripted_skill(tmp_path: Path) -> None:

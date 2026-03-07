@@ -93,6 +93,9 @@ class FlowHealerService:
                 attempt_row["diagnosis"] = route.diagnosis
                 attempt_row["recommended_skill"] = route.recommended_skill
                 attempt_row["default_action"] = route.default_action
+                attempt_row["stop_recommended"] = route.stop_recommended
+                attempt_row["stop_reason"] = route.stop_reason
+                attempt_row["connector_debug_focus"] = route.connector_debug_focus
                 annotated_attempts.append(attempt_row)
             rows.append(
                 {
@@ -116,6 +119,9 @@ class FlowHealerService:
                         "resolved_command": connector_health.get("resolved_command"),
                         "availability_reason": connector_health.get("availability_reason"),
                         "last_health_error": connector_health.get("last_health_error"),
+                        "last_runtime_error_kind": connector_health.get("last_runtime_error_kind"),
+                        "last_runtime_stdout_tail": connector_health.get("last_runtime_stdout_tail"),
+                        "last_runtime_stderr_tail": connector_health.get("last_runtime_stderr_tail"),
                         "last_checked_at": runtime.store.get_state("healer_connector_last_checked_at") or "",
                         "last_error_class": runtime.store.get_state("healer_connector_last_error_class") or "",
                         "last_error_reason": runtime.store.get_state("healer_connector_last_error_reason") or "",
@@ -178,6 +184,10 @@ class FlowHealerService:
                     "connector_command": self.config.service.connector_command,
                     "connector_resolved_command": connector_health.get("resolved_command"),
                     "connector_availability_reason": connector_health.get("availability_reason"),
+                    "connector_last_health_error": connector_health.get("last_health_error"),
+                    "connector_last_runtime_error_kind": connector_health.get("last_runtime_error_kind"),
+                    "connector_last_runtime_stdout_tail": connector_health.get("last_runtime_stdout_tail"),
+                    "connector_last_runtime_stderr_tail": connector_health.get("last_runtime_stderr_tail"),
                     "launchd_path": launchd_path,
                     "launchd_path_has_connector": bool(launchd_path_connector),
                     "launchd_path_connector": launchd_path_connector or "",

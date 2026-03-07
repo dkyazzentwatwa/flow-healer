@@ -549,6 +549,64 @@ def test_backoff_or_fail_connector_failure_does_not_exhaust_retry_budget(tmp_pat
     assert issue["backoff_until"]
 
 
+def test_backoff_or_fail_no_patch_does_not_exhaust_retry_budget(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="304",
+        repo="owner/repo",
+        title="Issue 304",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_backoff_initial_seconds=60)
+
+    state = loop._backoff_or_fail(
+        issue_id="304",
+        attempt_no=7,
+        failure_class="no_patch",
+        failure_reason="Proposer did not return a unified diff block.",
+    )
+    issue = store.get_healer_issue("304")
+    assert issue is not None
+    assert state == "queued"
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "no_patch"
+    assert issue["backoff_until"]
+    loop.tracker.add_issue_comment.assert_called()
+
+
+def test_backoff_or_fail_no_code_diff_does_not_exhaust_retry_budget(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="305",
+        repo="owner/repo",
+        title="Issue 305",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_backoff_initial_seconds=60)
+
+    state = loop._backoff_or_fail(
+        issue_id="305",
+        attempt_no=4,
+        failure_class="no_code_diff",
+        failure_reason="Code-change task produced only docs/artifact edits.",
+    )
+    issue = store.get_healer_issue("305")
+    assert issue is not None
+    assert state == "queued"
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "no_code_diff"
+    assert issue["backoff_until"]
+    loop.tracker.add_issue_comment.assert_called()
+
+
 def test_tick_once_skips_claim_when_connector_unavailable(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

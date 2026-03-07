@@ -42,7 +42,9 @@ class HealerRunner:
         self.timeout_seconds = max(30, int(timeout_seconds))
         self.test_gate_mode = _normalize_test_gate_mode(test_gate_mode)
         self.max_proposer_retries = 1
+        self.max_code_proposer_retries = 3
         self.max_artifact_proposer_retries = 2
+        self.code_change_turn_timeout_seconds = max(900, self.timeout_seconds)
 
     def run_attempt(
         self,
@@ -81,13 +83,23 @@ class HealerRunner:
         proposer_output = ""
         failure_class = ""
         failure_reason = ""
-        max_retries = (
-            self.max_artifact_proposer_retries
-            if _allows_artifact_synthesis(task_spec)
-            else self.max_proposer_retries
+        max_retries = _proposer_retry_budget_for_task(
+            task_spec=task_spec,
+            default_retries=self.max_proposer_retries,
+            code_change_retries=self.max_code_proposer_retries,
+            artifact_retries=self.max_artifact_proposer_retries,
+        )
+        turn_timeout_seconds = _turn_timeout_seconds_for_task(
+            task_spec=task_spec,
+            default_timeout_seconds=self.timeout_seconds,
+            code_change_timeout_seconds=self.code_change_turn_timeout_seconds,
         )
         for proposer_attempt in range(max_retries + 1):
-            proposer_output = self.connector.run_turn(thread_id, prompt)
+            proposer_output = self.connector.run_turn(
+                thread_id,
+                prompt,
+                timeout_seconds=turn_timeout_seconds,
+            )
             if _stage_workspace_changes(workspace):
                 break
             patch = _extract_diff_block(proposer_output)
@@ -150,6 +162,17 @@ class HealerRunner:
                 diff_paths=[],
                 diff_files=0,
                 diff_lines=0,
+                test_summary={},
+            )
+        if _requires_non_artifact_diff(task_spec=task_spec) and not _has_non_artifact_diff(diff_paths):
+            return HealerRunResult(
+                success=False,
+                failure_class="no_code_diff",
+                failure_reason="Code-change task produced only docs/artifact edits.",
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
                 test_summary={},
             )
         if diff_files > max_diff_files or diff_lines > max_diff_lines:
@@ -305,11 +328,33 @@ def _run_pytest_locally(workspace: Path, command: list[str], timeout_seconds: in
 
 
 def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason: str) -> str:
+    tailored_lines: list[str] = []
+    if failure_class in {"no_patch", "no_workspace_change"}:
+        tailored_lines.append(
+            "You must produce concrete file edits now. Do not return explanations, plans, or summaries."
+        )
+        tailored_lines.append(
+            "If direct edits are unavailable, return exactly one valid unified diff fenced block (```diff ... ```)."
+        )
+    if failure_class == "no_code_diff":
+        tailored_lines.append(
+            "The previous output changed docs/artifacts only. This task requires at least one non-doc code/config file edit."
+        )
+        tailored_lines.append("Ensure the staged diff includes files outside docs/*.md style artifacts.")
+    if failure_class == "patch_apply_failed":
+        tailored_lines.append(
+            "Regenerate hunks against the current tree and keep paths/hunk headers exact to avoid apply errors."
+        )
+
+    guidance = "\n".join(tailored_lines).strip()
+    if guidance:
+        guidance = f"{guidance}\n"
     return (
         f"{base_prompt}\n\n"
         "Previous proposer output was unusable.\n"
         f"- Failure class: {failure_class}\n"
         f"- Failure reason: {failure_reason}\n"
+        f"{guidance}"
         "Reset your assumptions and produce a fresh unified diff that applies cleanly to the current tree.\n"
         "Be strict about valid diff syntax, file paths, and hunk headers."
     )
@@ -330,11 +375,50 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
         lines.append("Use web browsing when needed to complete research accurately before writing the file.")
     else:
         lines.append("Rely on repo and local context unless the task explicitly requires something else.")
+    if _requires_non_artifact_diff(task_spec=task_spec):
+        lines.append(
+            "This is a code-change task: ensure at least one non-doc file is modified (docs-only changes are invalid)."
+        )
     if _allows_artifact_synthesis(task_spec):
         lines.append(
             "Do not return status updates like 'Updated file X' or testing notes; return actual file content only."
         )
     return "\n".join(lines)
+
+
+def _proposer_retry_budget_for_task(
+    *,
+    task_spec: HealerTaskSpec,
+    default_retries: int,
+    code_change_retries: int,
+    artifact_retries: int,
+) -> int:
+    if _allows_artifact_synthesis(task_spec):
+        return max(0, int(artifact_retries))
+    if task_spec.validation_profile == "code_change":
+        return max(0, int(code_change_retries))
+    return max(0, int(default_retries))
+
+
+def _turn_timeout_seconds_for_task(
+    *,
+    task_spec: HealerTaskSpec,
+    default_timeout_seconds: int,
+    code_change_timeout_seconds: int,
+) -> int:
+    if task_spec.validation_profile == "code_change":
+        return max(30, int(code_change_timeout_seconds))
+    return max(30, int(default_timeout_seconds))
+
+
+def _requires_non_artifact_diff(*, task_spec: HealerTaskSpec) -> bool:
+    if task_spec.validation_profile != "code_change":
+        return False
+    return task_spec.task_kind in {"build", "fix", "edit"}
+
+
+def _has_non_artifact_diff(diff_paths: list[str]) -> bool:
+    return any(not _is_artifact_path(path) for path in diff_paths)
 
 
 def _artifact_fallback_contract(task_spec: HealerTaskSpec) -> str:

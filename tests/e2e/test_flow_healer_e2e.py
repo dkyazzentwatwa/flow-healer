@@ -339,7 +339,7 @@ class ScriptedConnector:
     def reset_thread(self, sender: str) -> str:
         return sender
 
-    def run_turn(self, thread_id: str, prompt: str) -> str:
+    def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
         self.prompts.append((thread_id, prompt))
         if thread_id.startswith("healer-verify:"):
             issue_id = thread_id.split(":", 1)[1]

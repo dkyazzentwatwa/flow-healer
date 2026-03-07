@@ -31,7 +31,7 @@ class FakeConnector:
         self.created.append(f"reset:{sender}")
         return "thread_reset"
 
-    def run_turn(self, thread_id: str, prompt: str) -> str:
+    def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
         self.turns.append((thread_id, prompt))
         if "planner" in prompt:
             return "PLAN: Create files and tests"

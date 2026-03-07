@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
+from typing import Any
 
 
 class CodexCliConnector:
@@ -33,6 +34,9 @@ class CodexCliConnector:
         self._availability_reason = ""
         self._last_health_check_at = 0.0
         self._last_health_error = ""
+        self._last_runtime_error_kind = ""
+        self._last_runtime_stdout_tail = ""
+        self._last_runtime_stderr_tail = ""
         self._resolve_command()
 
     def ensure_started(self) -> None:
@@ -68,6 +72,7 @@ class CodexCliConnector:
                 self._availability_reason = f"codex health check failed: {exc}"
                 self._last_health_error = self._availability_reason
                 self._last_health_check_at = now
+                self._clear_runtime_error_details()
             return
         with self._lock:
             self._last_health_check_at = now
@@ -75,11 +80,13 @@ class CodexCliConnector:
                 self._available = True
                 self._availability_reason = ""
                 self._last_health_error = ""
+                self._clear_runtime_error_details()
             else:
                 output = (proc.stderr or proc.stdout or f"codex exited {proc.returncode}").strip()
                 self._available = False
                 self._availability_reason = output[:300]
                 self._last_health_error = output[:300]
+                self._clear_runtime_error_details()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -99,7 +106,7 @@ class CodexCliConnector:
             self._threads.discard(sender)
         return sender
 
-    def run_turn(self, thread_id: str, prompt: str) -> str:
+    def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
         self.ensure_started()
         with self._lock:
             available = self._available
@@ -114,6 +121,8 @@ class CodexCliConnector:
         if self.reasoning_effort:
             cmd.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
         cmd.append(prompt)
+        effective_timeout = float(timeout_seconds) if timeout_seconds is not None else float(self.timeout)
+        effective_timeout = max(30.0, effective_timeout)
         proc: subprocess.Popen[str] | None = None
         try:
             proc = subprocess.Popen(
@@ -127,18 +136,32 @@ class CodexCliConnector:
             )
             with self._lock:
                 self._active_pids.add(proc.pid)
-            stdout, stderr = proc.communicate(timeout=self.timeout)
+            stdout, stderr = proc.communicate(timeout=effective_timeout)
         except FileNotFoundError:
             with self._lock:
                 self._available = False
                 self._availability_reason = f"Codex CLI not found at '{resolved}'."
+                self._clear_runtime_error_details()
             return f"ConnectorUnavailable: Codex CLI not found at '{resolved}'."
         except subprocess.TimeoutExpired:
+            stdout = _normalize_process_output(getattr(proc, "stdout", None))
+            stderr = _normalize_process_output(getattr(proc, "stderr", None))
             if proc is not None:
                 _terminate_process_group(proc.pid)
-            timeout_msg = f"ConnectorRuntimeError: Codex CLI timed out after {int(self.timeout)}s."
+            stdout_tail = _tail_text(stdout)
+            stderr_tail = _tail_text(stderr)
+            timeout_msg = "ConnectorRuntimeError: " + _format_runtime_error(
+                stdout=stdout,
+                stderr=stderr,
+                timeout_seconds=int(effective_timeout),
+            )
             with self._lock:
-                self._last_health_error = timeout_msg
+                self._last_health_error = timeout_msg[:500]
+                self._set_runtime_error_details(
+                    kind="timeout",
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                )
             return timeout_msg
         finally:
             if proc is not None:
@@ -146,10 +169,23 @@ class CodexCliConnector:
                     self._active_pids.discard(proc.pid)
                 _terminate_process_group(proc.pid)
         if proc.returncode != 0:
-            output = (stderr or stdout or f"codex exited {proc.returncode}.").strip()
+            stdout_tail = _tail_text(stdout)
+            stderr_tail = _tail_text(stderr)
+            output = _format_runtime_error(
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=proc.returncode,
+            )
             with self._lock:
                 self._last_health_error = output[:300]
+                self._set_runtime_error_details(
+                    kind="nonzero_exit",
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                )
             return f"ConnectorRuntimeError: {output}"
+        with self._lock:
+            self._clear_runtime_error_details()
         return (stdout or "").strip()
 
     def health_snapshot(self) -> dict[str, str | bool]:
@@ -160,6 +196,9 @@ class CodexCliConnector:
                 "available": self._available,
                 "availability_reason": self._availability_reason,
                 "last_health_error": self._last_health_error,
+                "last_runtime_error_kind": self._last_runtime_error_kind,
+                "last_runtime_stdout_tail": self._last_runtime_stdout_tail,
+                "last_runtime_stderr_tail": self._last_runtime_stderr_tail,
             }
 
     def _resolve_command(self) -> None:
@@ -212,6 +251,16 @@ class CodexCliConnector:
             env["PATH"] = preferred
         return env
 
+    def _set_runtime_error_details(self, *, kind: str, stdout_tail: str, stderr_tail: str) -> None:
+        self._last_runtime_error_kind = kind
+        self._last_runtime_stdout_tail = stdout_tail[:500]
+        self._last_runtime_stderr_tail = stderr_tail[:500]
+
+    def _clear_runtime_error_details(self) -> None:
+        self._last_runtime_error_kind = ""
+        self._last_runtime_stdout_tail = ""
+        self._last_runtime_stderr_tail = ""
+
 
 def _terminate_process_group(pid: int) -> None:
     if pid <= 0:
@@ -224,3 +273,51 @@ def _terminate_process_group(pid: int) -> None:
         except PermissionError:
             return
         time.sleep(0.1)
+
+
+def _normalize_process_output(stream: Any) -> str:
+    if stream is None:
+        return ""
+    if hasattr(stream, "read"):
+        try:
+            data = stream.read()
+        except Exception:
+            return ""
+    else:
+        data = stream
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
+def _format_runtime_error(
+    *,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None = None,
+    timeout_seconds: int | None = None,
+) -> str:
+    details: list[str] = []
+    if timeout_seconds is not None:
+        details.append(f"Codex CLI timed out after {timeout_seconds}s.")
+    elif exit_code is not None:
+        details.append(f"Codex CLI exited with code {exit_code}.")
+
+    stderr_tail = _tail_text(stderr)
+    stdout_tail = _tail_text(stdout)
+    if stderr_tail:
+        details.append(f"stderr tail: {stderr_tail}")
+    if stdout_tail:
+        details.append(f"stdout tail: {stdout_tail}")
+    if len(details) == 1:
+        details.append("No stdout/stderr output captured.")
+    return " ".join(details).strip()
+
+
+def _tail_text(text: str, *, limit: int = 500) -> str:
+    cleaned = " ".join((text or "").strip().split())
+    if not cleaned:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[-limit:]

@@ -5,7 +5,13 @@ import argparse
 import json
 import sqlite3
 from pathlib import Path
+import sys
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[3]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from flow_healer.healer_triage import classify_issue_route
 
@@ -50,6 +56,9 @@ def main() -> int:
         "diagnosis": route.diagnosis,
         "recommended_skill": route.recommended_skill,
         "default_action": route.default_action,
+        "stop_recommended": route.stop_recommended,
+        "stop_reason": route.stop_reason,
+        "connector_debug_focus": route.connector_debug_focus,
     }
     print(json.dumps(report, indent=2, default=str))
     return 0 if issue is not None else 1

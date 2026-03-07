@@ -37,11 +37,17 @@ class SkillContractSnapshot:
     relative_path: str
     has_script: bool
     scripts: tuple[str, ...]
+    input_fields: tuple[str, ...]
+    has_default_command: bool
+    default_command_preview: str
     documented_output_fields: tuple[str, ...]
     script_output_fields: tuple[str, ...]
     script_output_alignment: bool
     key_output_fields: tuple[str, ...]
     next_step_preview: str
+    has_stop_conditions: bool
+    stop_condition_preview: str
+    stop_conditions: tuple[str, ...]
     sections_complete: bool
 
 
@@ -218,6 +224,11 @@ def audit_skill_contracts(root: Path | None = None) -> dict[str, object]:
     )
     recommended = {diagnosis: recommended_skill_for_diagnosis(diagnosis) for diagnosis in diagnoses}
     default_actions = {diagnosis: default_action_for_diagnosis(diagnosis) for diagnosis in diagnoses}
+    diagnosis_playbooks = {
+        diagnosis: skill_playbook(recommended.get(diagnosis, ""), base)
+        for diagnosis in diagnoses
+        if recommended.get(diagnosis, "")
+    }
     graph = [
         "flow-healer-local-validation",
         "flow-healer-preflight",
@@ -243,17 +254,24 @@ def audit_skill_contracts(root: Path | None = None) -> dict[str, object]:
         "operator_graph": graph,
         "default_action_by_diagnosis": default_actions,
         "recommended_skill_by_diagnosis": recommended,
+        "diagnosis_playbooks": diagnosis_playbooks,
         "skills": [
             {
                 "skill": snapshot.skill,
                 "relative_path": snapshot.relative_path,
                 "has_script": snapshot.has_script,
                 "scripts": list(snapshot.scripts),
+                "input_fields": list(snapshot.input_fields),
+                "has_default_command": snapshot.has_default_command,
+                "default_command_preview": snapshot.default_command_preview,
                 "documented_output_fields": list(snapshot.documented_output_fields),
                 "script_output_fields": list(snapshot.script_output_fields),
                 "script_output_alignment": snapshot.script_output_alignment,
                 "key_output_fields": list(snapshot.key_output_fields),
                 "next_step_preview": snapshot.next_step_preview,
+                "has_stop_conditions": snapshot.has_stop_conditions,
+                "stop_condition_preview": snapshot.stop_condition_preview,
+                "stop_conditions": list(snapshot.stop_conditions),
                 "sections_complete": snapshot.sections_complete,
             }
             for snapshot in snapshots
@@ -261,13 +279,50 @@ def audit_skill_contracts(root: Path | None = None) -> dict[str, object]:
     }
 
 
+def skill_playbook(skill: str, root: Path | None = None) -> dict[str, object]:
+    base = (root or repo_root()).expanduser().resolve()
+    target = str(skill or "").strip()
+    if not target:
+        return {}
+    for contract in expected_skill_contracts():
+        if contract.name != target:
+            continue
+        skill_path = base / contract.relative_path
+        if not skill_path.exists():
+            return {}
+        text = skill_path.read_text(encoding="utf-8")
+        snapshot = _skill_snapshot(base=base, contract=contract, text=text)
+        return {
+            "skill": snapshot.skill,
+            "relative_path": snapshot.relative_path,
+            "has_script": snapshot.has_script,
+            "scripts": list(snapshot.scripts),
+            "input_fields": list(snapshot.input_fields),
+            "documented_output_fields": list(snapshot.documented_output_fields),
+            "script_output_fields": list(snapshot.script_output_fields),
+            "key_output_fields": list(snapshot.key_output_fields),
+            "has_default_command": snapshot.has_default_command,
+            "default_command_preview": snapshot.default_command_preview,
+            "next_step_preview": snapshot.next_step_preview,
+            "has_stop_conditions": snapshot.has_stop_conditions,
+            "stop_condition_preview": snapshot.stop_condition_preview,
+            "stop_conditions": list(snapshot.stop_conditions),
+            "sections_complete": snapshot.sections_complete,
+            "script_output_alignment": snapshot.script_output_alignment,
+        }
+    return {}
+
+
 def _skill_snapshot(*, base: Path, contract: SkillContract, text: str) -> SkillContractSnapshot:
     skill_dir = (base / contract.relative_path).parent
     script_paths = tuple(path for path in sorted(skill_dir.glob("scripts/*.py")) if path.is_file())
     scripts = tuple(str(path.relative_to(base)) for path in script_paths)
-    documented_output_fields = _inline_code_tokens(_section_body(text, "## Outputs"))
+    input_fields = _section_fields(_section_body(text, "## Inputs"))
+    default_command_body = _section_body(text, "## Default Command")
+    stop_conditions_body = _section_body(text, "## Stop Conditions")
+    documented_output_fields = _section_fields(_section_body(text, "## Outputs"))
     script_output_fields = _script_output_fields(script_paths)
-    key_output_fields = _inline_code_tokens(_section_body(text, "## Key Output Fields"))
+    key_output_fields = _section_fields(_section_body(text, "## Key Output Fields"))
     next_step_preview = _first_content_line(_section_body(text, "## Next Step"))
     sections_complete = all(_section_body(text, section) for section in _COMMON_CONTRACT_SECTIONS)
     return SkillContractSnapshot(
@@ -275,6 +330,9 @@ def _skill_snapshot(*, base: Path, contract: SkillContract, text: str) -> SkillC
         relative_path=contract.relative_path,
         has_script=bool(scripts),
         scripts=scripts,
+        input_fields=input_fields,
+        has_default_command=bool(default_command_body.strip()),
+        default_command_preview=_command_preview(default_command_body),
         documented_output_fields=documented_output_fields,
         script_output_fields=script_output_fields,
         script_output_alignment=_documented_outputs_align(
@@ -284,6 +342,9 @@ def _skill_snapshot(*, base: Path, contract: SkillContract, text: str) -> SkillC
         ),
         key_output_fields=key_output_fields,
         next_step_preview=next_step_preview,
+        has_stop_conditions=bool(stop_conditions_body.strip()),
+        stop_condition_preview=_first_content_line(stop_conditions_body),
+        stop_conditions=_content_lines(stop_conditions_body),
         sections_complete=sections_complete,
     )
 
@@ -307,6 +368,13 @@ def _section_body(text: str, heading: str) -> str:
 def _inline_code_tokens(text: str) -> tuple[str, ...]:
     tokens = re.findall(r"`([^`]+)`", text or "")
     return tuple(token for token in tokens if token)
+
+
+def _section_fields(text: str) -> tuple[str, ...]:
+    inline = _inline_code_tokens(text)
+    if inline:
+        return inline
+    return _content_lines(text)
 
 
 def _script_output_fields(script_paths: tuple[Path, ...]) -> tuple[str, ...]:
@@ -388,9 +456,29 @@ def _missing_documented_outputs(snapshot: SkillContractSnapshot) -> tuple[str, .
 
 
 def _first_content_line(text: str) -> str:
+    lines = _content_lines(text)
+    return lines[0] if lines else ""
+
+
+def _content_lines(text: str) -> tuple[str, ...]:
+    lines: list[str] = []
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        return line.lstrip("- ").strip()
+        lines.append(line.lstrip("- ").strip())
+    return tuple(lines)
+
+
+def _command_preview(text: str) -> str:
+    in_fence = False
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or line:
+            return line.lstrip("- ").strip()
     return ""

@@ -34,6 +34,12 @@ _FLOW_COMMENT_PERSONA = (
     "and always sign off with '-- Flow 🌊'."
 )
 _INFRA_FAILURE_CLASSES = {"connector_unavailable", "connector_runtime_error"}
+_ALWAYS_REQUEUE_FAILURE_CLASSES = {
+    "no_patch",
+    "no_workspace_change",
+    "patch_apply_failed",
+    "no_code_diff",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -819,8 +825,17 @@ class AutonomousHealerLoop:
         failure_class: str,
         failure_reason: str,
     ) -> str:
-        if failure_class in _INFRA_FAILURE_CLASSES:
-            delay = max(15, min(300, int(self.settings.healer_backoff_initial_seconds)))
+        is_infra = failure_class in _INFRA_FAILURE_CLASSES
+        is_always_requeue = is_infra or (failure_class in _ALWAYS_REQUEUE_FAILURE_CLASSES)
+
+        if is_always_requeue:
+            if is_infra:
+                delay = max(15, min(300, int(self.settings.healer_backoff_initial_seconds)))
+            else:
+                delay = min(
+                    self.settings.healer_backoff_max_seconds,
+                    self.settings.healer_backoff_initial_seconds * (2 ** max(0, attempt_no - 1)),
+                )
             backoff_until = (datetime.now(UTC) + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
             self.store.set_healer_issue_state(
                 issue_id=issue_id,
@@ -830,15 +845,30 @@ class AutonomousHealerLoop:
                 last_failure_reason=failure_reason[:500],
                 clear_lease=True,
             )
-            now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-            self.store.set_state("healer_connector_last_error_class", failure_class)
-            self.store.set_state("healer_connector_last_error_reason", failure_reason[:500])
-            self.store.set_state("healer_connector_last_error_at", now_str)
+            if is_infra:
+                now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+                self.store.set_state("healer_connector_last_error_class", failure_class)
+                self.store.set_state("healer_connector_last_error_reason", failure_reason[:500])
+                self.store.set_state("healer_connector_last_error_at", now_str)
             logger.info(
-                "Issue #%s requeued due to infra failure (%s) with backoff until %s",
+                "Issue #%s requeued after attempt %s with backoff until %s (%s)",
                 issue_id,
-                failure_class,
+                attempt_no,
                 backoff_until,
+                failure_class,
+            )
+            self._post_issue_status(
+                issue_id=issue_id,
+                body=self._format_flow_status_comment(
+                    "Auto-retrying this one 🔁",
+                    "This failure class is configured to requeue automatically.",
+                    [
+                        f"Attempt: `{attempt_no}`",
+                        f"Failure class: `{failure_class}`",
+                        f"Reason: {failure_reason}",
+                        f"Next retry not before: `{backoff_until} UTC`",
+                    ],
+                ),
             )
             return "queued"
 
@@ -872,11 +902,25 @@ class AutonomousHealerLoop:
             clear_lease=True,
         )
         logger.info(
-            "Issue #%s requeued after attempt %s with backoff until %s (%s)",
-            issue_id,
-            attempt_no,
-            backoff_until,
-            failure_class,
+                "Issue #%s requeued after attempt %s with backoff until %s (%s)",
+                issue_id,
+                attempt_no,
+                backoff_until,
+                failure_class,
+            )
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Queueing another pass 🔁",
+                "This attempt failed, but we're still under retry budget.",
+                [
+                    f"Attempt: `{attempt_no}`",
+                    f"Failure class: `{failure_class}`",
+                    f"Reason: {failure_reason}",
+                    f"Next retry not before: `{backoff_until} UTC`",
+                    f"Retry budget: `{self.settings.healer_retry_budget}`",
+                ],
+            ),
         )
         return "queued"
 

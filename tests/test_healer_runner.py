@@ -73,6 +73,7 @@ class _RetryConnector:
         self.outputs = list(outputs)
         self.reset_calls: list[str] = []
         self.turns: list[tuple[str, str]] = []
+        self.timeouts: list[int | None] = []
 
     def get_or_create_thread(self, sender: str) -> str:
         return sender
@@ -81,8 +82,9 @@ class _RetryConnector:
         self.reset_calls.append(sender)
         return sender
 
-    def run_turn(self, thread_id: str, prompt: str) -> str:
+    def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
         self.turns.append((thread_id, prompt))
+        self.timeouts.append(timeout_seconds)
         return self.outputs.pop(0)
 
     def ensure_started(self) -> None:
@@ -97,7 +99,7 @@ class _WorkspaceEditingConnector(_RetryConnector):
         super().__init__(outputs)
         self.workspace = workspace
 
-    def run_turn(self, thread_id: str, prompt: str) -> str:
+    def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
         self.turns.append((thread_id, prompt))
         (self.workspace / "docs").mkdir(exist_ok=True)
         (self.workspace / "docs" / "create-plan-docs.md").write_text("Synthesized plan\n", encoding="utf-8")
@@ -156,6 +158,108 @@ def test_run_attempt_retries_after_patch_apply_failure(monkeypatch, tmp_path):
     assert connector.reset_calls == ["healer:123"]
     assert len(connector.turns) == 2
     assert "Previous proposer output was unusable." in connector.turns[1][1]
+
+
+def test_run_attempt_uses_longer_turn_timeout_for_code_change(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Flow Healer Test"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "flow-healer@example.com"], cwd=workspace, check=True, capture_output=True, text=True)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    runner = HealerRunner(connector, timeout_seconds=300, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="1241",
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.py and pass tests.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert connector.timeouts == [900]
+
+
+def test_run_attempt_rejects_docs_only_diff_for_code_change_task(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Flow Healer Test"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "flow-healer@example.com"], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    docs_patch = (
+        "```diff\n"
+        "diff --git a/docs/notes.md b/docs/notes.md\n"
+        "new file mode 100644\n"
+        "index 0000000..1234567\n"
+        "--- /dev/null\n"
+        "+++ b/docs/notes.md\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+# Notes\n"
+        "+This is docs-only output.\n"
+        "```\n"
+    )
+    connector = _RetryConnector([docs_patch, docs_patch, docs_patch, docs_patch])
+    runner = HealerRunner(connector, timeout_seconds=60, test_gate_mode="local_only")
+
+    result = runner.run_attempt(
+        issue_id="1242",
+        issue_title="Implement feature",
+        issue_body="Implement a feature with real code updates.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_code_diff"
 
 
 def test_run_attempt_skips_test_gate_for_artifact_only_issue(monkeypatch, tmp_path):
@@ -247,7 +351,7 @@ def test_run_attempt_includes_task_contract_in_prompt(tmp_path):
 
 
 def test_run_attempt_marks_input_specs_as_context_in_prompt(tmp_path):
-    connector = _RetryConnector(["not a patch", "still not a patch"])
+    connector = _RetryConnector(["not a patch"] * 5)
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
     workspace = tmp_path / "repo"
     workspace.mkdir()

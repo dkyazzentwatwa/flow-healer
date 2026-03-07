@@ -66,10 +66,16 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "configured_command" in connector
     assert "resolved_command" in connector
     assert "last_error_class" in connector
+    assert "last_runtime_error_kind" in connector
+    assert "last_runtime_stdout_tail" in connector
+    assert "last_runtime_stderr_tail" in connector
     recent_attempt = rows[0]["recent_attempts"][0]
     assert recent_attempt["diagnosis"] == "operator_or_environment"
     assert recent_attempt["recommended_skill"] == "flow-healer-local-validation"
     assert recent_attempt["default_action"]
+    assert recent_attempt["stop_recommended"] is True
+    assert recent_attempt["stop_reason"]
+    assert recent_attempt["connector_debug_focus"] == ""
 
 
 def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
@@ -89,9 +95,20 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert rows[0]["circuit_breaker_cooldown_remaining_seconds"] == 0
     assert "connector_command" in rows[0]
     assert "launchd_path_has_connector" in rows[0]
+    assert "connector_last_health_error" in rows[0]
+    assert "connector_last_runtime_error_kind" in rows[0]
+    assert "connector_last_runtime_stdout_tail" in rows[0]
+    assert "connector_last_runtime_stderr_tail" in rows[0]
     assert rows[0]["skill_contracts_ok"] is True
     assert rows[0]["skill_contracts"]["recommended_skill_by_diagnosis"]["connector_or_patch_generation"] == (
         "flow-healer-connector-debug"
     )
+    connector_playbook = rows[0]["skill_contracts"]["diagnosis_playbooks"]["connector_or_patch_generation"]
+    assert connector_playbook["skill"] == "flow-healer-connector-debug"
+    assert connector_playbook["next_step_preview"]
     assert rows[0]["skill_contracts"]["default_action_by_diagnosis"]["repo_fixture_or_setup"].startswith("Repair")
-    assert any(skill["skill"] == "flow-healer-triage" for skill in rows[0]["skill_contracts"]["skills"])
+    triage = next(skill for skill in rows[0]["skill_contracts"]["skills"] if skill["skill"] == "flow-healer-triage")
+    preflight = next(skill for skill in rows[0]["skill_contracts"]["skills"] if skill["skill"] == "flow-healer-preflight")
+    assert triage["has_default_command"] is True
+    assert triage["has_stop_conditions"] is False
+    assert preflight["has_stop_conditions"] is True
