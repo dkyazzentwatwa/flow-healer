@@ -25,6 +25,19 @@ test("completeTodo is stable when the same todo is completed repeatedly", () => 
   assert.deepEqual(second, first);
 });
 
+test("completeTodo fills in a missing completion timestamp once", () => {
+  resetTodosForTests([
+    { id: "a", title: "One", completed: true, completedAt: null },
+  ]);
+
+  const first = completeTodo("a");
+  const second = completeTodo("a");
+
+  assert.equal(first?.completed, true);
+  assert.equal(typeof first?.completedAt, "string");
+  assert.deepEqual(second, first);
+});
+
 test("completeTodo returns null when the todo does not exist", () => {
   resetTodosForTests([]);
 

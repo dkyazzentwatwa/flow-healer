@@ -10,7 +10,8 @@ function json(body, init) {
 }
 
 export async function POST(_request, { params }) {
-  const todo = completeTodo(params.id);
+  const { id } = await params;
+  const todo = completeTodo(id);
 
   if (!todo) {
     return json({ error: "Todo not found" }, { status: 404 });

@@ -19,6 +19,16 @@ function cloneTodo(todo) {
   return { ...todo };
 }
 
+function ensureCompletionState(todo) {
+  if (!todo.completed) {
+    todo.completed = true;
+  }
+
+  if (!todo.completedAt) {
+    todo.completedAt = new Date().toISOString();
+  }
+}
+
 export function listTodos() {
   return todos.map(cloneTodo);
 }
@@ -30,10 +40,7 @@ export function completeTodo(id) {
     return null;
   }
 
-  if (!todo.completed) {
-    todo.completed = true;
-    todo.completedAt = new Date().toISOString();
-  }
+  ensureCompletionState(todo);
 
   return cloneTodo(todo);
 }
