@@ -384,7 +384,7 @@ class AutonomousHealerLoop:
             issue_id = str(row.get("issue_id") or "")
             if not issue_id:
                 continue
-            if not self.tracker.issue_has_label(
+            if not self._issue_has_label(
                 issue_id=issue_id,
                 label=self.settings.healer_pr_required_label,
             ):
@@ -604,7 +604,7 @@ class AutonomousHealerLoop:
 
             if (
                 self.settings.healer_pr_actions_require_approval
-                and not self.tracker.issue_has_label(
+                and not self._issue_has_label(
                     issue_id=issue.issue_id,
                     label=self.settings.healer_pr_required_label,
                 )
@@ -770,11 +770,7 @@ class AutonomousHealerLoop:
             return True
 
         remote_state = str(snapshot.get("state") or "").strip().lower()
-        remote_labels = {
-            str(label).strip()
-            for label in (snapshot.get("labels") or [])
-            if str(label).strip()
-        }
+        remote_labels = self._normalize_labels(snapshot.get("labels") or [])
         if remote_state and remote_state != "open":
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
@@ -787,7 +783,11 @@ class AutonomousHealerLoop:
             logger.info("Skipping issue #%s because GitHub issue is %s.", issue.issue_id, remote_state)
             return False
 
-        required_labels = [label for label in self.settings.healer_issue_required_labels if label.strip()]
+        required_labels = {
+            label.strip().lower()
+            for label in self.settings.healer_issue_required_labels
+            if label.strip()
+        }
         missing_labels = [label for label in required_labels if label not in remote_labels]
         if missing_labels:
             self.store.set_healer_issue_state(
@@ -804,6 +804,34 @@ class AutonomousHealerLoop:
             )
             return False
         return True
+
+    @staticmethod
+    def _normalize_labels(raw_labels: object) -> set[str]:
+        normalized: set[str] = set()
+        for entry in raw_labels or []:
+            if isinstance(entry, dict):
+                entry = entry.get("name", "")
+            value = str(entry or "").strip()
+            if value:
+                normalized.add(value.lower())
+        return normalized
+
+    def _issue_has_label(self, *, issue_id: str, label: str) -> bool:
+        raw_label = str(label or "").strip()
+        if not raw_label:
+            return False
+
+        target = raw_label.lower()
+        try:
+            snapshot = self.tracker.get_issue(issue_id=issue_id)
+        except Exception:
+            return self.tracker.issue_has_label(issue_id=issue_id, label=raw_label)
+
+        if isinstance(snapshot, dict):
+            labels = self._normalize_labels(snapshot.get("labels") or [])
+            return target in labels
+
+        return self.tracker.issue_has_label(issue_id=issue_id, label=raw_label)
 
     def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
