@@ -27,7 +27,11 @@ class DomainService:
         return self.repository.add(todo)
 
     def complete_todo(self, todo_id: str) -> TodoRecord:
-        todo = self.repository.get(todo_id)
+        try:
+            todo = self.repository.get(todo_id)
+        except KeyError as exc:
+            raise self._todo_not_found(todo_id) from exc
+
         if todo is None:
             raise self._todo_not_found(todo_id)
 

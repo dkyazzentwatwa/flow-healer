@@ -45,6 +45,21 @@ def test_complete_todo_raises_not_found_for_unknown_todo() -> None:
         raise AssertionError("Expected unknown todo completion to raise TodoNotFoundError")
 
 
+def test_complete_todo_raises_not_found_when_lookup_cannot_find_todo() -> None:
+    class MissingOnGetRepository(TodoRepository):
+        def get(self, todo_id: str) -> TodoRecord | None:
+            raise KeyError(todo_id)
+
+    service = DomainService(MissingOnGetRepository())
+
+    try:
+        service.complete_todo("todo-404")
+    except TodoNotFoundError as exc:
+        assert str(exc) == "Todo 'todo-404' was not found."
+    else:
+        raise AssertionError("Expected lookup miss to raise TodoNotFoundError")
+
+
 def test_complete_todo_raises_not_found_when_update_cannot_find_todo() -> None:
     class MissingOnUpdateRepository(TodoRepository):
         def get(self, todo_id: str) -> TodoRecord | None:

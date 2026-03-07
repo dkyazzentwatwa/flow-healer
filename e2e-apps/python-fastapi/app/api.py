@@ -52,9 +52,4 @@ def complete_todo(todo_id: str) -> dict[str, object]:
         todo = service.complete_todo(todo_id)
     except TodoNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Todo '{todo_id}' was not found.",
-        ) from exc
     return asdict(todo)
