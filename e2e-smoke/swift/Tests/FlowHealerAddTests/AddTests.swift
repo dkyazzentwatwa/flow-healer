@@ -9,3 +9,8 @@ import Testing
 @Test func addReturnsZeroForZeroInputs() {
     #expect(add(0, 0) == 0)
 }
+
+@Test func addAddsNegativeNumbers() {
+    #expect(add(-2, -3) == -5)
+    #expect(add(-2, 3) == 1)
+}
