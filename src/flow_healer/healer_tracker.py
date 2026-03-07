@@ -41,6 +41,7 @@ class PullRequestDetails:
     html_url: str
     mergeable_state: str
     author: str
+    head_ref: str = ""
 
 
 class GitHubHealerTracker:
@@ -318,6 +319,7 @@ class GitHubHealerTracker:
             html_url=str(payload.get("html_url") or ""),
             mergeable_state=str(payload.get("mergeable_state") or "").strip().lower(),
             author=str((payload.get("user") or {}).get("login") or "").strip(),
+            head_ref=str(payload.get("head", {}).get("ref", "") or "").strip(),
         )
 
     def add_pr_comment(self, *, pr_number: int, body: str) -> bool:

@@ -102,6 +102,7 @@ class HealerMemoryService:
             "failure_class": failure_class,
             "failure_reason": (failure_reason or "")[:200],
         }
+        test_output_excerpt = str(test_summary.get("output_tail", "") or "").strip()[:200]
         lesson_text = self._build_lesson_text(
             outcome=outcome,
             title=title,
@@ -110,6 +111,7 @@ class HealerMemoryService:
             failure_reason=failure_reason,
             verifier_summary=str(verifier_summary.get("summary") or ""),
             test_hint=test_hint,
+            test_output_excerpt=test_output_excerpt,
         )
         fingerprint_basis = "|".join(
             [
@@ -147,6 +149,7 @@ class HealerMemoryService:
         task_kind: str = "",
         validation_profile: str = "",
         output_targets: list[str] | tuple[str, ...] | None = None,
+        issue_id: str = "",
         limit: int = 3,
     ) -> str:
         lessons = self.retrieve_lessons(
@@ -156,17 +159,27 @@ class HealerMemoryService:
             task_kind=task_kind,
             validation_profile=validation_profile,
             output_targets=output_targets,
+            issue_id=issue_id,
             limit=limit,
         )
         if not lessons:
             return ""
         if hasattr(self.store, "mark_healer_lessons_used"):
             self.store.mark_healer_lessons_used([lesson.lesson_id for lesson in lessons])
-        lines = ["Relevant prior healer lessons:"]
+        lines = ["## Prior healer lessons for this area"]
+        follow_lines: list[str] = []
+        avoid_lines: list[str] = []
         for lesson in lessons:
-            lines.append(f"- {lesson.lesson_text}")
+            prefix = "FOLLOW" if lesson.lesson_kind == "successful_fix" else "AVOID"
+            entry = f"- **{prefix}:** {lesson.lesson_text}"
             if lesson.test_hint:
-                lines.append(f"  Test hint: {lesson.test_hint}")
+                entry += f"\n  Test hint: {lesson.test_hint}"
+            if prefix == "FOLLOW":
+                follow_lines.append(entry)
+            else:
+                avoid_lines.append(entry)
+        lines.extend(follow_lines)
+        lines.extend(avoid_lines)
         return "\n".join(lines)
 
     def retrieve_lessons(
@@ -178,6 +191,7 @@ class HealerMemoryService:
         task_kind: str = "",
         validation_profile: str = "",
         output_targets: list[str] | tuple[str, ...] | None = None,
+        issue_id: str = "",
         limit: int = 3,
     ) -> list[RetrievedHealerLesson]:
         if not self.enabled or not hasattr(self.store, "list_healer_lessons"):
@@ -235,6 +249,8 @@ class HealerMemoryService:
             score += int(row.get("confidence") or 0) // 20
             if str(row.get("outcome") or "") == "success":
                 score += 2
+            if issue_id and str(row.get("issue_id") or "") == issue_id:
+                score += 10
 
             if predicted_keys and overlap_count == 0 and term_overlap < 2:
                 continue
@@ -292,6 +308,7 @@ class HealerMemoryService:
         failure_reason: str,
         verifier_summary: str,
         test_hint: str,
+        test_output_excerpt: str = "",
     ) -> str:
         short_title = title[:100] or "similar healer issues"
         if outcome == "success":
@@ -316,6 +333,10 @@ class HealerMemoryService:
         reason = (failure_reason or "").strip()
         if reason:
             mapped = f"{mapped} Recent failure signal: {reason[:120]}."
+        if failure_class == "tests_failed" and test_output_excerpt:
+            mapped = f"{mapped} Test output: {test_output_excerpt[:200]}"
+        if failure_class == "verifier_failed" and verifier_summary:
+            mapped = f"{mapped} Verifier note: {verifier_summary[:200]}"
         if test_hint:
             mapped = f"{mapped} {test_hint}"
         return f"Guardrail from '{short_title}': {mapped}"

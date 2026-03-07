@@ -22,14 +22,15 @@ from .healer_runner import HealerRunner, _stage_workspace_changes
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue
 from .healer_task_spec import compile_task_spec
-from .language_detector import detect_language
 from .healer_verifier import HealerVerifier
 from .protocols import ConnectorProtocol
 from .store import SQLiteStore
 
 logger = logging.getLogger("apple_flow.healer_loop")
 
-_TARGETED_TEST_RE = re.compile(r"\btests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py\b")
+_TARGETED_TEST_RE = re.compile(
+    r"\b(?:tests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py|spec/[A-Za-z0-9_./\-]*_spec\.rb)\b"
+)
 _FLOW_COMMENT_PERSONA = (
     "Laid-back tech bro vibes, light emoji use, concise status updates, "
     "and always sign off with '-- Flow 🌊'."
@@ -44,6 +45,14 @@ _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "no_code_diff",
 }
 _STUCK_PR_STATES = {"blocked", "has_failure", "behind"}
+
+_FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
+    "tests_failed":          {"backoff_multiplier": 0.5, "feedback_hint": "Previous attempt's tests failed. Focus on the failing test output and adjust the fix."},
+    "verifier_failed":       {"backoff_multiplier": 1.5, "feedback_hint": "The verifier rejected the previous fix. Address the root cause, not symptoms."},
+    "push_failed":           {"backoff_multiplier": 2.0, "feedback_hint": "Push failed on last attempt, likely transient."},
+    "pr_open_failed":        {"backoff_multiplier": 2.0, "feedback_hint": "Could not open PR last time."},
+    "lock_upgrade_conflict": {"backoff_multiplier": 1.0, "feedback_hint": "Previous fix expanded beyond predicted scope. Keep changes narrow."},
+}
 
 
 def _minutes_since(timestamp_str: str) -> float:
@@ -338,7 +347,11 @@ class AutonomousHealerLoop:
 
             if pr_state == "conflict":
                 if not self._is_conflict_blocked_row(row, pr_number=pr_number):
-                    self._block_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
+                    auto_resolve = getattr(self.settings, "healer_auto_resolve_conflicts", True)
+                    if auto_resolve and self._attempt_conflict_resolution(issue_id=issue_id, pr_number=pr_number, row=row):
+                        resolved += 1
+                    else:
+                        self._block_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
                 continue
 
             if pr_state == "closed" and current_pr_state == "conflict":
@@ -457,6 +470,166 @@ class AutonomousHealerLoop:
                 outro="Resolve the conflicts in that PR, or close it if you want me to queue a fresh attempt.",
             ),
         )
+
+    def _attempt_conflict_resolution(self, *, issue_id: str, pr_number: int, row: dict) -> bool:
+        """Try to automatically resolve merge conflicts via rebase + AI-assisted resolution."""
+        workspace_path = str(row.get("workspace_path") or "").strip()
+        if not workspace_path or not Path(workspace_path).is_dir():
+            return False
+        issue_snapshot = row or {}
+        if not str(issue_snapshot.get("title") or "").strip():
+            issue_snapshot = self.store.get_healer_issue(issue_id) or row
+        issue_title = str(issue_snapshot.get("title") or "").strip()
+        issue_body = str(issue_snapshot.get("body") or "").strip()
+        task_spec = compile_task_spec(issue_title=issue_title, issue_body=issue_body)
+        resolved_execution = self.runner.resolve_execution(workspace=Path(workspace_path), task_spec=task_spec)
+        targeted_tests = _collect_targeted_tests(
+            issue_body=issue_body,
+            output_targets=list(task_spec.output_targets),
+            workspace=Path(workspace_path),
+            language=resolved_execution.language_effective,
+            execution_root=resolved_execution.execution_root,
+        )
+        pr_details = self.tracker.get_pr_details(pr_number=pr_number)
+        if pr_details is None or not pr_details.head_ref:
+            return False
+        head_ref = pr_details.head_ref
+        repo_path = Path(self.settings.healer_repo_path).resolve()
+        base_branch = self._detect_base_branch(repo_path)
+
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin"],
+                cwd=workspace_path, capture_output=True, text=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "checkout", head_ref],
+                cwd=workspace_path, capture_output=True, text=True, timeout=30,
+            )
+            rebase = subprocess.run(
+                ["git", "rebase", f"origin/{base_branch}"],
+                cwd=workspace_path, capture_output=True, text=True, timeout=120,
+            )
+            if rebase.returncode == 0:
+                test_summary = self.runner.validate_workspace(
+                    Path(workspace_path),
+                    task_spec=task_spec,
+                    targeted_tests=targeted_tests,
+                )
+                if int(test_summary.get("failed_tests", 0)) > 0:
+                    subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                    return False
+                push = subprocess.run(
+                    ["git", "push", "--force-with-lease"],
+                    cwd=workspace_path, capture_output=True, text=True, timeout=60,
+                )
+                if push.returncode == 0:
+                    self.tracker.add_pr_comment(
+                        pr_number=pr_number,
+                        body="Merge conflicts resolved automatically via clean rebase.",
+                    )
+                    logger.info("Issue #%s: clean rebase resolved conflicts for PR #%d", issue_id, pr_number)
+                    return True
+                subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                return False
+
+            # Rebase had conflicts — try AI-assisted resolution
+            conflict_check = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=workspace_path, capture_output=True, text=True, timeout=30,
+            )
+            conflicted_files = [f.strip() for f in conflict_check.stdout.strip().splitlines() if f.strip()]
+            if not conflicted_files or len(conflicted_files) > 5:
+                subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                return False
+
+            thread_id = self.connector.get_or_create_thread(f"conflict-{issue_id}")
+            for filepath in conflicted_files:
+                full_path = Path(workspace_path) / filepath
+                if not full_path.is_file():
+                    subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                    return False
+                conflict_content = full_path.read_text(encoding="utf-8", errors="replace")
+                prompt = (
+                    f"Resolve the merge conflicts in this file. Return ONLY the resolved file content, "
+                    f"no explanations or fences.\n\nFile: {filepath}\n\n{conflict_content}"
+                )
+                try:
+                    resolved = self.connector.run_turn(thread_id, prompt, timeout_seconds=120)
+                except Exception:
+                    subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                    return False
+                resolved_text = resolved.strip()
+                if not resolved_text or "<<<<<<<" in resolved_text or ">>>>>>>" in resolved_text:
+                    subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                    return False
+                full_path.write_text(resolved_text, encoding="utf-8")
+                subprocess.run(["git", "add", filepath], cwd=workspace_path, capture_output=True, timeout=10)
+
+            cont = subprocess.run(
+                ["git", "-c", "core.editor=true", "rebase", "--continue"],
+                cwd=workspace_path, capture_output=True, text=True, timeout=60,
+            )
+            if cont.returncode != 0:
+                subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+                return False
+
+            test_summary = self.runner.validate_workspace(
+                Path(workspace_path),
+                task_spec=task_spec,
+                targeted_tests=targeted_tests,
+            )
+            if int(test_summary.get("failed_tests", 0)) > 0:
+                subprocess.run(
+                    ["git", "rebase", "--abort"],
+                    cwd=workspace_path, capture_output=True, timeout=10,
+                )
+                # Reset to pre-rebase state
+                subprocess.run(
+                    ["git", "reset", "--hard", f"origin/{head_ref}"],
+                    cwd=workspace_path, capture_output=True, timeout=30,
+                )
+                return False
+
+            push = subprocess.run(
+                ["git", "push", "--force-with-lease"],
+                cwd=workspace_path, capture_output=True, text=True, timeout=60,
+            )
+            if push.returncode != 0:
+                subprocess.run(
+                    ["git", "reset", "--hard", f"origin/{head_ref}"],
+                    cwd=workspace_path, capture_output=True, timeout=30,
+                )
+                return False
+
+            self.tracker.add_pr_comment(
+                pr_number=pr_number,
+                body="Merge conflicts resolved automatically via AI-assisted rebase.",
+            )
+            logger.info("Issue #%s: AI-resolved conflicts for PR #%d", issue_id, pr_number)
+            return True
+
+        except Exception as exc:
+            logger.warning("Issue #%s: conflict resolution failed: %s", issue_id, exc)
+            try:
+                subprocess.run(["git", "rebase", "--abort"], cwd=workspace_path, capture_output=True, timeout=10)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def _detect_base_branch(repo_path: Path) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                cwd=str(repo_path), capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                ref = result.stdout.strip()
+                return ref.rsplit("/", 1)[-1] if "/" in ref else ref
+        except Exception:
+            pass
+        return "main"
 
     def _requeue_closed_conflicted_pr(self, *, issue_id: str, pr_number: int) -> None:
         self.store.set_healer_issue_state(
@@ -739,12 +912,11 @@ class AutonomousHealerLoop:
                 workspace_path=workspace.path,
                 branch=workspace.branch,
             )
-            detected_language = detect_language(workspace.path)
             task_spec = compile_task_spec(
                 issue_title=issue.title,
                 issue_body=issue.body,
-                language=detected_language,
             )
+            resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
                 state="running",
@@ -779,7 +951,8 @@ class AutonomousHealerLoop:
                 issue_body=issue.body,
                 output_targets=list(task_spec.output_targets),
                 workspace=workspace.path,
-                language=detected_language,
+                language=resolved_execution.language_effective,
+                execution_root=resolved_execution.execution_root,
             )
             learned_context = self.memory.build_prompt_context(
                 issue_text=f"{issue.title}\n{issue.body}",
@@ -788,6 +961,7 @@ class AutonomousHealerLoop:
                 task_kind=task_spec.task_kind,
                 validation_profile=task_spec.validation_profile,
                 output_targets=list(task_spec.output_targets),
+                issue_id=issue.issue_id,
             )
             feedback_context = str(row.get("feedback_context") or "").strip()
             run_result = self.runner.run_attempt(
@@ -1233,6 +1407,10 @@ class AutonomousHealerLoop:
             self.settings.healer_backoff_max_seconds,
             self.settings.healer_backoff_initial_seconds * (2 ** max(0, attempt_no - 1)),
         )
+        strategy = _FAILURE_CLASS_STRATEGY.get(failure_class, {})
+        multiplier = float(strategy.get("backoff_multiplier", 1.0))
+        delay = max(15, int(delay * multiplier))
+        feedback_hint = str(strategy.get("feedback_hint", "")).strip()
         backoff_until = (datetime.now(UTC) + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
         self.store.set_healer_issue_state(
             issue_id=issue_id,
@@ -1240,6 +1418,7 @@ class AutonomousHealerLoop:
             backoff_until=backoff_until,
             last_failure_class=failure_class,
             last_failure_reason=failure_reason[:500],
+            feedback_context=feedback_hint if feedback_hint else None,
             clear_lease=True,
         )
         logger.info(
@@ -1488,15 +1667,21 @@ def _collect_targeted_tests(
     output_targets: list[str] | tuple[str, ...],
     workspace: Path,
     language: str,
+    execution_root: str = "",
 ) -> list[str]:
     explicit = {path.strip() for path in _TARGETED_TEST_RE.findall(issue_body or "") if path.strip()}
-    candidates = set(explicit)
+    candidates = {
+        normalized
+        for path in explicit
+        if (normalized := _normalize_targeted_test_path(path=path, workspace=workspace, execution_root=execution_root))
+    }
     if not explicit:
         candidates.update(
             _infer_targeted_tests_from_targets(
                 output_targets=output_targets,
                 workspace=workspace,
                 language=language,
+                execution_root=execution_root,
             )
         )
     return sorted(path for path in candidates if path)
@@ -1507,26 +1692,65 @@ def _infer_targeted_tests_from_targets(
     output_targets: list[str] | tuple[str, ...],
     workspace: Path,
     language: str,
+    execution_root: str = "",
 ) -> set[str]:
-    if (language or "").strip().lower() != "python":
+    normalized_language = (language or "").strip().lower()
+    if normalized_language not in {"python", "ruby"}:
         return set()
+    execution_path = workspace / execution_root if execution_root else workspace
     inferred: set[str] = set()
     for raw_target in output_targets or ():
         target = str(raw_target or "").strip()
         if not target:
             continue
         target_path = Path(target)
-        if target.startswith("tests/") and (workspace / target_path).exists():
-            inferred.add(target)
+        local_target = _strip_execution_root_prefix(target=target, execution_root=execution_root)
+        local_path = Path(local_target)
+        if normalized_language == "python":
+            if local_target.startswith("tests/") and (execution_path / local_path).exists():
+                inferred.add(local_target)
+                continue
+            if not local_target.startswith("src/") or local_path.suffix != ".py":
+                continue
+            src_relative = local_path.relative_to("src")
+            candidates = [
+                Path("tests") / f"test_{local_path.stem}.py",
+                Path("tests") / src_relative.parent / f"test_{local_path.stem}.py",
+            ]
+            for candidate in candidates:
+                if (execution_path / candidate).exists():
+                    inferred.add(candidate.as_posix())
             continue
-        if not target.startswith("src/") or target_path.suffix != ".py":
-            continue
-        src_relative = target_path.relative_to("src")
-        candidates = [
-            Path("tests") / f"test_{target_path.stem}.py",
-            Path("tests") / src_relative.parent / f"test_{target_path.stem}.py",
-        ]
-        for candidate in candidates:
-            if (workspace / candidate).exists():
-                inferred.add(candidate.as_posix())
+
+        if normalized_language == "ruby":
+            if local_target.startswith("spec/") and (execution_path / local_path).exists():
+                inferred.add(local_target)
+                continue
+            if local_path.suffix != ".rb":
+                continue
+            spec_candidate = Path("spec") / f"{local_path.stem}_spec.rb"
+            nested_spec_candidate = Path("spec") / local_path.parent / f"{local_path.stem}_spec.rb"
+            for candidate in (spec_candidate, nested_spec_candidate):
+                if (execution_path / candidate).exists():
+                    inferred.add(candidate.as_posix())
     return inferred
+
+
+def _normalize_targeted_test_path(*, path: str, workspace: Path, execution_root: str) -> str:
+    cleaned = str(path or "").strip().lstrip("./")
+    if not cleaned:
+        return ""
+    if execution_root and cleaned.startswith(f"{execution_root}/"):
+        return cleaned[len(execution_root) + 1 :]
+    if execution_root and (workspace / execution_root / cleaned).exists():
+        return cleaned
+    if (workspace / cleaned).exists():
+        return cleaned
+    return cleaned[len(execution_root) + 1 :] if execution_root and cleaned.startswith(f"{execution_root}/") else cleaned
+
+
+def _strip_execution_root_prefix(*, target: str, execution_root: str) -> str:
+    cleaned = str(target or "").strip().lstrip("./")
+    if execution_root and cleaned.startswith(f"{execution_root}/"):
+        return cleaned[len(execution_root) + 1 :]
+    return cleaned

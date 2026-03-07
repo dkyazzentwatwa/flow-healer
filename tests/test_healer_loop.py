@@ -2,7 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from flow_healer.healer_loop import AutonomousHealerLoop, _collect_targeted_tests
+from flow_healer.healer_loop import AutonomousHealerLoop, _collect_targeted_tests, _FAILURE_CLASS_STRATEGY
 from flow_healer.healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
 from flow_healer.store import SQLiteStore
 
@@ -61,6 +61,12 @@ def _make_loop(store, **overrides):
     loop.dispatcher.max_active_issues = overrides.get("max_active_issues", 1)
     loop.scanner = MagicMock()
     loop.reconciler = MagicMock()
+    loop.runner = MagicMock()
+    loop.runner.resolve_execution.return_value = SimpleNamespace(
+        language_effective="python",
+        execution_root="",
+    )
+    loop.runner.validate_workspace.return_value = {"failed_tests": 0}
     loop._last_scan_started_at = overrides.get("_last_scan_started_at", 0.0)
     loop.connector = overrides.get("connector", _HealthyConnector())
     return loop
@@ -111,6 +117,7 @@ def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):
         output_targets=["src/flow_healer/healer_loop.py"],
         workspace=tmp_path,
         language="python",
+        execution_root="",
     )
 
     assert targeted == ["tests/test_explicit.py"]
@@ -126,9 +133,26 @@ def test_collect_targeted_tests_infers_python_test_from_output_target(tmp_path):
         output_targets=["src/flow_healer/healer_loop.py"],
         workspace=tmp_path,
         language="python",
+        execution_root="",
     )
 
     assert targeted == ["tests/test_healer_loop.py"]
+
+
+def test_collect_targeted_tests_infers_ruby_spec_relative_to_execution_root(tmp_path):
+    spec_dir = tmp_path / "e2e-smoke" / "ruby" / "spec"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "add_spec.rb").write_text("RSpec.describe '#add' do\nend\n", encoding="utf-8")
+
+    targeted = _collect_targeted_tests(
+        issue_body="No explicit rspec target here.",
+        output_targets=["e2e-smoke/ruby/add.rb"],
+        workspace=tmp_path,
+        language="ruby",
+        execution_root="e2e-smoke/ruby",
+    )
+
+    assert targeted == ["spec/add_spec.rb"]
 
 
 def test_ingest_pr_feedback_ignores_healer_comments(tmp_path):
@@ -1393,3 +1417,290 @@ def test_cleanup_workspace_preserves_requeued_state(tmp_path):
     assert issue["workspace_path"] == ""
     assert issue["branch_name"] == ""
     loop.workspace_manager.remove_workspace.assert_called_once_with(workspace_path=workspace)
+
+
+# --- Change 1: Failure-class-aware retry strategy ---
+
+
+def test_backoff_tests_failed_produces_shorter_delay(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="401",
+        repo="owner/repo",
+        title="Issue 401",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.upsert_healer_issue(
+        issue_id="402",
+        repo="owner/repo",
+        title="Issue 402",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=3, healer_backoff_initial_seconds=100, healer_backoff_max_seconds=3600)
+
+    loop._backoff_or_fail(issue_id="401", attempt_no=1, failure_class="tests_failed", failure_reason="pytest failed")
+    loop._backoff_or_fail(issue_id="402", attempt_no=1, failure_class="push_failed", failure_reason="push failed")
+    tests_backoff = store.get_healer_issue("401")["backoff_until"]
+    push_backoff = store.get_healer_issue("402")["backoff_until"]
+    # tests_failed has 0.5x multiplier, push_failed has 2.0x — push should be later
+    assert tests_backoff < push_backoff
+
+
+def test_backoff_sets_feedback_context_with_hint(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="403",
+        repo="owner/repo",
+        title="Issue 403",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=3, healer_backoff_initial_seconds=60, healer_backoff_max_seconds=3600)
+
+    loop._backoff_or_fail(issue_id="403", attempt_no=1, failure_class="tests_failed", failure_reason="pytest failed")
+    issue = store.get_healer_issue("403")
+    assert issue is not None
+    hint = _FAILURE_CLASS_STRATEGY["tests_failed"]["feedback_hint"]
+    assert issue["feedback_context"] == hint
+
+
+def test_backoff_push_failed_produces_longer_delay(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    for iid in ("410", "411"):
+        store.upsert_healer_issue(
+            issue_id=iid,
+            repo="owner/repo",
+            title=f"Issue {iid}",
+            body="",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+        )
+    loop = _make_loop(store, healer_retry_budget=3, healer_backoff_initial_seconds=100, healer_backoff_max_seconds=10000)
+
+    loop._backoff_or_fail(issue_id="410", attempt_no=1, failure_class="verifier_failed", failure_reason="rejected")
+    loop._backoff_or_fail(issue_id="411", attempt_no=1, failure_class="push_failed", failure_reason="push error")
+    verifier_backoff = store.get_healer_issue("410")["backoff_until"]
+    push_backoff = store.get_healer_issue("411")["backoff_until"]
+    # push_failed (2.0x) should have a later backoff than verifier_failed (1.5x)
+    assert push_backoff >= verifier_backoff
+
+
+# --- Change 3: Automated merge conflict resolution ---
+
+
+def test_conflict_resolution_succeeds_with_clean_rebase(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace = tmp_path / "workspaces" / "issue-501"
+    workspace.mkdir(parents=True)
+    store.upsert_healer_issue(
+        issue_id="501",
+        repo="owner/repo",
+        title="Issue 501",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="501",
+        state="pr_open",
+        pr_number=10,
+        workspace_path=str(workspace),
+        branch_name="healer/issue-501",
+    )
+
+    loop = _make_loop(store, healer_repo_path=str(tmp_path))
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=10, state="conflict", html_url="", mergeable_state="dirty", author="bot", head_ref="healer/issue-501"
+    )
+
+    call_log = []
+    def fake_run(cmd, **kwargs):
+        call_log.append(cmd)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr("flow_healer.healer_loop.subprocess.run", fake_run)
+
+    row = store.get_healer_issue("501")
+    resolved = loop._attempt_conflict_resolution(issue_id="501", pr_number=10, row=row)
+    assert resolved is True
+    cmds = [c[0] if isinstance(c, list) and c else "" for c in call_log]
+    assert "git" in cmds[0]
+    loop.runner.validate_workspace.assert_called_once()
+
+
+def test_conflict_resolution_fails_with_too_many_files(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace = tmp_path / "workspaces" / "issue-502"
+    workspace.mkdir(parents=True)
+    store.upsert_healer_issue(
+        issue_id="502",
+        repo="owner/repo",
+        title="Issue 502",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="502",
+        state="pr_open",
+        pr_number=11,
+        workspace_path=str(workspace),
+        branch_name="healer/issue-502",
+    )
+
+    loop = _make_loop(store, healer_repo_path=str(tmp_path))
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=11, state="conflict", html_url="", mergeable_state="dirty", author="bot", head_ref="healer/issue-502"
+    )
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "rebase" in cmd_str and "--abort" not in cmd_str and "origin/" in cmd_str:
+            result.returncode = 1  # Rebase fails with conflicts
+        elif "diff" in cmd_str and "--name-only" in cmd_str:
+            result.returncode = 0
+            result.stdout = "\n".join([f"file{i}.py" for i in range(6)])  # 6 files > 5 limit
+        else:
+            result.returncode = 0
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr("flow_healer.healer_loop.subprocess.run", fake_run)
+
+    row = store.get_healer_issue("502")
+    resolved = loop._attempt_conflict_resolution(issue_id="502", pr_number=11, row=row)
+    assert resolved is False
+
+
+def test_conflict_resolution_fails_when_connector_errors(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace = tmp_path / "workspaces" / "issue-503"
+    workspace.mkdir(parents=True)
+    (workspace / "conflict.py").write_text("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n")
+    store.upsert_healer_issue(
+        issue_id="503",
+        repo="owner/repo",
+        title="Issue 503",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="503",
+        state="pr_open",
+        pr_number=12,
+        workspace_path=str(workspace),
+        branch_name="healer/issue-503",
+    )
+
+    loop = _make_loop(store, healer_repo_path=str(tmp_path))
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=12, state="conflict", html_url="", mergeable_state="dirty", author="bot", head_ref="healer/issue-503"
+    )
+    loop.connector = MagicMock()
+    loop.connector.get_or_create_thread.return_value = "thread-1"
+    loop.connector.run_turn.side_effect = RuntimeError("connector down")
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "rebase" in cmd_str and "--abort" not in cmd_str and "origin/" in cmd_str:
+            result.returncode = 1  # Rebase has conflicts
+        elif "diff" in cmd_str and "--name-only" in cmd_str:
+            result.returncode = 0
+            result.stdout = "conflict.py"
+        else:
+            result.returncode = 0
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr("flow_healer.healer_loop.subprocess.run", fake_run)
+
+    row = store.get_healer_issue("503")
+    resolved = loop._attempt_conflict_resolution(issue_id="503", pr_number=12, row=row)
+    assert resolved is False
+
+
+def test_conflict_resolution_aborts_on_test_failure(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace = tmp_path / "workspaces" / "issue-504"
+    workspace.mkdir(parents=True)
+    (workspace / "fix.py").write_text("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n")
+    store.upsert_healer_issue(
+        issue_id="504",
+        repo="owner/repo",
+        title="Issue 504",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="504",
+        state="pr_open",
+        pr_number=13,
+        workspace_path=str(workspace),
+        branch_name="healer/issue-504",
+    )
+
+    loop = _make_loop(store, healer_repo_path=str(tmp_path))
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=13, state="conflict", html_url="", mergeable_state="dirty", author="bot", head_ref="healer/issue-504"
+    )
+    loop.runner.validate_workspace.return_value = {"failed_tests": 1}
+    loop.connector = MagicMock()
+    loop.connector.get_or_create_thread.return_value = "thread-1"
+    loop.connector.run_turn.return_value = "resolved content without conflict markers"
+
+    call_log = []
+
+    def fake_run(cmd, **kwargs):
+        call_log.append(cmd)
+        result = MagicMock()
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "rebase" in cmd_str and "--abort" not in cmd_str and "--continue" not in cmd_str and "origin/" in cmd_str:
+            result.returncode = 1  # Conflicts on initial rebase
+        elif "rebase" in cmd_str and "--continue" in cmd_str:
+            result.returncode = 0
+        elif "diff" in cmd_str and "--name-only" in cmd_str:
+            result.returncode = 0
+            result.stdout = "fix.py"
+        else:
+            result.returncode = 0
+            result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr("flow_healer.healer_loop.subprocess.run", fake_run)
+
+    row = store.get_healer_issue("504")
+    resolved = loop._attempt_conflict_resolution(issue_id="504", pr_number=13, row=row)
+    assert resolved is False
+    loop.runner.validate_workspace.assert_called_once()
+    assert all("pytest" not in " ".join(str(part) for part in cmd) for cmd in call_log)

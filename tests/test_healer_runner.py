@@ -4,7 +4,7 @@ from pathlib import Path
 
 from flow_healer.healer_runner import (
     HealerRunner,
-    ResolvedStrategy,
+    ResolvedExecution,
     _build_docker_test_script,
     _changed_paths,
     _gate_runners_for_mode,
@@ -63,9 +63,12 @@ def test_run_test_gates_runs_local_then_docker(monkeypatch):
         targeted_tests=["tests/test_demo.py"],
         timeout_seconds=30,
         mode="local_then_docker",
-        resolved_strategy=ResolvedStrategy(
+        resolved_execution=ResolvedExecution(
             language_detected="python",
             language_effective="python",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=Path("."),
             strategy=get_strategy("python"),
         ),
         local_gate_policy="auto",
@@ -136,6 +139,96 @@ def test_run_tests_in_docker_uses_posix_shell(monkeypatch, tmp_path):
     ]
     assert seen["cmd"][8:10] == ["sh", "-c"]
     assert summary["gate_status"] == "passed"
+
+
+def test_run_test_gates_runs_from_resolved_execution_root(monkeypatch, tmp_path):
+    sandbox = tmp_path / "e2e-smoke" / "node"
+    sandbox.mkdir(parents=True)
+    calls: list[tuple[str, Path]] = []
+
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        calls.append(("local", workspace))
+        return {"exit_code": 0, "output_tail": "local ok", "gate_status": "passed", "gate_reason": ""}
+
+    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        calls.append(("docker", workspace))
+        return {"exit_code": 0, "output_tail": "docker ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_in_docker", fake_docker)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="e2e-smoke/node",
+            execution_root_source="issue",
+            execution_path=sandbox,
+            strategy=get_strategy("node"),
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("local", sandbox), ("docker", sandbox)]
+    assert summary["execution_root"] == "e2e-smoke/node"
+    assert summary["execution_root_source"] == "issue"
+
+
+def test_resolve_execution_prefers_issue_sandbox_over_repo_root_python(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    node_root = tmp_path / "e2e-smoke" / "node"
+    node_root.mkdir(parents=True)
+    (node_root / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+
+    runner = HealerRunner(connector=None, timeout_seconds=30)  # type: ignore[arg-type]
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("e2e-smoke/node/src/add.js",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+        language="node",
+        language_source="issue",
+        execution_root="e2e-smoke/node",
+        validation_commands=("cd e2e-smoke/node && npm test -- --passWithNoTests",),
+    )
+
+    resolved = runner.resolve_execution(workspace=tmp_path, task_spec=task_spec)
+
+    assert resolved.language_detected == "node"
+    assert resolved.language_effective == "node"
+    assert resolved.execution_root == "e2e-smoke/node"
+    assert resolved.execution_root_source == "issue"
+    assert resolved.execution_path == node_root
+
+
+def test_resolve_execution_ignores_global_override_for_explicit_issue_language(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    node_root = tmp_path / "e2e-smoke" / "node"
+    node_root.mkdir(parents=True)
+    (node_root / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+
+    runner = HealerRunner(connector=None, timeout_seconds=30, language="python", test_command="pytest -q")  # type: ignore[arg-type]
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("e2e-smoke/node/src/add.js",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+        language="node",
+        language_source="issue",
+        execution_root="e2e-smoke/node",
+        validation_commands=("cd e2e-smoke/node && npm test -- --passWithNoTests",),
+    )
+
+    resolved = runner.resolve_execution(workspace=tmp_path, task_spec=task_spec)
+
+    assert resolved.language_effective == "node"
+    assert resolved.strategy.local_test_cmd == ["npm", "test", "--", "--passWithNoTests"]
 
 
 def test_stage_workspace_changes_excludes_python_packaging_artifacts(tmp_path):
@@ -251,9 +344,12 @@ def test_run_test_gates_marks_local_skipped_when_toolchain_unavailable(monkeypat
         targeted_tests=[],
         timeout_seconds=30,
         mode="local_then_docker",
-        resolved_strategy=ResolvedStrategy(
+        resolved_execution=ResolvedExecution(
             language_detected="node",
             language_effective="node",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=Path("."),
             strategy=no_local_strategy,
         ),
         local_gate_policy="auto",
@@ -273,9 +369,12 @@ def test_run_test_gates_fails_local_when_policy_force_and_tool_missing():
         targeted_tests=[],
         timeout_seconds=30,
         mode="local_only",
-        resolved_strategy=ResolvedStrategy(
+        resolved_execution=ResolvedExecution(
             language_detected="python",
             language_effective="python",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=Path("."),
             strategy=strategy,
         ),
         local_gate_policy="force",
@@ -302,9 +401,12 @@ def test_run_test_gates_fails_local_only_when_gate_is_skipped():
         targeted_tests=[],
         timeout_seconds=30,
         mode="local_only",
-        resolved_strategy=ResolvedStrategy(
+        resolved_execution=ResolvedExecution(
             language_detected="node",
             language_effective="node",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=Path("."),
             strategy=no_local_strategy,
         ),
         local_gate_policy="auto",
@@ -739,7 +841,7 @@ def test_run_attempt_includes_task_contract_in_prompt(tmp_path):
     assert "Task kind: research" in prompt
     assert "Output targets: docs/research-note.md" in prompt
     assert "Input context: (none)" in prompt
-    assert "Use web browsing when needed" in prompt
+    assert "Use web browsing only when repo context is insufficient" in prompt
 
 
 def test_run_attempt_marks_input_specs_as_context_in_prompt(tmp_path):
@@ -1334,7 +1436,7 @@ def test_run_attempt_includes_language_in_prompt(tmp_path):
     assert result.success is False
     prompt = connector.turns[0][1]
     assert "This repository uses go." in prompt
-    assert "This is a go project" in prompt
+    assert "Follow go conventions" in prompt
 
 
 def test_run_attempt_includes_path_fenced_fallback_guidance(tmp_path):
@@ -1364,3 +1466,142 @@ def test_run_attempt_includes_path_fenced_fallback_guidance(tmp_path):
     assert result.success is False
     prompt = connector.turns[0][1]
     assert "path-fenced blocks" in prompt
+
+
+def test_run_attempt_prompt_uses_clear_section_order_for_code_tasks(tmp_path):
+    connector = _RetryConnector(["not a patch"] * 5)
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    runner.run_attempt(
+        issue_id="202",
+        issue_title="Fix calc",
+        issue_body="Fix calc.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("calc.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="python",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    prompt = connector.turns[0][1]
+    assert prompt.index("### Role And Trusted Inputs") < prompt.index("### Task Context")
+    assert prompt.index("### Task Context") < prompt.index("### Task Contract")
+    assert prompt.index("### Task Contract") < prompt.index("### Execution Rules")
+    assert prompt.index("### Execution Rules") < prompt.index("### Output Rules")
+    assert prompt.index("### Output Rules") < prompt.index("### Completion Criteria")
+
+
+def test_run_attempt_prompt_includes_context_stop_rules_for_code_tasks(tmp_path):
+    connector = _RetryConnector(["not a patch"] * 5)
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    runner.run_attempt(
+        issue_id="203",
+        issue_title="Fix handler",
+        issue_body="Fix handler.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("handler.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    prompt = connector.turns[0][1]
+    assert "Inspect only enough files" in prompt
+    assert "Prefer acting once the likely root cause is confirmed" in prompt
+    assert "do not return exploratory summaries" in prompt
+
+
+def test_run_attempt_prompt_keeps_web_guidance_only_for_research_tasks(tmp_path):
+    connector = _RetryConnector(["not a patch"] * 3)
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    runner.run_attempt(
+        issue_id="204",
+        issue_title="Research deps",
+        issue_body="Research best ways to configure this package.",
+        task_spec=HealerTaskSpec(
+            task_kind="research",
+            output_mode="patch",
+            output_targets=("docs/research.md",),
+            tool_policy="repo_plus_web",
+            validation_profile="artifact_only",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    research_prompt = connector.turns[0][1]
+    assert "Use web browsing only when repo context is insufficient" in research_prompt
+
+    connector_two = _RetryConnector(["not a patch"] * 5)
+    runner_two = HealerRunner(connector_two, timeout_seconds=30, test_gate_mode="local_only")
+    runner_two.run_attempt(
+        issue_id="205",
+        issue_title="Fix handler",
+        issue_body="Fix handler.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("handler.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert "Use web browsing only when repo context is insufficient" not in connector_two.turns[0][1]
+
+
+# --- Change 1: _build_retry_prompt includes class-specific guidance ---
+
+
+from flow_healer.healer_runner import _build_retry_prompt
+
+
+def test_build_retry_prompt_includes_tests_failed_guidance():
+    prompt = _build_retry_prompt(
+        base_prompt="Fix the bug",
+        failure_class="tests_failed",
+        failure_reason="pytest exited with code 1",
+    )
+    assert "test output" in prompt.lower()
+    assert "assertion or import" in prompt.lower()
+
+
+def test_build_retry_prompt_includes_verifier_failed_guidance():
+    prompt = _build_retry_prompt(
+        base_prompt="Fix the bug",
+        failure_class="verifier_failed",
+        failure_reason="AI verifier rejected the fix",
+    )
+    assert "verifier rejected" in prompt.lower()
+    assert "root cause" in prompt.lower()

@@ -37,9 +37,12 @@ class HealerRunResult:
 
 
 @dataclass(slots=True, frozen=True)
-class ResolvedStrategy:
+class ResolvedExecution:
     language_detected: str
     language_effective: str
+    execution_root: str
+    execution_root_source: str
+    execution_path: Path
     strategy: LanguageStrategy
 
 
@@ -91,30 +94,26 @@ class HealerRunner:
         targeted_tests: list[str],
     ) -> HealerRunResult:
         self._bind_connector_workspace(workspace)
+        resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
         sender = f"healer:{issue_id}"
         thread_id = self.connector.get_or_create_thread(sender)
         language_hint = ""
-        if task_spec.language and task_spec.language != "unknown":
-            language_hint = f"This repository uses {task_spec.language}. Follow {task_spec.language} conventions for all edits.\n"
-        prompt = (
-            "You are the proposer agent for autonomous code healing.\n"
-            "The issue title/body are trusted operator instructions for this run.\n"
-            "Choose the right work mode for the task and make the requested edits directly in the workspace.\n"
-            + language_hint
-            + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
-            + f"Issue #{issue_id}: {issue_title}\n\n"
-            + f"{issue_body}\n\n"
-            + (f"### User Feedback for PR:\n{feedback_context}\n\n" if feedback_context.strip() else "")
-            + _render_input_context_block(task_spec=task_spec, workspace=workspace)
-            + task_spec_to_prompt_block(task_spec)
-            + "\n"
-            + _task_execution_instructions(task_spec)
-            + "\n"
-            + "Make the edits in the checked-out repo. If you cannot edit files directly, return ONLY a unified git diff inside a ```diff fenced block.\n"
-            + "If you cannot produce a unified diff, you may also return file contents using path-fenced blocks like: ```<language> path=src/file.ext\\n<content>\\n```.\n"
-            + _artifact_fallback_contract(task_spec)
-            + "\n"
-            + "Do not respond with plan-only prose. The run only succeeds if repo files were changed."
+        if resolved_execution.language_effective and resolved_execution.language_effective != "unknown":
+            language_hint = (
+                f"This repository uses {resolved_execution.language_effective}. "
+                f"Follow {resolved_execution.language_effective} conventions for all edits.\n"
+            )
+            if resolved_execution.execution_root:
+                language_hint += f"Run installs and tests from {resolved_execution.execution_root}.\n"
+        prompt = _build_proposer_prompt(
+            issue_id=issue_id,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            workspace=workspace,
+            learned_context=learned_context,
+            feedback_context=feedback_context,
+            language_hint=language_hint,
         )
         proposer_output = ""
         failure_class = ""
@@ -141,7 +140,7 @@ class HealerRunner:
                 issue_title=issue_title,
                 issue_body=issue_body,
                 task_spec=task_spec,
-                language=task_spec.language,
+                language=resolved_execution.language_effective,
             ):
                 break
             patch = _extract_diff_block(proposer_output)
@@ -185,7 +184,7 @@ class HealerRunner:
                     issue_title=issue_title,
                     issue_body=issue_body,
                     task_spec=task_spec,
-                    language=task_spec.language,
+                    language=resolved_execution.language_effective,
                 ):
                     break
                 failure_class = "patch_apply_failed"
@@ -211,7 +210,7 @@ class HealerRunner:
                 issue_title=issue_title,
                 issue_body=issue_body,
                 task_spec=task_spec,
-                language=task_spec.language,
+                language=resolved_execution.language_effective,
             ):
                 failure_class = ""
                 failure_reason = ""
@@ -228,7 +227,7 @@ class HealerRunner:
                 issue_title=issue_title,
                 issue_body=issue_body,
                 task_spec=task_spec,
-                language=task_spec.language,
+                language=resolved_execution.language_effective,
             ):
                 failure_class = ""
                 failure_reason = ""
@@ -297,26 +296,24 @@ class HealerRunner:
                 test_summary={},
             )
 
-        resolved_strategy = self._resolve_strategy(workspace)
         if task_spec.validation_profile == "artifact_only":
             test_summary = {
                 "mode": "skipped_artifact_only",
                 "failed_tests": 0,
                 "targeted_tests": targeted_tests,
                 "skipped": True,
-                "language_detected": resolved_strategy.language_detected,
-                "language_effective": resolved_strategy.language_effective,
-                "docker_image_effective": resolved_strategy.strategy.docker_image,
+                "language_detected": resolved_execution.language_detected,
+                "language_effective": resolved_execution.language_effective,
+                "docker_image_effective": resolved_execution.strategy.docker_image,
+                "execution_root": resolved_execution.execution_root,
+                "execution_root_source": resolved_execution.execution_root_source,
                 "local_gate_policy": self.local_gate_policy,
             }
         else:
-            test_summary = _run_test_gates(
+            test_summary = self.validate_workspace(
                 workspace,
+                task_spec=task_spec,
                 targeted_tests=targeted_tests,
-                timeout_seconds=self.timeout_seconds,
-                mode=self.test_gate_mode,
-                resolved_strategy=resolved_strategy,
-                local_gate_policy=self.local_gate_policy,
             )
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
@@ -342,19 +339,61 @@ class HealerRunner:
             test_summary=test_summary,
         )
 
-    def _resolve_strategy(self, workspace: Path) -> ResolvedStrategy:
-        detection = detect_language_details(workspace)
-        effective_language = self._language or detection.language
+    def resolve_execution(self, *, workspace: Path, task_spec: HealerTaskSpec) -> ResolvedExecution:
+        execution_root, root_source = _resolve_execution_root(workspace=workspace, task_spec=task_spec)
+        execution_path = workspace / execution_root if execution_root else workspace
+        if not execution_path.exists() or not execution_path.is_dir():
+            execution_root = ""
+            root_source = "repo"
+            execution_path = workspace
+        execution_detection = detect_language_details(execution_path)
+        repo_detection = detect_language_details(workspace)
+        issue_language = task_spec.language if task_spec.language else ""
+        config_override_allowed = not issue_language
+        effective_language = (
+            issue_language
+            or (self._language if config_override_allowed else "")
+            or execution_detection.language
+            or repo_detection.language
+        )
+        if effective_language == "unknown":
+            effective_language = ""
         strategy = get_strategy(
             effective_language,
-            docker_image=self._docker_image,
-            test_command=self._test_command,
-            install_command=self._install_command,
+            docker_image=self._docker_image if config_override_allowed else "",
+            test_command=self._test_command if config_override_allowed else "",
+            install_command=self._install_command if config_override_allowed else "",
         )
-        return ResolvedStrategy(
-            language_detected=detection.language,
+        detected_language = execution_detection.language
+        if detected_language == "unknown":
+            detected_language = repo_detection.language
+        return ResolvedExecution(
+            language_detected=detected_language,
             language_effective=effective_language,
+            execution_root=execution_root,
+            execution_root_source=root_source,
+            execution_path=execution_path,
             strategy=strategy,
+        )
+
+    def validate_workspace(
+        self,
+        workspace: Path,
+        *,
+        task_spec: HealerTaskSpec,
+        targeted_tests: list[str],
+        timeout_seconds: int | None = None,
+        mode: str | None = None,
+        local_gate_policy: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
+        return _run_test_gates(
+            workspace,
+            targeted_tests=targeted_tests,
+            timeout_seconds=timeout_seconds or self.timeout_seconds,
+            mode=mode or self.test_gate_mode,
+            resolved_execution=resolved_execution,
+            local_gate_policy=local_gate_policy or self.local_gate_policy,
         )
 
     def _bind_connector_workspace(self, workspace: Path) -> None:
@@ -365,6 +404,32 @@ class HealerRunner:
                 setattr(self.connector, "workspace", workspace)
             except Exception:
                 pass
+
+
+def _resolve_execution_root(*, workspace: Path, task_spec: HealerTaskSpec) -> tuple[str, str]:
+    hinted = _safe_rel_path(task_spec.execution_root)
+    if hinted and (workspace / hinted).is_dir():
+        return hinted.as_posix(), "issue"
+
+    candidates: list[str] = []
+    for raw_target in task_spec.output_targets:
+        target = _safe_rel_path(raw_target)
+        if not target:
+            continue
+        candidate = _infer_execution_root_from_target(target)
+        if candidate and (workspace / candidate).is_dir():
+            candidates.append(candidate)
+    unique_candidates = sorted(set(candidates))
+    if len(unique_candidates) == 1:
+        return unique_candidates[0], "output_target"
+    return "", "repo"
+
+
+def _infer_execution_root_from_target(target: str) -> str:
+    parts = PurePosixPath(target).parts
+    if len(parts) >= 2 and parts[0] == "e2e-smoke":
+        return PurePosixPath(parts[0], parts[1]).as_posix()
+    return ""
 
 
 def _extract_diff_block(text: str) -> str:
@@ -421,33 +486,39 @@ def _run_test_gates(
     targeted_tests: list[str],
     timeout_seconds: int,
     mode: str,
-    resolved_strategy: ResolvedStrategy | None = None,
+    resolved_execution: ResolvedExecution | None = None,
     local_gate_policy: str = "auto",
 ) -> dict[str, Any]:
-    if resolved_strategy is None:
-        resolved_strategy = ResolvedStrategy(
+    if resolved_execution is None:
+        resolved_execution = ResolvedExecution(
             language_detected="unknown",
             language_effective="unknown",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=workspace,
             strategy=get_strategy("unknown"),
         )
     summary: dict[str, Any] = {
         "mode": mode,
         "failed_tests": 0,
         "targeted_tests": targeted_tests,
-        "language_detected": resolved_strategy.language_detected,
-        "language_effective": resolved_strategy.language_effective,
-        "docker_image_effective": resolved_strategy.strategy.docker_image,
+        "language_detected": resolved_execution.language_detected,
+        "language_effective": resolved_execution.language_effective,
+        "docker_image_effective": resolved_execution.strategy.docker_image,
+        "execution_root": resolved_execution.execution_root,
+        "execution_root_source": resolved_execution.execution_root_source,
         "local_gate_policy": local_gate_policy,
     }
     runners = _gate_runners_for_mode(mode)
-    strategy = resolved_strategy.strategy
+    strategy = resolved_execution.strategy
+    execution_path = resolved_execution.execution_path
 
     if targeted_tests:
         targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
         for runner_name, runner in runners:
             targeted = _invoke_gate_runner(
                 runner,
-                workspace,
+                execution_path,
                 targeted_cmd,
                 timeout_seconds,
                 strategy=strategy,
@@ -472,7 +543,7 @@ def _run_test_gates(
     for runner_name, runner in runners:
         full = _invoke_gate_runner(
             runner,
-            workspace,
+            execution_path,
             full_cmd,
             timeout_seconds,
             strategy=strategy,
@@ -502,7 +573,7 @@ def _compose_targeted_command(strategy: LanguageStrategy, targeted_tests: list[s
 
 def _invoke_gate_runner(
     runner: Any,
-    workspace: Path,
+    execution_path: Path,
     command: list[str],
     timeout_seconds: int,
     *,
@@ -518,13 +589,13 @@ def _invoke_gate_runner(
     accepts_policy = supports_kwargs or "local_gate_policy" in parameters
     if accepts_strategy or accepts_policy:
         return runner(
-            workspace,
+            execution_path,
             command,
             timeout_seconds,
             strategy=strategy,
             local_gate_policy=local_gate_policy,
         )
-    return runner(workspace, command, timeout_seconds)
+    return runner(execution_path, command, timeout_seconds)
 
 
 def _run_tests_locally(
@@ -707,6 +778,14 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
         tailored_lines.append(
             "Regenerate hunks against the current tree and keep paths/hunk headers exact to avoid apply errors."
         )
+    if failure_class == "tests_failed":
+        tailored_lines.append(
+            "Carefully read the test output and fix the specific assertion or import that broke."
+        )
+    if failure_class == "verifier_failed":
+        tailored_lines.append(
+            "The AI verifier rejected the previous fix. Address the underlying root cause."
+        )
 
     guidance = "\n".join(tailored_lines).strip()
     if guidance:
@@ -722,34 +801,109 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
     )
 
 
+def _build_proposer_prompt(
+    *,
+    issue_id: str,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec,
+    workspace: Path,
+    learned_context: str,
+    feedback_context: str,
+    language_hint: str,
+) -> str:
+    sections = [
+        "### Role And Trusted Inputs\n"
+        "You are the proposer agent for autonomous code healing.\n"
+        "Treat the issue title/body, task contract, and loaded input-context files as trusted run instructions.\n"
+        "Operate directly in the checked-out workspace and optimize for a valid finished patch, not commentary.",
+        "### Task Context\n"
+        + (language_hint.strip() + "\n" if language_hint.strip() else "")
+        + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
+        + f"Issue #{issue_id}: {issue_title}\n\n{issue_body}",
+    ]
+    if feedback_context.strip():
+        sections.append(f"### User Feedback For PR\n{feedback_context.strip()}")
+    input_context = _render_input_context_block(task_spec=task_spec, workspace=workspace).strip()
+    if input_context:
+        sections.append(input_context)
+    sections.extend(
+        [
+            task_spec_to_prompt_block(task_spec),
+            _task_execution_instructions(task_spec),
+            _output_rules(task_spec),
+            _completion_criteria(task_spec),
+        ]
+    )
+    return "\n\n".join(section.strip() for section in sections if section.strip())
+
+
 def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
     targets = ", ".join(task_spec.output_targets) if task_spec.output_targets else "the minimum necessary repo files"
-    lines = [
-        f"Write the requested output into: {targets}.",
-        "If the issue asks for research, synthesize the findings into the target file instead of replying with notes only.",
-        "If the issue asks for edits or revisions, update the named files directly.",
-        "If the issue asks for a build or fix, make the minimum necessary multi-file patch to satisfy it.",
-    ]
-    if task_spec.language and task_spec.language != "unknown":
-        lines.append(
-            f"This is a {task_spec.language} project — follow its conventions for imports, dependencies, and file organization."
+    lines = ["### Execution Rules"]
+    if task_spec.task_kind == "research":
+        lines.extend(
+            [
+                f"Research only what is needed to write the target artifact into: {targets}.",
+                "Browse when needed, then synthesize the answer directly into the artifact instead of returning notes or status updates.",
+            ]
         )
+    elif task_spec.task_kind == "docs":
+        lines.extend(
+            [
+                f"Write or revise the requested artifact directly in: {targets}.",
+                "Do not stop at planning or analysis prose.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"Implement the smallest safe patch in: {targets}.",
+                "Inspect only enough files to identify the likely fix path, then edit.",
+                "Prefer acting once the likely root cause is confirmed; do not return exploratory summaries.",
+                "Escalate to a retry only when output format or patch validity failed.",
+            ]
+        )
+    if task_spec.language and task_spec.language != "unknown":
+        lines.append(f"Follow {task_spec.language} conventions for imports, dependencies, tests, and file organization.")
     if task_spec.input_context_paths:
         input_context = ", ".join(task_spec.input_context_paths)
         lines.append(f"Treat these files as input-only context, not output targets: {input_context}.")
     if task_spec.tool_policy == "repo_plus_web":
-        lines.append("Use web browsing when needed to complete research accurately before writing the file.")
+        lines.append("Use web browsing only when repo context is insufficient for the requested research artifact.")
     else:
-        lines.append("Rely on repo and local context unless the task explicitly requires something else.")
+        lines.append("Rely on repo and local context unless the task explicitly requires outside facts.")
     if _requires_non_artifact_diff(task_spec=task_spec):
         lines.append(
             "This is a code-change task: ensure at least one non-doc file is modified (docs-only changes are invalid)."
         )
-    if _allows_artifact_synthesis(task_spec):
-        lines.append(
-            "Do not return status updates like 'Updated file X' or testing notes; return actual file content only."
-        )
     return "\n".join(lines)
+
+
+def _output_rules(task_spec: HealerTaskSpec) -> str:
+    lines = [
+        "### Output Rules",
+        "Preferred output order: direct workspace edits first, unified diff second, path-fenced file bodies last.",
+        "Do not return plan-only prose, exploratory summaries, or status notes.",
+    ]
+    if _allows_artifact_synthesis(task_spec):
+        lines.append("Artifact synthesis is allowed for this task profile only when direct edits are unavailable.")
+    else:
+        lines.append("Artifact synthesis is not allowed for this task profile.")
+    lines.append(
+        "If direct edits are unavailable, return ONLY one valid unified diff fenced block. Use path-fenced blocks only if a unified diff is not possible."
+    )
+    lines.append(_artifact_fallback_contract(task_spec).strip())
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _completion_criteria(task_spec: HealerTaskSpec) -> str:
+    if task_spec.validation_profile == "artifact_only":
+        return "### Completion Criteria\nFinish only when the target artifact content is written in the requested files."
+    return (
+        "### Completion Criteria\n"
+        "Finish only when repo files changed materially, the output format is valid, and the requested validation can pass without extra narrative."
+    )
 
 
 def _render_input_context_block(*, task_spec: HealerTaskSpec, workspace: Path) -> str:

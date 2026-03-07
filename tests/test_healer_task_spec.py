@@ -197,6 +197,8 @@ def test_task_spec_prompt_block_marks_code_targets_as_anchors_not_allowlist() ->
     prompt_block = task_spec_to_prompt_block(spec)
 
     assert "Output target policy: Named targets are anchors for the fix" in prompt_block
+    assert "Inspect only enough files" not in prompt_block
+    assert "Preferred output order" not in prompt_block
 
 
 def test_compile_task_spec_passes_language_through() -> None:
@@ -206,6 +208,7 @@ def test_compile_task_spec_passes_language_through() -> None:
         language="go",
     )
     assert spec.language == "go"
+    assert spec.language_source == "issue"
 
 
 def test_compile_task_spec_language_defaults_to_empty() -> None:
@@ -233,6 +236,66 @@ def test_task_spec_prompt_block_omits_language_when_empty() -> None:
     )
     prompt_block = task_spec_to_prompt_block(spec)
     assert "Language:" not in prompt_block
+
+
+def test_compile_task_spec_infers_node_execution_root_and_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Node sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n"
+            "- e2e-smoke/node/test/add.test.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.language_source == "issue"
+    assert spec.execution_root == "e2e-smoke/node"
+    assert spec.validation_commands == ("cd e2e-smoke/node && npm test -- --passWithNoTests",)
+
+
+def test_compile_task_spec_infers_java_gradle_from_validation_line() -> None:
+    spec = compile_task_spec(
+        issue_title="Java Gradle sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/java-gradle/src/main/java/example/App.java\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/java-gradle && ./gradlew test --no-daemon\n"
+        ),
+    )
+
+    assert spec.language == "java_gradle"
+    assert spec.language_source == "issue"
+    assert spec.execution_root == "e2e-smoke/java-gradle"
+
+
+def test_compile_task_spec_infers_ruby_execution_root_from_sandbox_path() -> None:
+    spec = compile_task_spec(
+        issue_title="Ruby sandbox regression",
+        issue_body=(
+            "Fix the bug in e2e-smoke/ruby/add.rb and keep the sandbox green.\n"
+            "Validation: cd e2e-smoke/ruby && bundle exec rspec\n"
+        ),
+    )
+
+    assert spec.language == "ruby"
+    assert spec.language_source == "issue"
+    assert spec.execution_root == "e2e-smoke/ruby"
+
+
+def test_task_spec_prompt_block_includes_execution_root_and_validation_commands() -> None:
+    spec = compile_task_spec(
+        issue_title="Ruby sandbox regression",
+        issue_body="Validation: cd e2e-smoke/ruby && bundle exec rspec",
+    )
+
+    prompt_block = task_spec_to_prompt_block(spec)
+
+    assert "- Execution root: e2e-smoke/ruby" in prompt_block
+    assert "Validation commands: cd e2e-smoke/ruby && bundle exec rspec" in prompt_block
 
 
 def test_is_code_path_recognizes_go() -> None:

@@ -14,11 +14,14 @@ class HealerTaskSpec:
     validation_profile: str
     input_context_paths: tuple[str, ...] = ()
     language: str = ""
+    language_source: str = ""
+    execution_root: str = ""
+    validation_commands: tuple[str, ...] = ()
 
 
 _EXPLICIT_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])"
-    r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html))"
+    r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html|go|rs|rb|java|kt|scala|swift|c|cpp|h|hpp|gradle|kts))"
 ,
     re.IGNORECASE,
 )
@@ -34,12 +37,44 @@ _INPUT_CONTEXT_RE = re.compile(
     r"\b(input context|input spec|spec only|input only|input-only|not the output target|not output targets?)\b",
     re.IGNORECASE,
 )
+_DIRECTORY_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+/)?)"
+)
+_COMMAND_LINE_RE = re.compile(
+    r"(?:^|\b)(?:cd\s+[^\n&|;]+&&\s*)?"
+    r"(?:npm\s+test|pytest\b|python\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|mvn\s+test\b|\./gradlew\s+test\b)"
+    r"[^\n]*",
+    re.IGNORECASE,
+)
+
+_LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bnpm\s+test\b", re.IGNORECASE), "node"),
+    (re.compile(r"\bpython\s+-m\s+pytest\b|\bpytest\b", re.IGNORECASE), "python"),
+    (re.compile(r"\bbundle\s+exec\s+rspec\b|\brspec\b", re.IGNORECASE), "ruby"),
+    (re.compile(r"\bcargo\s+test\b", re.IGNORECASE), "rust"),
+    (re.compile(r"\bgo\s+test\b", re.IGNORECASE), "go"),
+    (re.compile(r"\bmvn\s+test\b", re.IGNORECASE), "java_maven"),
+    (re.compile(r"\./gradlew\s+test\b", re.IGNORECASE), "java_gradle"),
+)
+
+_LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
+    ("e2e-smoke/node", "node"),
+    ("e2e-smoke/python", "python"),
+    ("e2e-smoke/go", "go"),
+    ("e2e-smoke/rust", "rust"),
+    ("e2e-smoke/ruby", "ruby"),
+    ("e2e-smoke/java-gradle", "java_gradle"),
+    ("e2e-smoke/java-maven", "java_maven"),
+)
 
 
 def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") -> HealerTaskSpec:
     issue_text = "\n".join(part for part in [issue_title.strip(), issue_body.strip()] if part).strip()
     task_kind_hint = _extract_task_kind_hint(issue_text=issue_text)
     explicit_paths = tuple(_explicit_paths(issue_text))
+    explicit_directories = tuple(_explicit_directories(issue_text))
+    validation_commands = _extract_validation_commands(issue_text)
     input_context_paths = _explicit_input_context_paths(issue_text=issue_text, explicit_paths=explicit_paths)
     output_targets = tuple(path for path in explicit_paths if path not in input_context_paths)
     if not input_context_paths and _treat_markdown_targets_as_input_hints(issue_text=issue_text, output_targets=output_targets):
@@ -49,6 +84,19 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     inferred_targets = output_targets or _default_targets(issue_title=issue_title, task_kind=task_kind)
     tool_policy = "repo_plus_web" if task_kind == "research" else "repo_only"
     validation_profile = _validation_profile(task_kind=task_kind, output_targets=inferred_targets)
+    inferred_execution_root = _infer_execution_root(
+        explicit_directories=explicit_directories,
+        output_targets=inferred_targets,
+        validation_commands=validation_commands,
+    )
+    inferred_language = _infer_issue_language(
+        issue_text=issue_text,
+        output_targets=inferred_targets,
+        execution_root=inferred_execution_root,
+        validation_commands=validation_commands,
+    )
+    resolved_language = inferred_language or str(language or "").strip()
+    language_source = "issue" if inferred_language else ("default" if resolved_language else "")
     return HealerTaskSpec(
         task_kind=task_kind,
         output_mode="patch",
@@ -56,7 +104,10 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         tool_policy=tool_policy,
         validation_profile=validation_profile,
         input_context_paths=input_context_paths,
-        language=str(language or "").strip(),
+        language=resolved_language,
+        language_source=language_source,
+        execution_root=inferred_execution_root,
+        validation_commands=validation_commands,
     )
 
 
@@ -74,6 +125,10 @@ def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
     ]
     if spec.language:
         lines.append(f"- Language: {spec.language}")
+    if spec.execution_root:
+        lines.append(f"- Execution root: {spec.execution_root}")
+    if spec.validation_commands:
+        lines.append(f"- Validation commands: {' | '.join(spec.validation_commands)}")
     if spec.validation_profile == "code_change" and spec.output_targets:
         lines.append(
             "- Output target policy: Named targets are anchors for the fix; additional nearby code, test, or config files may also be edited when required."
@@ -163,6 +218,23 @@ def _explicit_paths(issue_text: str) -> list[str]:
     return prioritized or order
 
 
+def _explicit_directories(issue_text: str) -> list[str]:
+    directories: list[str] = []
+    seen: set[str] = set()
+    for raw_line in issue_text.splitlines():
+        line = raw_line.strip()
+        for match in _DIRECTORY_RE.finditer(line):
+            candidate = match.group(1).strip().lstrip("./").rstrip("/")
+            if not candidate or "://" in candidate or "." in Path(candidate).name:
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            directories.append(candidate)
+    return directories
+
+
 def _explicit_input_context_paths(*, issue_text: str, explicit_paths: tuple[str, ...]) -> tuple[str, ...]:
     if not explicit_paths:
         return ()
@@ -215,6 +287,122 @@ def _treat_markdown_targets_as_input_hints(*, issue_text: str, output_targets: t
     if re.search(r"\b(apply|implement|fix|upgrade|refactor|change)\b.*\b(from|found in|based on|using)\b", lowered):
         return True
     return False
+
+
+def _extract_validation_commands(issue_text: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    seen: set[str] = set()
+    for raw_line in issue_text.splitlines():
+        line = raw_line.strip().strip(" -*`")
+        if not line:
+            continue
+        match = _COMMAND_LINE_RE.search(line)
+        if not match:
+            continue
+        command = " ".join(match.group(0).split()).strip()
+        key = command.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        commands.append(command)
+    return tuple(commands)
+
+
+def _infer_execution_root(
+    *,
+    explicit_directories: tuple[str, ...],
+    output_targets: tuple[str, ...],
+    validation_commands: tuple[str, ...],
+) -> str:
+    for command in validation_commands:
+        cd_root = _extract_cd_root(command)
+        if cd_root:
+            return cd_root
+
+    for directory in explicit_directories:
+        normalized = _normalize_known_sandbox_root(directory)
+        if normalized:
+            return normalized
+
+    sandbox_roots = {
+        normalized
+        for target in output_targets
+        if (normalized := _normalize_known_sandbox_root(target))
+    }
+    if len(sandbox_roots) == 1:
+        return next(iter(sandbox_roots))
+    return ""
+
+
+def _infer_issue_language(
+    *,
+    issue_text: str,
+    output_targets: tuple[str, ...],
+    execution_root: str,
+    validation_commands: tuple[str, ...],
+) -> str:
+    for command in validation_commands:
+        hinted = _language_from_command(command)
+        if hinted:
+            return hinted
+
+    hinted = _language_from_path(execution_root)
+    if hinted:
+        return hinted
+
+    for target in output_targets:
+        hinted = _language_from_path(target)
+        if hinted:
+            return hinted
+        suffix = Path(target).suffix.lower()
+        if suffix == ".rb":
+            return "ruby"
+        if suffix == ".go":
+            return "go"
+        if suffix == ".rs":
+            return "rust"
+        if suffix == ".java":
+            if "gradle" in issue_text.lower():
+                return "java_gradle"
+            if "maven" in issue_text.lower():
+                return "java_maven"
+        if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+            return "node"
+
+    return _language_from_command(issue_text)
+
+
+def _extract_cd_root(command: str) -> str:
+    match = re.search(r"\bcd\s+([^\n&|;]+?)\s*&&", command, re.IGNORECASE)
+    if not match:
+        return ""
+    candidate = match.group(1).strip().strip("'\"").lstrip("./").rstrip("/")
+    return candidate
+
+
+def _normalize_known_sandbox_root(path: str) -> str:
+    normalized = str(path or "").strip().strip("'\"").lstrip("./").rstrip("/")
+    if not normalized:
+        return ""
+    parts = Path(normalized).parts
+    if len(parts) >= 2 and parts[0] == "e2e-smoke":
+        return Path(parts[0], parts[1]).as_posix()
+    return normalized if normalized.startswith("e2e-smoke/") else ""
+
+
+def _language_from_command(text: str) -> str:
+    for pattern, language in _LANGUAGE_COMMAND_HINTS:
+        if pattern.search(text or ""):
+            return language
+    return ""
+
+
+def _language_from_path(path: str) -> str:
+    lowered = str(path or "").strip().strip("/").lower()
+    for prefix, language in _LANGUAGE_PATH_HINTS:
+        if lowered.startswith(prefix):
+            return language
+    return ""
 
 
 def _is_artifact_path(path: str) -> bool:

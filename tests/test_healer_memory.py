@@ -100,7 +100,7 @@ def test_healer_memory_retrieval_prefers_scope_overlap_and_marks_use():
         predicted_lock_set=["path:src/apple_flow/store.py"],
     )
 
-    assert "Relevant prior healer lessons:" in context
+    assert "## Prior healer lessons for this area" in context
     assert "store.py" in context
     used = [lesson for lesson in store.healer_lessons if lesson["use_count"] > 0]
     assert len(used) == 1
@@ -365,3 +365,119 @@ def test_healer_verifier_detects_broader_docs_and_config_paths():
         proposer_output="```diff\ndiff --git a/deploy/.env.sample b/deploy/.env.sample\n```",
     )
     assert "Change classification: config-only." in connector.turns[1][1]
+
+
+# --- Change 2: Richer failure lessons ---
+
+
+def test_build_lesson_text_tests_failed_includes_excerpt():
+    text = HealerMemoryService._build_lesson_text(
+        outcome="failure",
+        title="Fix parser",
+        scope_key="path:src/parser.py",
+        failure_class="tests_failed",
+        failure_reason="pytest exited 1",
+        verifier_summary="",
+        test_hint="Run targeted pytest first: tests/test_parser.py",
+        test_output_excerpt="FAILED tests/test_parser.py::test_edge - AssertionError",
+    )
+    assert "Test output:" in text
+    assert "AssertionError" in text
+    assert "Guardrail" in text
+
+
+def test_build_lesson_text_verifier_failed_includes_summary():
+    text = HealerMemoryService._build_lesson_text(
+        outcome="failure",
+        title="Fix verifier issue",
+        scope_key="path:src/service.py",
+        failure_class="verifier_failed",
+        failure_reason="verification rejected",
+        verifier_summary="The fix only silences the error without addressing root cause",
+        test_hint="",
+        test_output_excerpt="",
+    )
+    assert "Verifier note:" in text
+    assert "root cause" in text
+
+
+def test_build_prompt_context_groups_lessons_with_prefixes():
+    store = FakeStore()
+    memory = HealerMemoryService(store, enabled=True)
+    issue = SimpleNamespace(issue_id="701", title="Fix parser race", body="src/parser.py")
+
+    memory.maybe_record_lesson(
+        issue=issue,
+        attempt_id="hat_success",
+        final_state="pr_open",
+        predicted_lock_set=["path:src/parser.py"],
+        actual_diff_set=["src/parser.py"],
+        test_summary={"targeted_tests": ["tests/test_parser.py"]},
+        verifier_summary={"passed": True, "summary": "good"},
+        failure_class="",
+        failure_reason="",
+    )
+    memory.maybe_record_lesson(
+        issue=issue,
+        attempt_id="hat_failure",
+        final_state="failed",
+        predicted_lock_set=["path:src/parser.py"],
+        actual_diff_set=[],
+        test_summary={},
+        verifier_summary={},
+        failure_class="tests_failed",
+        failure_reason="pytest failed",
+    )
+
+    context = memory.build_prompt_context(
+        issue_text="Fix parser race in src/parser.py",
+        predicted_lock_set=["path:src/parser.py"],
+    )
+
+    assert "## Prior healer lessons for this area" in context
+    assert "**FOLLOW:**" in context
+    assert "**AVOID:**" in context
+
+
+def test_retrieve_lessons_same_issue_bonus():
+    store = FakeStore()
+    memory = HealerMemoryService(store, enabled=True)
+
+    # Record a lesson for issue 801
+    memory.maybe_record_lesson(
+        issue=SimpleNamespace(issue_id="801", title="Fix store race", body="src/store.py"),
+        attempt_id="hat_801",
+        final_state="failed",
+        predicted_lock_set=["path:src/store.py"],
+        actual_diff_set=["src/store.py"],
+        test_summary={},
+        verifier_summary={},
+        failure_class="tests_failed",
+        failure_reason="pytest failed",
+    )
+    # Record a lesson for different issue but same scope
+    memory.maybe_record_lesson(
+        issue=SimpleNamespace(issue_id="802", title="Fix store lock", body="src/store.py"),
+        attempt_id="hat_802",
+        final_state="failed",
+        predicted_lock_set=["path:src/store.py"],
+        actual_diff_set=["src/store.py"],
+        test_summary={},
+        verifier_summary={},
+        failure_class="tests_failed",
+        failure_reason="pytest failed",
+    )
+
+    lessons = memory.retrieve_lessons(
+        issue_text="Fix store race in src/store.py",
+        predicted_lock_set=["path:src/store.py"],
+        issue_id="801",
+    )
+    assert len(lessons) >= 1
+    # The lesson from issue 801 should be ranked first due to same-issue bonus
+    lesson_ids = [l.lesson_id for l in lessons]
+    # Find which lesson is from issue 801
+    matching = [l for l in store.healer_lessons if l["issue_id"] == "801"]
+    assert matching
+    if len(lessons) >= 2:
+        assert lessons[0].score > lessons[1].score

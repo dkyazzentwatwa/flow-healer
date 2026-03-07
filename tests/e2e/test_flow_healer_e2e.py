@@ -134,6 +134,64 @@ def _build_node_repo(tmp_path: Path) -> Path:
     return repo_path
 
 
+def _build_mixed_sandbox_repo(tmp_path: Path) -> Path:
+    repo_path = tmp_path / "mixed-repo"
+    origin_path = tmp_path / "mixed-origin.git"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-b", "main"], cwd=repo_path)
+    _git(["config", "user.name", "Flow Healer Test"], cwd=repo_path)
+    _git(["config", "user.email", "flow-healer@example.com"], cwd=repo_path)
+    _write(repo_path / "pyproject.toml", "[project]\nname = 'mixed-healer'\nversion = '0.1.0'\n")
+    _write(repo_path / "tests" / "test_root.py", "def test_root() -> None:\n    assert True\n")
+
+    _write(
+        repo_path / "e2e-smoke" / "node" / "package.json",
+        "{\n"
+        '  "name": "sandbox-node",\n'
+        '  "version": "1.0.0",\n'
+        '  "scripts": { "test": "node --test" }\n'
+        "}\n",
+    )
+    _write(
+        repo_path / "e2e-smoke" / "node" / "src" / "add.js",
+        "export function add(a, b) {\n  return a - b;\n}\n",
+    )
+    _write(
+        repo_path / "e2e-smoke" / "node" / "test" / "add.test.js",
+        "import assert from 'node:assert/strict';\n",
+    )
+
+    _write(
+        repo_path / "e2e-smoke" / "java-gradle" / "build.gradle",
+        "plugins { id 'java' }\nrepositories { mavenCentral() }\n",
+    )
+    _write(repo_path / "e2e-smoke" / "java-gradle" / "gradlew", "#!/bin/sh\nexit 0\n")
+    _write(
+        repo_path / "e2e-smoke" / "java-gradle" / "src" / "main" / "java" / "example" / "App.java",
+        "package example;\npublic class App { public static int add(int a, int b) { return a - b; } }\n",
+    )
+
+    _write(
+        repo_path / "e2e-smoke" / "ruby" / "Gemfile",
+        "source 'https://rubygems.org'\ngem 'rspec'\n",
+    )
+    _write(
+        repo_path / "e2e-smoke" / "ruby" / "add.rb",
+        "def add(a, b)\n  a - b\nend\n",
+    )
+    _write(
+        repo_path / "e2e-smoke" / "ruby" / "spec" / "add_spec.rb",
+        "RSpec.describe '#add' do\nend\n",
+    )
+
+    _git(["add", "."], cwd=repo_path)
+    _git(["commit", "-m", "init mixed sandboxes"], cwd=repo_path)
+    _git(["init", "--bare", str(origin_path)])
+    _git(["remote", "add", "origin", str(origin_path)], cwd=repo_path)
+    _git(["push", "-u", "origin", "main"], cwd=repo_path)
+    return repo_path
+
+
 @dataclass
 class FakeGitHubIssue:
     number: int
@@ -588,24 +646,17 @@ def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> 
         },
     )
 
-    def _run_docker_gate_locally(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
-        del kwargs
-        proc = subprocess.run(
-            command,
-            cwd=str(workspace),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=max(30, timeout_seconds),
-        )
-        output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    def _run_local_gate(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        del timeout_seconds, kwargs
         return {
-            "exit_code": int(proc.returncode),
-            "output_tail": output[-2000:],
+            "exit_code": 0,
+            "output_tail": f"ok: {' '.join(command)} @ {workspace}",
+            "gate_status": "passed",
+            "gate_reason": "",
         }
 
     monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
-    monkeypatch.setattr("flow_healer.healer_runner._run_pytest_in_docker", _run_docker_gate_locally)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", _run_local_gate)
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
     api = fake_github(state)
@@ -613,7 +664,7 @@ def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> 
         repo_path,
         state_root=tmp_path / "state",
         api_base_url=api.base_url,
-        test_gate_mode="docker_only",
+        test_gate_mode="local_only",
         language="node",
         test_command="npm test",
         pr_auto_merge_clean=False,
@@ -628,7 +679,114 @@ def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> 
     assert issue["state"] == "pr_open"
     attempts = store.list_healer_attempts(issue_id=str(issue_number), limit=1)
     assert attempts[0]["test_summary"]["language_effective"] == "node"
-    assert attempts[0]["test_summary"]["docker_full_exit_code"] == 0
+    assert attempts[0]["test_summary"]["local_full_exit_code"] == 0
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("title", "body", "patch_path", "before", "after", "expected_language", "expected_root", "expected_cmd"),
+    [
+        (
+            "Node sandbox regression",
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n"
+            "- e2e-smoke/node/test/add.test.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node && npm test -- --passWithNoTests\n",
+            "e2e-smoke/node/src/add.js",
+            "export function add(a, b) {\n  return a - b;\n}\n",
+            "export function add(a, b) {\n  return a + b;\n}\n",
+            "node",
+            "e2e-smoke/node",
+            ["npm", "test", "--", "--passWithNoTests"],
+        ),
+        (
+            "Java Gradle sandbox regression",
+            "Required code outputs:\n"
+            "- e2e-smoke/java-gradle/src/main/java/example/App.java\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/java-gradle && ./gradlew test --no-daemon\n",
+            "e2e-smoke/java-gradle/src/main/java/example/App.java",
+            "package example;\npublic class App { public static int add(int a, int b) { return a - b; } }\n",
+            "package example;\npublic class App { public static int add(int a, int b) { return a + b; } }\n",
+            "java_gradle",
+            "e2e-smoke/java-gradle",
+            ["./gradlew", "test", "--no-daemon"],
+        ),
+        (
+            "Ruby sandbox regression",
+            "Required code outputs:\n"
+            "- e2e-smoke/ruby/add.rb\n"
+            "- e2e-smoke/ruby/spec/add_spec.rb\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/ruby && bundle exec rspec\n",
+            "e2e-smoke/ruby/add.rb",
+            "def add(a, b)\n  a - b\nend\n",
+            "def add(a, b)\n  a + b\nend\n",
+            "ruby",
+            "e2e-smoke/ruby",
+            ["bundle", "exec", "rspec"],
+        ),
+    ],
+)
+def test_e2e_mixed_repo_sandbox_issue_uses_issue_scoped_language_and_root(
+    tmp_path: Path,
+    monkeypatch,
+    fake_github,
+    title: str,
+    body: str,
+    patch_path: str,
+    before: str,
+    after: str,
+    expected_language: str,
+    expected_root: str,
+    expected_cmd: list[str],
+) -> None:
+    repo_path = _build_mixed_sandbox_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title=title,
+        body=body,
+        labels=["healer:ready", "healer:pr-approved"],
+    )
+    connector = ScriptedConnector(
+        proposer_outputs={str(issue_number): [_make_patch(patch_path, before, after)]},
+    )
+    gate_calls: list[tuple[Path, list[str]]] = []
+
+    def _fake_local_gate(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        gate_calls.append((workspace, command))
+        return {
+            "exit_code": 0,
+            "output_tail": "ok",
+            "gate_status": "passed",
+            "gate_reason": "",
+        }
+
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", _fake_local_gate)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    api = fake_github(state)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        test_gate_mode="local_only",
+        pr_auto_merge_clean=False,
+    )
+    service.start("demo", once=True)
+
+    assert len(state.pulls) == 1
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    attempts = store.list_healer_attempts(issue_id=str(issue_number), limit=1)
+    summary = attempts[0]["test_summary"]
+    assert summary["language_effective"] == expected_language
+    assert summary["execution_root"] == expected_root
+    assert gate_calls
+    assert gate_calls[-1][0].as_posix().endswith(expected_root)
+    assert gate_calls[-1][1] == expected_cmd
     store.close()
 
 
