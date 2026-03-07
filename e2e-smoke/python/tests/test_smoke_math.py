@@ -17,3 +17,9 @@ smoke_math = _load_smoke_math()
 
 def test_add_returns_sum() -> None:
     assert smoke_math.add(2, 3) == 5
+
+
+def test_add_supports_negative_numbers() -> None:
+    assert smoke_math.add(-2, 3) == 1
+    assert smoke_math.add(2, -3) == -1
+    assert smoke_math.add(-2, -3) == -5
