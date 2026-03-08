@@ -13,6 +13,20 @@ class FancyInt(int):
     """Simple int subclass used to exercise operand normalization."""
 
 
+class ExplodingInt(int):
+    """Int subclass whose coercion fails so add() can normalize the error."""
+
+    def __int__(self) -> int:
+        raise RuntimeError("boom")
+
+
+class IntLikeObject:
+    """Object with an int conversion that should not be accepted implicitly."""
+
+    def __int__(self) -> int:
+        return 4
+
+
 def _load_smoke_math_module() -> ModuleType:
     spec = spec_from_file_location("smoke_math", SMOKE_MATH_PATH)
     assert spec is not None and spec.loader is not None
@@ -43,10 +57,12 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param("   ", 1, id="rejects_whitespace_only_string_operand"),
     pytest.param("not-a-number", 1, id="rejects_non_numeric_string_operand"),
     pytest.param(1.5, 1, id="rejects_float_operand"),
+    pytest.param(IntLikeObject(), 1, id="rejects_non_integral_int_like_object"),
+    pytest.param(ExplodingInt(4), 1, id="normalizes_exploding_int_subclass"),
 )
 
 EXPECTED_ADD_SUCCESS_CASE_COUNT = 8
-EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
+EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 6
 
 
 def _call_add(left: object, right: object) -> int:
@@ -72,9 +88,11 @@ def test_add_type_error_cases_raise_type_error(
     left: object,
     right: object,
 ) -> None:
-    """Smoke-check invalid operands raise a TypeError."""
-    with pytest.raises(TypeError):
+    """Smoke-check invalid operands raise a stable TypeError contract."""
+    with pytest.raises(TypeError, match="^add\\(\\) operands must be integers or integer strings$") as exc_info:
         _call_add(left, right)
+
+    assert str(exc_info.value) == SMOKE_MATH_MODULE.ERROR_MESSAGE
 
 
 @pytest.mark.parametrize(

@@ -55,7 +55,7 @@ def _normalize_integral_operand(value: Integral) -> int:
     """Return a plain integer for supported integral operands."""
     try:
         return int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except Exception as exc:
         raise TypeError(ERROR_MESSAGE) from exc
 
 
