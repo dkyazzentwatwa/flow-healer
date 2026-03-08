@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -481,3 +482,123 @@ def test_retrieve_lessons_same_issue_bonus():
     assert matching
     if len(lessons) >= 2:
         assert lessons[0].score > lessons[1].score
+
+
+def test_retrieve_lessons_caps_overlap_bonus():
+    store = FakeStore()
+    memory = HealerMemoryService(store, enabled=True)
+    now = datetime.now(UTC).isoformat()
+    store.healer_lessons.extend(
+        [
+            {
+                "lesson_id": "lesson_two_keys",
+                "lesson_kind": "guardrail",
+                "lesson_text": "Keep changes narrow around service and loop paths.",
+                "test_hint": "",
+                "scope_key": "path:src/flow_healer/service.py",
+                "problem_summary": "Fix runtime issue",
+                "guardrail": {
+                    "predicted_lock_set": [
+                        "path:src/flow_healer/service.py",
+                        "path:src/flow_healer/healer_loop.py",
+                    ],
+                    "actual_lock_set": [],
+                    "failure_class": "tests_failed",
+                },
+                "confidence": 80,
+                "outcome": "failure",
+                "issue_id": "901",
+                "created_at": now,
+            },
+            {
+                "lesson_id": "lesson_three_keys",
+                "lesson_kind": "guardrail",
+                "lesson_text": "Keep changes narrow around service, loop, and tracker paths.",
+                "test_hint": "",
+                "scope_key": "path:src/flow_healer/service.py",
+                "problem_summary": "Fix runtime issue",
+                "guardrail": {
+                    "predicted_lock_set": [
+                        "path:src/flow_healer/service.py",
+                        "path:src/flow_healer/healer_loop.py",
+                        "path:src/flow_healer/healer_tracker.py",
+                    ],
+                    "actual_lock_set": [],
+                    "failure_class": "tests_failed",
+                },
+                "confidence": 80,
+                "outcome": "failure",
+                "issue_id": "902",
+                "created_at": now,
+            },
+        ]
+    )
+
+    lessons = memory.retrieve_lessons(
+        issue_text="Fix runtime issue in service and loop code",
+        predicted_lock_set=[
+            "path:src/flow_healer/service.py",
+            "path:src/flow_healer/healer_loop.py",
+            "path:src/flow_healer/healer_tracker.py",
+        ],
+        limit=2,
+    )
+
+    assert len(lessons) == 2
+    scores = {lesson.lesson_id: lesson.score for lesson in lessons}
+    assert scores["lesson_two_keys"] == scores["lesson_three_keys"]
+
+
+def test_retrieve_lessons_applies_recency_decay():
+    store = FakeStore()
+    memory = HealerMemoryService(store, enabled=True)
+    recent = datetime.now(UTC).isoformat()
+    stale = (datetime.now(UTC) - timedelta(days=45)).isoformat()
+    store.healer_lessons.extend(
+        [
+            {
+                "lesson_id": "recent_lesson",
+                "lesson_kind": "guardrail",
+                "lesson_text": "Preserve current service behavior.",
+                "test_hint": "",
+                "scope_key": "path:src/flow_healer/service.py",
+                "problem_summary": "Fix service race",
+                "guardrail": {
+                    "predicted_lock_set": ["path:src/flow_healer/service.py"],
+                    "actual_lock_set": [],
+                    "failure_class": "tests_failed",
+                },
+                "confidence": 80,
+                "outcome": "failure",
+                "issue_id": "903",
+                "created_at": recent,
+            },
+            {
+                "lesson_id": "stale_lesson",
+                "lesson_kind": "guardrail",
+                "lesson_text": "Preserve current service behavior.",
+                "test_hint": "",
+                "scope_key": "path:src/flow_healer/service.py",
+                "problem_summary": "Fix service race",
+                "guardrail": {
+                    "predicted_lock_set": ["path:src/flow_healer/service.py"],
+                    "actual_lock_set": [],
+                    "failure_class": "tests_failed",
+                },
+                "confidence": 80,
+                "outcome": "failure",
+                "issue_id": "904",
+                "created_at": stale,
+            },
+        ]
+    )
+
+    lessons = memory.retrieve_lessons(
+        issue_text="Fix service race in src/flow_healer/service.py",
+        predicted_lock_set=["path:src/flow_healer/service.py"],
+        limit=2,
+    )
+
+    assert len(lessons) == 2
+    assert lessons[0].lesson_id == "recent_lesson"
+    assert lessons[0].score > lessons[1].score

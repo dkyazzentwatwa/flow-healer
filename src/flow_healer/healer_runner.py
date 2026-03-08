@@ -95,7 +95,8 @@ class HealerRunner:
         self.max_code_proposer_retries = 3
         self.max_artifact_proposer_retries = 2
         self.code_change_turn_timeout_seconds = max(900, self.timeout_seconds)
-        self.max_generated_artifact_cleanup_cycles = 1
+        # Allow one cleanup before validation and one more after validation if tests regenerate artifacts.
+        self.max_generated_artifact_cleanup_cycles = 2
 
     def run_attempt(
         self,
@@ -518,7 +519,10 @@ class HealerRunner:
                 final_workspace_status["contamination_paths"] = [
                     path
                     for path in final_workspace_status["contamination_paths"]
-                    if not _is_tolerated_runtime_artifact(path, language=resolved_execution.language_effective)
+                    if not (
+                        _is_tolerated_runtime_artifact(path, language=resolved_execution.language_effective)
+                        and path not in final_workspace_status.get("staged_paths", [])
+                    )
                 ]
             if final_workspace_status["contamination_paths"]:
                 final_workspace_status["cleanup_performed"] = True
@@ -1065,6 +1069,9 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
         tailored_lines.append(
             "The AI verifier rejected the previous fix. Address the underlying root cause."
         )
+        tailored_lines.append(
+            "Stay narrowly scoped to the named targets and nearby existing files. Do not rebuild sandbox scaffolding, package manifests, or test harnesses unless the issue explicitly requires them."
+        )
 
     guidance = "\n".join(tailored_lines).strip()
     if guidance:
@@ -1142,6 +1149,13 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
                 "Prefer acting once the likely root cause is confirmed; do not return exploratory summaries.",
                 "Escalate to a retry only when output format or patch validity failed.",
             ]
+        )
+    if task_spec.output_targets:
+        lines.append(
+            "If the named target files already exist, patch them in place. Do not recreate surrounding scaffolding, manifests, or test runners unless they are explicitly requested or genuinely missing."
+        )
+        lines.append(
+            "Prefer the repo's existing test style and fallback patterns. Do not add new framework-specific test clients or dependencies when existing local patterns already cover the behavior."
         )
     if task_spec.language and task_spec.language != "unknown":
         lines.append(f"Follow {task_spec.language} conventions for imports, dependencies, tests, and file organization.")
@@ -1366,6 +1380,8 @@ _GENERIC_ARTIFACT_DIRS = {
     "build",
     ".cache",
     "pip-wheel-metadata",
+    ".build",
+    ".swiftpm",
 }
 _GENERIC_ARTIFACT_FILES = {
     ".ds_store",
@@ -1379,6 +1395,7 @@ _GENERIC_ARTIFACT_SUFFIXES = {
 _LANGUAGE_ARTIFACT_DIRS = {
     "python": {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "env", "dist", "build", "pip-wheel-metadata"},
     "node": {"node_modules", "dist", "build", "coverage", ".next", ".nuxt"},
+    "swift": {".build", ".swiftpm"},
 }
 _LOCKFILE_GROUPS = {
     "package-lock.json": {"package.json", "dependency", "dependencies", "lockfile"},
@@ -1443,7 +1460,7 @@ def _filter_staged_changes(
         )
     ]
     if excluded_paths:
-        _unstage_paths(workspace, excluded_paths)
+        _cleanup_workspace_paths(workspace, excluded_paths)
     return FilteredStageResult(
         kept_paths=_changed_paths(workspace),
         excluded_paths=excluded_paths,
@@ -1550,6 +1567,13 @@ def _cleanup_workspace_paths(workspace: Path, paths: list[str]) -> None:
             timeout=30,
         )
         subprocess.run(
+            ["git", "-C", str(workspace), "reset", "HEAD", "--", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
             ["git", "-C", str(workspace), "clean", "-fdx", "--", path],
             check=False,
             capture_output=True,
@@ -1622,6 +1646,7 @@ def _stabilize_workspace_hygiene(
             path
             for path in refreshed["contamination_paths"]
             if _is_tolerated_runtime_artifact(path, language=language)
+            and path not in refreshed.get("staged_paths", [])
         ]
         if tolerated_paths:
             refreshed["contamination_paths"] = [
@@ -1637,15 +1662,20 @@ def _stabilize_workspace_hygiene(
 
 
 def _is_tolerated_runtime_artifact(path: str, *, language: str) -> bool:
-    normalized = str(path or "").strip().lstrip("./")
+    normalized = str(path or "").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
     if not normalized:
         return False
     normalized_lower = normalized.lower()
+    effective_language = str(language or "").strip().lower()
     lockfile_name = PurePosixPath(normalized_lower).name
     if lockfile_name in _LOCKFILE_GROUPS:
-        return False
+        # npm can regenerate package-lock.json during validation even when lockfile edits
+        # are not part of the requested patch. Treat it as tolerated runtime noise.
+        return effective_language == "node" and lockfile_name == "package-lock.json"
 
-    parts = [part.lower() for part in PurePosixPath(normalized).parts]
+    parts = _normalized_path_parts(normalized)
     filename = parts[-1] if parts else normalized_lower
     if filename in _GENERIC_ARTIFACT_FILES:
         return True
@@ -1656,7 +1686,6 @@ def _is_tolerated_runtime_artifact(path: str, *, language: str) -> bool:
     if any(part.endswith(".egg-info") for part in parts):
         return True
 
-    effective_language = str(language or "").strip().lower()
     language_dirs = _LANGUAGE_ARTIFACT_DIRS.get(effective_language, set())
     return any(part in language_dirs for part in parts[:-1])
 
@@ -1694,7 +1723,9 @@ def _should_exclude_generated_artifact(
     task_spec: HealerTaskSpec | None,
     language: str,
 ) -> bool:
-    normalized = str(path or "").strip().lstrip("./")
+    normalized = str(path or "").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
     if not normalized:
         return False
     if _is_explicit_output_target(normalized, task_spec):
@@ -1710,7 +1741,7 @@ def _should_exclude_generated_artifact(
             task_spec=task_spec,
         )
 
-    parts = [part.lower() for part in PurePosixPath(normalized).parts]
+    parts = _normalized_path_parts(normalized)
     filename = parts[-1] if parts else normalized_lower
     if filename in _GENERIC_ARTIFACT_FILES:
         return True
@@ -1727,6 +1758,15 @@ def _should_exclude_generated_artifact(
         return True
 
     return False
+
+
+def _normalized_path_parts(path: str) -> list[str]:
+    normalized = str(path or "").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized:
+        return []
+    return [part.lower() for part in normalized.split("/") if part]
 
 
 def _is_explicit_output_target(path: str, task_spec: HealerTaskSpec | None) -> bool:

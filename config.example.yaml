@@ -18,10 +18,10 @@ control:
     auth_mode: none
   mail:
     enabled: false
-    account: dkyazze@icloud.com
+    account: ops@example.com
     mailbox: INBOX
     trusted_senders:
-      - dkyazze@icloud.com
+      - ops@example.com
     poll_interval_seconds: 30
     subject_prefix: "FH:"
     send_replies: true
@@ -67,6 +67,10 @@ repos:
     local_gate_policy: auto
     # Language/runtime strategy:
     # Supported: python | node | swift
+    # The issue parser can still recognize additional validation commands and
+    # sandbox path hints so unsupported-language issues fail explicitly instead
+    # of being misrouted, but execution support is limited to the three
+    # languages above.
     # Leave blank to auto-detect from repo marker files.
     language: ""
     # Optional overrides for the resolved language strategy.
@@ -84,3 +88,8 @@ repos:
     scan_max_issues_per_run: 5
     scan_default_labels:
       - kind:scan
+    conflict_auto_requeue_enabled: true
+    conflict_auto_requeue_max_attempts: 3
+    overlap_scope_queue_enabled: true
+    dedupe_enabled: true
+    dedupe_close_duplicates: true

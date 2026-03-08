@@ -26,13 +26,15 @@ _EXPLICIT_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _PATH_DIRECTIVE_RE = re.compile(r"\bpath:\s*(?P<path>[^\s`'\"(){}<>,;:]+)", re.IGNORECASE)
-_CODE_HINT_RE = re.compile(r"\b(build|feature|implement|fix|bug|app|todo app|api|service|refactor|code)\b", re.IGNORECASE)
+_BUILD_HINT_RE = re.compile(r"\b(build|feature|implement|scaffold|bootstrap)\b", re.IGNORECASE)
+_FIX_HINT_RE = re.compile(r"\b(fix|bug|repair|regression|stabilize|harden|tighten|narrow|correct)\b", re.IGNORECASE)
+_CODE_HINT_RE = re.compile(r"\b(build|feature|implement|fix|bug|refactor|code)\b", re.IGNORECASE)
 _RESEARCH_HINT_RE = re.compile(r"\b(research|investigate|analyze|compare|survey|look up|best ways|best practices)\b", re.IGNORECASE)
 _DOC_HINT_RE = re.compile(r"\b(plan|spec|doc|docs|readme|guide|proposal|notes|write up|document)\b", re.IGNORECASE)
 _EDIT_HINT_RE = re.compile(r"\b(edit|revise|update|rewrite|expand|tighten|clarify)\b", re.IGNORECASE)
 _OUTPUT_CONTEXT_RE = re.compile(r"\b(output|deliverable|required output|required outputs|create|write|generate|report)\b", re.IGNORECASE)
 _SCOPE_CONTEXT_RE = re.compile(r"\b(scope|review|analyze|inspect|input|source files?)\b", re.IGNORECASE)
-_TASK_KIND_RE = re.compile(r"^\s*[-*]?\s*task\s*kind:\s*([a-zA-Z]+)\s*$")
+_TASK_KIND_RE = re.compile(r"^\s*[-*]?\s*task\s*kind:\s*([a-zA-Z]+)\s*$", re.IGNORECASE)
 _INPUT_CONTEXT_RE = re.compile(
     r"\b(input context|input spec|spec only|input only|input-only|not the output target|not output targets?)\b",
     re.IGNORECASE,
@@ -69,6 +71,9 @@ _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-smoke/ruby", "ruby"),
     ("e2e-smoke/java-gradle", "java_gradle"),
     ("e2e-smoke/java-maven", "java_maven"),
+    ("e2e-apps/node-next", "node"),
+    ("e2e-apps/python-fastapi", "python"),
+    ("e2e-apps/swift-todo", "swift"),
 )
 
 
@@ -148,12 +153,21 @@ def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
 
 def _classify_task_kind(*, issue_text: str, output_targets: tuple[str, ...]) -> str:
     lowered = issue_text.lower()
+    if output_targets and any(_is_code_path(path) for path in output_targets):
+        natural_language = _natural_language_text(issue_text)
+        if _BUILD_HINT_RE.search(natural_language):
+            return "build"
+        if _FIX_HINT_RE.search(natural_language):
+            return "fix"
+        if _EDIT_HINT_RE.search(natural_language):
+            return "edit"
+        return "edit"
     if _CODE_HINT_RE.search(lowered):
-        return "build" if re.search(r"\b(build|feature|app|implement)\b", lowered) else "fix"
+        return "build" if _BUILD_HINT_RE.search(_natural_language_text(issue_text)) else "fix"
+    if _FIX_HINT_RE.search(lowered):
+        return "fix"
     if _RESEARCH_HINT_RE.search(lowered):
         return "research"
-    if output_targets and any(_is_code_path(path) for path in output_targets):
-        return "edit"
     if _DOC_HINT_RE.search(lowered):
         return "docs"
     if _EDIT_HINT_RE.search(lowered):
@@ -195,7 +209,7 @@ def _explicit_paths(issue_text: str) -> list[str]:
     current_heading = ""
     for raw_line in issue_text.splitlines():
         line = _strip_external_references(raw_line.strip())
-        if line.startswith("#"):
+        if _looks_like_heading(line):
             current_heading = line
         for match in _PATH_DIRECTIVE_RE.finditer(line):
             candidate = match.group("path").strip().lstrip("./")
@@ -217,8 +231,15 @@ def _explicit_paths(issue_text: str) -> list[str]:
                 seen.add(key)
                 scored[candidate] = 0
             scored[candidate] += _score_path_context(line=line, heading=current_heading)
-    prioritized = [path for path in order if scored.get(path, 0) >= 2]
-    return prioritized or order
+    rooted_paths = {path.lower() for path in order if "/" in path}
+    prioritized = [
+        path for path in order
+        if scored.get(path, 0) >= 2 and not _looks_like_incidental_bare_path(path, rooted_paths=rooted_paths)
+    ]
+    if prioritized:
+        return prioritized
+    filtered = [path for path in order if not _looks_like_incidental_bare_path(path, rooted_paths=rooted_paths)]
+    return filtered or order
 
 
 def _explicit_directories(issue_text: str) -> list[str]:
@@ -392,9 +413,11 @@ def _normalize_known_sandbox_root(path: str) -> str:
     if not normalized:
         return ""
     parts = Path(normalized).parts
-    if len(parts) >= 2 and parts[0] == "e2e-smoke":
+    if len(parts) >= 2 and parts[0] in {"e2e-smoke", "e2e-apps"}:
         return Path(parts[0], parts[1]).as_posix()
-    return normalized if normalized.startswith("e2e-smoke/") else ""
+    if normalized.startswith("e2e-smoke/") or normalized.startswith("e2e-apps/"):
+        return normalized
+    return ""
 
 
 def _language_from_command(text: str) -> str:
@@ -430,6 +453,37 @@ def _is_code_path(path: str) -> bool:
 
 def _strip_external_references(text: str) -> str:
     return _URL_RE.sub(" ", text or "")
+
+
+def _looks_like_heading(line: str) -> bool:
+    stripped = str(line or "").strip()
+    if not stripped:
+        return False
+    return stripped.startswith("#") or stripped.endswith(":")
+
+
+def _looks_like_incidental_bare_path(path: str, *, rooted_paths: set[str]) -> bool:
+    candidate = str(path or "").strip().lstrip("./")
+    if not candidate or "/" in candidate:
+        return False
+    lowered = candidate.lower()
+    if any(rooted.endswith(f"/{lowered}") for rooted in rooted_paths):
+        return True
+    suffix = Path(candidate).suffix.lower()
+    if suffix not in {".js", ".jsx", ".ts", ".tsx", ".swift", ".py", ".rb", ".go", ".rs"}:
+        return False
+    stem = Path(candidate).stem
+    # Human-readable product names like "Next.js" should not become file targets
+    # when the issue also provides rooted repo paths.
+    return bool(rooted_paths) and any(char.isupper() for char in stem)
+
+
+def _natural_language_text(issue_text: str) -> str:
+    text = _strip_external_references(issue_text)
+    text = _EXPLICIT_PATH_RE.sub(" ", text)
+    text = _DIRECTORY_RE.sub(" ", text)
+    text = _COMMAND_LINE_RE.sub(" ", text)
+    return text.lower()
 
 
 def _slugify(value: str) -> str:

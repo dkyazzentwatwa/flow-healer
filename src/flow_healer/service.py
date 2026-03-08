@@ -34,12 +34,21 @@ class FlowHealerService:
         self.config = config
 
     def build_runtime(self, repo: RelaySettings) -> RepoRuntime:
-        store = SQLiteStore(self.config.repo_db_path(repo.repo_name))
+        store = SQLiteStore(
+            self.config.repo_db_path(repo.repo_name),
+            busy_timeout_ms=repo.healer_sqlite_busy_timeout_ms,
+        )
         store.bootstrap()
         tracker = GitHubHealerTracker(
             repo_path=Path(repo.healer_repo_path),
             token=os.getenv(self.config.service.github_token_env, "").strip(),
             api_base_url=self.config.service.github_api_base_url,
+            mutation_min_interval_ms=repo.healer_github_mutation_min_interval_ms,
+            retry_respect_retry_after=repo.healer_retry_respect_retry_after,
+            retry_jitter_mode=repo.healer_retry_jitter_mode,
+            retry_max_backoff_seconds=repo.healer_retry_max_backoff_seconds,
+            poll_use_conditional_requests=repo.healer_poll_use_conditional_requests,
+            poll_etag_ttl_seconds=repo.healer_poll_etag_ttl_seconds,
         )
         if self.config.service.connector_backend == "app_server":
             connector = CodexAppServerConnector(

@@ -22,17 +22,20 @@ class HealerDispatcher:
         worker_id: str,
         lease_seconds: int,
         max_active_issues: int,
+        overlap_scope_queue_enabled: bool = True,
     ) -> None:
         self.store = store
         self.worker_id = worker_id
         self.lease_seconds = max(30, int(lease_seconds))
         self.max_active_issues = max(1, int(max_active_issues))
+        self.overlap_scope_queue_enabled = bool(overlap_scope_queue_enabled)
 
     def claim_next_issue(self) -> dict[str, Any] | None:
         return self.store.claim_next_healer_issue(
             worker_id=self.worker_id,
             lease_seconds=self.lease_seconds,
             max_active_issues=self.max_active_issues,
+            enforce_scope_queue=self.overlap_scope_queue_enabled,
         )
 
     def acquire_prediction_locks(self, *, issue_id: str, lock_keys: list[str]) -> LockAcquireResult:

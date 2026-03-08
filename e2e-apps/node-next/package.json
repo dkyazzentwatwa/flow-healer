@@ -4,6 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "sh -c 'node --test tests/todo-service.test.js'"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "sh -c 'node --test tests/*.test.js'"
+  },
+  "dependencies": {
+    "next": "15.2.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
   }
 }

@@ -109,6 +109,23 @@ class RelaySettings:
     healer_scan_max_issues_per_run: int = 5
     healer_scan_default_labels: list[str] = field(default_factory=lambda: ["kind:scan"])
     healer_stuck_pr_timeout_minutes: int = 60
+    healer_conflict_auto_requeue_enabled: bool = True
+    healer_conflict_auto_requeue_max_attempts: int = 3
+    healer_overlap_scope_queue_enabled: bool = True
+    healer_dedupe_enabled: bool = True
+    healer_dedupe_close_duplicates: bool = True
+    healer_github_mutation_min_interval_ms: int = 1000
+    healer_github_max_parallel_mutations: int = 1
+    healer_retry_respect_retry_after: bool = True
+    healer_retry_jitter_mode: str = "full_jitter"
+    healer_retry_max_backoff_seconds: int = 300
+    healer_poll_use_conditional_requests: bool = True
+    healer_poll_etag_ttl_seconds: int = 300
+    healer_infra_dlq_threshold: int = 8
+    healer_infra_dlq_cooldown_seconds: int = 3600
+    healer_sqlite_busy_timeout_ms: int = 5000
+    healer_subprocess_kill_grace_seconds: int = 5
+    healer_mergeability_recheck_delay_seconds: int = 2
 
 
 @dataclass(slots=True)
@@ -203,6 +220,23 @@ class AppConfig:
                     healer_scan_max_issues_per_run=int(item.get("scan_max_issues_per_run") or 5),
                     healer_scan_default_labels=_list_of_str(item.get("scan_default_labels"), ["kind:scan"]),
                     healer_stuck_pr_timeout_minutes=int(item.get("stuck_pr_timeout_minutes") or 60),
+                    healer_conflict_auto_requeue_enabled=bool(item.get("conflict_auto_requeue_enabled", True)),
+                    healer_conflict_auto_requeue_max_attempts=int(item.get("conflict_auto_requeue_max_attempts") or 3),
+                    healer_overlap_scope_queue_enabled=bool(item.get("overlap_scope_queue_enabled", True)),
+                    healer_dedupe_enabled=bool(item.get("dedupe_enabled", True)),
+                    healer_dedupe_close_duplicates=bool(item.get("dedupe_close_duplicates", True)),
+                    healer_github_mutation_min_interval_ms=int(item.get("github_mutation_min_interval_ms") or 1000),
+                    healer_github_max_parallel_mutations=int(item.get("github_max_parallel_mutations") or 1),
+                    healer_retry_respect_retry_after=bool(item.get("retry_respect_retry_after", True)),
+                    healer_retry_jitter_mode=str(item.get("retry_jitter_mode") or "full_jitter"),
+                    healer_retry_max_backoff_seconds=int(item.get("retry_max_backoff_seconds") or 300),
+                    healer_poll_use_conditional_requests=bool(item.get("poll_use_conditional_requests", True)),
+                    healer_poll_etag_ttl_seconds=int(item.get("poll_etag_ttl_seconds") or 300),
+                    healer_infra_dlq_threshold=int(item.get("infra_dlq_threshold") or 8),
+                    healer_infra_dlq_cooldown_seconds=int(item.get("infra_dlq_cooldown_seconds") or 3600),
+                    healer_sqlite_busy_timeout_ms=int(item.get("sqlite_busy_timeout_ms") or 5000),
+                    healer_subprocess_kill_grace_seconds=int(item.get("subprocess_kill_grace_seconds") or 5),
+                    healer_mergeability_recheck_delay_seconds=int(item.get("mergeability_recheck_delay_seconds") or 2),
                 )
             )
         control_raw = raw.get("control") if isinstance(raw.get("control"), dict) else {}

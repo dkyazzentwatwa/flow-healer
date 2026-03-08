@@ -1,1 +1,1 @@
-"""Python FastAPI sandbox application package."""
+"""Python FastAPI sandbox package for Flow Healer e2e issues."""

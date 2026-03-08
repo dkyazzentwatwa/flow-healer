@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -38,6 +39,7 @@ def _make_loop(store, **overrides):
         healer_pr_auto_approve_clean=overrides.get("healer_pr_auto_approve_clean", True),
         healer_pr_auto_merge_clean=overrides.get("healer_pr_auto_merge_clean", True),
         healer_pr_merge_method=overrides.get("healer_pr_merge_method", "squash"),
+        healer_default_branch=overrides.get("healer_default_branch", "main"),
         healer_trusted_actors=[],
         healer_scan_enable_issue_creation=overrides.get("healer_scan_enable_issue_creation", False),
         healer_scan_poll_interval_seconds=overrides.get("healer_scan_poll_interval_seconds", 180.0),
@@ -53,6 +55,14 @@ def _make_loop(store, **overrides):
         healer_circuit_breaker_failure_rate=overrides.get("healer_circuit_breaker_failure_rate", 0.5),
         healer_circuit_breaker_cooldown_seconds=overrides.get("healer_circuit_breaker_cooldown_seconds", 900),
         healer_stuck_pr_timeout_minutes=overrides.get("healer_stuck_pr_timeout_minutes", 60),
+        healer_conflict_auto_requeue_enabled=overrides.get("healer_conflict_auto_requeue_enabled", True),
+        healer_conflict_auto_requeue_max_attempts=overrides.get("healer_conflict_auto_requeue_max_attempts", 3),
+        healer_overlap_scope_queue_enabled=overrides.get("healer_overlap_scope_queue_enabled", True),
+        healer_dedupe_enabled=overrides.get("healer_dedupe_enabled", True),
+        healer_dedupe_close_duplicates=overrides.get("healer_dedupe_close_duplicates", True),
+        healer_max_diff_files=overrides.get("healer_max_diff_files", 8),
+        healer_max_diff_lines=overrides.get("healer_max_diff_lines", 400),
+        healer_max_failed_tests_allowed=overrides.get("healer_max_failed_tests_allowed", 0),
     )
     loop = AutonomousHealerLoop.__new__(AutonomousHealerLoop)
     loop.settings = settings
@@ -326,6 +336,56 @@ def test_ingest_ready_issues_requeues_archived_issue(tmp_path):
     loop.tracker.add_issue_reaction.assert_not_called()
 
 
+def test_ingest_ready_issues_coalesces_duplicate_scope(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    loop = _make_loop(store, healer_dedupe_enabled=True, healer_dedupe_close_duplicates=True)
+    loop.tracker.close_issue.return_value = True
+    shared_body = (
+        "Required code outputs:\n"
+        "- e2e-smoke/node/src/add.js\n"
+        "- e2e-smoke/node/test/add.test.js\n\n"
+        "Validation:\n"
+        "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+    )
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="5030",
+            repo="owner/repo",
+            title="Node regression canonical",
+            body=shared_body,
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/5030",
+        ),
+        HealerIssue(
+            issue_id="5031",
+            repo="owner/repo",
+            title="Node regression duplicate",
+            body=shared_body,
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/5031",
+        ),
+    ]
+
+    loop._ingest_ready_issues()
+
+    canonical = store.get_healer_issue("5030")
+    duplicate = store.get_healer_issue("5031")
+    assert canonical is not None
+    assert duplicate is not None
+    assert duplicate["state"] == "archived"
+    assert duplicate["last_failure_class"] == "duplicate_superseded"
+    assert duplicate["superseded_by_issue_id"] == "5030"
+    assert "5031" in str(canonical.get("feedback_context") or "")
+    loop.tracker.close_issue.assert_called_once_with(issue_id="5031")
+    assert loop.tracker.add_issue_reaction.call_count == 1
+
+
 def test_process_claimed_issue_archives_closed_remote_issue(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -397,11 +457,81 @@ def test_process_claimed_issue_requeues_when_language_preflight_fails(tmp_path):
     attempts = store.list_healer_attempts(issue_id="5041")
     assert issue is not None
     assert issue["state"] == "queued"
+    assert issue["attempt_count"] == 0
     assert issue["last_failure_class"] == "preflight_failed"
-    assert attempts[0]["failure_class"] == "preflight_failed"
-    assert attempts[0]["test_summary"]["preflight_status"] == "failed"
+    assert attempts == []
     loop.runner.run_attempt.assert_not_called()
     loop.workspace_manager.ensure_workspace.assert_not_called()
+
+
+def test_process_claimed_issue_requeues_when_workspace_is_corrupt_before_attempt_start(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5042",
+        repo="owner/repo",
+        title="Python workspace issue",
+        body="Validation: pytest tests/test_example.py -q",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {"issue_id": "5042", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.side_effect = RuntimeError("broken .git metadata")
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("5042")
+    attempts = store.list_healer_attempts(issue_id="5042")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["attempt_count"] == 0
+    assert issue["last_failure_class"] == "workspace_corrupt"
+    assert attempts == []
+    loop.workspace_manager.prepare_workspace.assert_not_called()
+
+
+def test_process_claimed_issue_lock_conflict_requeues_without_attempt_increment(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5043",
+        repo="owner/repo",
+        title="Node lock contention issue",
+        body="Validation: cd e2e-smoke/node && npm test -- --passWithNoTests",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {"issue_id": "5043", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(
+        issue_id="5043",
+        branch="healer/issue-5043-node-lock-contention-issue",
+        path=tmp_path,
+    )
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(
+        acquired=False,
+        reason="lock_conflict:path:e2e-smoke/node",
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("5043")
+    attempts = store.list_healer_attempts(issue_id="5043")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["attempt_count"] == 0
+    assert issue["last_failure_class"] == "lock_conflict"
+    assert attempts == []
+    loop.runner.run_attempt.assert_not_called()
 
 
 def test_claim_is_actionable_is_case_insensitive_for_labels(tmp_path):
@@ -578,7 +708,7 @@ def test_auto_merge_open_pr_skips_dirty_pr(tmp_path):
     loop.tracker.merge_pr.assert_not_called()
 
 
-def test_reconcile_pr_outcomes_blocks_conflicted_pr_once(tmp_path):
+def test_reconcile_pr_outcomes_requeues_conflicted_pr_by_default(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
     store.upsert_healer_issue(
@@ -596,21 +726,87 @@ def test_reconcile_pr_outcomes_blocks_conflicted_pr_once(tmp_path):
     loop.tracker.get_pr_details.return_value = PullRequestDetails(
         number=132, state="conflict", html_url="", mergeable_state="dirty", author="bot"
     )
-
+    loop.tracker.close_pr.return_value = True
     resolved = loop._reconcile_pr_outcomes()
 
     issue = store.get_healer_issue("6015")
     assert resolved == 0
     assert issue is not None
-    assert issue["state"] == "blocked"
-    assert issue["pr_number"] == 132
-    assert issue["pr_state"] == "conflict"
-    assert issue["last_failure_class"] == "pr_conflict"
-    assert "merge conflicts" in str(issue["last_failure_reason"])
+    assert issue["state"] == "queued"
+    assert issue["pr_number"] == 0
+    assert issue["pr_state"] == ""
+    assert issue["last_failure_class"] == "pr_conflict_requeued"
+    assert int(issue["conflict_requeue_count"] or 0) == 1
+    loop.tracker.close_pr.assert_called_once()
+    loop.tracker.close_issue.assert_not_called()
     loop.tracker.add_issue_comment.assert_called_once()
 
 
-def test_reconcile_pr_outcomes_does_not_duplicate_comment_for_blocked_conflict(tmp_path):
+def test_reconcile_pr_outcomes_blocks_after_conflict_requeue_cap(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60151",
+        repo="owner/repo",
+        title="Issue 60151",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60151",
+        state="pr_open",
+        pr_number=232,
+        pr_state="open",
+        conflict_requeue_count=3,
+    )
+
+    loop = _make_loop(store, healer_conflict_auto_requeue_max_attempts=3)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=232, state="conflict", html_url="", mergeable_state="dirty", author="bot"
+    )
+    loop.tracker.close_pr.return_value = True
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("60151")
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["last_failure_class"] == "pr_conflict_retry_exhausted"
+    assert int(issue["conflict_requeue_count"] or 0) == 4
+
+
+def test_reconcile_pr_outcomes_archives_when_conflict_auto_requeue_disabled(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60152",
+        repo="owner/repo",
+        title="Issue 60152",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="60152", state="pr_open", pr_number=233, pr_state="open")
+
+    loop = _make_loop(store, healer_conflict_auto_requeue_enabled=False)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=233, state="conflict", html_url="", mergeable_state="dirty", author="bot"
+    )
+    loop.tracker.close_pr.return_value = True
+    loop.tracker.close_issue.return_value = True
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("60152")
+    assert issue is not None
+    assert issue["state"] == "archived"
+    assert issue["last_failure_class"] == "pr_conflict_superseded"
+
+
+def test_reconcile_pr_outcomes_blocks_conflict_when_close_fails(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
     store.upsert_healer_issue(
@@ -622,12 +818,13 @@ def test_reconcile_pr_outcomes_does_not_duplicate_comment_for_blocked_conflict(t
         labels=["healer:ready"],
         priority=5,
     )
-    store.set_healer_issue_state(issue_id="6016", state="blocked", pr_number=133, pr_state="conflict")
+    store.set_healer_issue_state(issue_id="6016", state="pr_open", pr_number=133, pr_state="open")
 
     loop = _make_loop(store)
     loop.tracker.get_pr_details.return_value = PullRequestDetails(
         number=133, state="conflict", html_url="", mergeable_state="dirty", author="bot"
     )
+    loop.tracker.close_pr.return_value = False
 
     resolved = loop._reconcile_pr_outcomes()
 
@@ -636,7 +833,9 @@ def test_reconcile_pr_outcomes_does_not_duplicate_comment_for_blocked_conflict(t
     assert issue is not None
     assert issue["state"] == "blocked"
     assert issue["pr_state"] == "conflict"
-    loop.tracker.add_issue_comment.assert_not_called()
+    assert issue["last_failure_class"] == "pr_conflict"
+    loop.tracker.close_issue.assert_not_called()
+    loop.tracker.add_issue_comment.assert_called_once()
 
 
 def test_reconcile_pr_outcomes_requeues_closed_conflicted_pr(tmp_path):
@@ -873,7 +1072,7 @@ def test_conflicted_issue_is_ignored_by_auto_pr_actions_after_reconcile(tmp_path
 
     issue = store.get_healer_issue("6032")
     assert issue is not None
-    assert issue["state"] == "blocked"
+    assert issue["state"] == "queued"
     assert approved == 0
     assert merged == 0
     loop.tracker.approve_pr.assert_not_called()
@@ -1040,19 +1239,111 @@ def test_lease_heartbeat_renews_issue_lease(tmp_path):
             return self.calls > 1
 
     stop_event = _StopAfterOne()
+    lease_lost = threading.Event()
     loop.store = MagicMock()
     loop.dispatcher = MagicMock()
     loop.dispatcher.lease_seconds = 180
     loop.worker_id = "worker-a"
     loop.store.renew_healer_issue_lease.return_value = True
 
-    loop._lease_heartbeat("703", stop_event)  # type: ignore[arg-type]
+    loop._lease_heartbeat("703", stop_event, lease_lost)  # type: ignore[arg-type]
 
     loop.store.renew_healer_issue_lease.assert_called_once_with(
         issue_id="703",
         worker_id="worker-a",
         lease_seconds=180,
     )
+    assert lease_lost.is_set() is False
+
+
+def test_lease_heartbeat_sets_event_when_renewal_fails(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    class _StopAfterOne:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _interval: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    stop_event = _StopAfterOne()
+    lease_lost = threading.Event()
+    loop.store = MagicMock()
+    loop.dispatcher = MagicMock()
+    loop.dispatcher.lease_seconds = 180
+    loop.worker_id = "worker-a"
+    loop.store.renew_healer_issue_lease.return_value = False
+
+    loop._lease_heartbeat("704", stop_event, lease_lost)  # type: ignore[arg-type]
+
+    assert lease_lost.is_set() is True
+
+
+def test_process_claimed_issue_requeues_when_lease_is_lost_after_runner(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="7041",
+        repo="owner/repo",
+        title="Issue 7041",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    trip_lease = threading.Event()
+    workspace = tmp_path / "workspaces" / "issue-7041"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "7041", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(
+        path=workspace,
+        branch="healer/issue-7041",
+    )
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.verifier.verify.return_value = SimpleNamespace(passed=True, summary="ok")
+
+    def fake_lease_heartbeat(_issue_id, stop_event, lease_lost):
+        while not stop_event.wait(0.01):
+            if trip_lease.is_set():
+                lease_lost.set()
+                return
+
+    loop._lease_heartbeat = fake_lease_heartbeat
+    def fake_run_attempt(**_):
+        trip_lease.set()
+        threading.Event().wait(0.05)
+        return SimpleNamespace(
+            success=True,
+            diff_paths=["src/flow_healer/service.py"],
+            test_summary={"failed_tests": 0},
+            proposer_output="```diff\ndiff --git a/x b/x\n```",
+            workspace_status={},
+            failure_class="",
+            failure_reason="",
+            failure_fingerprint="",
+        )
+
+    loop.runner.run_attempt.side_effect = fake_run_attempt
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("7041")
+    attempts = store.list_healer_attempts(issue_id="7041")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "lease_expired"
+    assert attempts[0]["failure_class"] == "lease_expired"
+    loop.verifier.verify.assert_not_called()
+    loop._commit_and_push.assert_not_called()
 
 
 def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):
@@ -1273,6 +1564,34 @@ def test_backoff_or_fail_no_code_diff_does_not_exhaust_retry_budget(tmp_path):
     loop.tracker.add_issue_comment.assert_called()
 
 
+def test_backoff_or_fail_lock_conflict_does_not_exhaust_retry_budget(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="3051",
+        repo="owner/repo",
+        title="Issue 3051",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_backoff_initial_seconds=60)
+
+    state = loop._backoff_or_fail(
+        issue_id="3051",
+        attempt_no=9,
+        failure_class="lock_conflict",
+        failure_reason="lock_conflict:path:e2e-smoke/node",
+    )
+    issue = store.get_healer_issue("3051")
+    assert issue is not None
+    assert state == "queued"
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "lock_conflict"
+    assert issue["backoff_until"]
+
+
 def test_quarantine_failure_loop_blocks_repeated_generated_artifact_fingerprint(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -1353,6 +1672,46 @@ def test_tick_once_skips_claim_when_connector_unavailable(tmp_path):
 
     loop.dispatcher.claim_next_issue.assert_not_called()
     assert store.get_state("healer_connector_available") == "false"
+
+
+def test_tick_once_stops_claiming_when_connector_becomes_unavailable_mid_cycle(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    connector = MagicMock()
+    connector.ensure_started.return_value = None
+    connector.health_snapshot.side_effect = [
+        {
+            "available": True,
+            "configured_command": "codex",
+            "resolved_command": "/opt/homebrew/bin/codex",
+            "availability_reason": "",
+            "last_health_error": "",
+        },
+        {
+            "available": True,
+            "configured_command": "codex",
+            "resolved_command": "/opt/homebrew/bin/codex",
+            "availability_reason": "",
+            "last_health_error": "",
+        },
+        {
+            "available": False,
+            "configured_command": "codex",
+            "resolved_command": "",
+            "availability_reason": "Codex died mid-cycle.",
+            "last_health_error": "Codex died mid-cycle.",
+        },
+    ]
+
+    loop = _make_loop(store, connector=connector)
+    loop.settings.healer_max_concurrent_issues = 2
+    loop.dispatcher.claim_next_issue.side_effect = [{"issue_id": "a"}, {"issue_id": "b"}]
+    loop._process_claimed_issue = MagicMock()
+
+    loop._tick_once()
+
+    loop.dispatcher.claim_next_issue.assert_called_once()
+    loop._process_claimed_issue.assert_called_once_with({"issue_id": "a"})
 
 
 def test_circuit_breaker_opens_when_failure_rate_exceeds_threshold(tmp_path):
@@ -1537,6 +1896,45 @@ def test_cleanup_workspace_preserves_requeued_state(tmp_path):
     assert issue["workspace_path"] == ""
     assert issue["branch_name"] == ""
     loop.workspace_manager.remove_workspace.assert_called_once_with(workspace_path=workspace)
+
+
+def test_cleanup_workspace_tracks_failure_state_when_removal_fails(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="1004",
+        repo="owner/repo",
+        title="Issue 1004",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    workspace = tmp_path / "workspaces" / "issue-1004"
+    workspace.mkdir(parents=True)
+
+    loop = _make_loop(store)
+    loop.workspace_manager = MagicMock()
+    loop.workspace_manager.remove_workspace.side_effect = RuntimeError("disk full")
+
+    loop._cleanup_workspace(issue_id="1004", state="failed", workspace_path=workspace)
+
+    assert store.get_state("healer_last_workspace_cleanup_error") == "disk full"
+
+
+def test_post_issue_status_retries_once(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    loop.tracker.add_issue_comment.side_effect = [RuntimeError("boom"), None]
+    sleep_calls: list[int | float] = []
+
+    monkeypatch.setattr("flow_healer.healer_loop.time.sleep", lambda seconds: sleep_calls.append(seconds))
+
+    loop._post_issue_status(issue_id="1005", body="hello")
+
+    assert loop.tracker.add_issue_comment.call_count == 2
+    assert sleep_calls == [2]
 
 
 # --- Change 1: Failure-class-aware retry strategy ---
@@ -1824,3 +2222,36 @@ def test_conflict_resolution_aborts_on_test_failure(tmp_path, monkeypatch):
     assert resolved is False
     loop.runner.validate_workspace.assert_called_once()
     assert all("pytest" not in " ".join(str(part) for part in cmd) for cmd in call_log)
+
+
+def test_format_test_summary_bullets_produces_compact_markdown():
+    bullets = AutonomousHealerLoop._format_test_summary_bullets(
+        {
+            "mode": "local_then_docker",
+            "failed_tests": 0,
+            "targeted_tests": ["tests/test_add.py", "tests/test_math.py"],
+            "language_effective": "node",
+            "execution_root": "e2e-smoke/node",
+            "local_full_status": "passed",
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "this should not appear in rendered bullets",
+        }
+    )
+
+    assert "Test gates: `passed`" in bullets
+    assert "Failed tests: `0`" in bullets
+    assert any(item.startswith("Targeted tests: ") for item in bullets)
+    assert all("output_tail" not in item for item in bullets)
+
+
+def test_format_pr_description_uses_markdown_sections():
+    body = AutonomousHealerLoop._format_pr_description(
+        issue_id="155",
+        verifier_summary="Verified and approved.",
+        test_summary={"failed_tests": 0, "mode": "local_only"},
+    )
+
+    assert body.startswith("Automated Flow Healer proposal for issue #155.")
+    assert "### Verification" in body
+    assert "### Test Summary" in body
+    assert "- Test gates: `passed`" in body

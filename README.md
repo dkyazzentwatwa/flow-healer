@@ -78,6 +78,8 @@ Flow Healer supports 3 core languages:
 | Node.js | `node:20-slim` | `npm test -- --passWithNoTests` |
 | Swift | local toolchain | `swift test` |
 
+Issue parsing can still recognize validation commands and sandbox path hints for additional ecosystems such as Ruby, Rust, Go, and Java so unsupported-language issues fail explicitly instead of being silently misclassified. Execution support, test gates, and automatic healing are limited to Python, Node.js, and Swift.
+
 ### Docker-First Testing
 
 By default, Flow Healer uses `test_gate_mode: local_then_docker`, which tries local toolchains first and falls back to Docker for Python and Node. Swift is local-first and intentionally does not use Docker.
@@ -177,6 +179,10 @@ flow-healer start --once
 flow-healer serve
 ```
 
+## Documentation
+
+Use [docs/README.md](docs/README.md) as the active doc map for setup, usage, operations, and architecture notes. Historical planning and review artifacts are preserved under `docs/archive/`.
+
 ## Command Reference
 
 | Command | Purpose |
@@ -188,6 +194,22 @@ flow-healer serve
 | `flow-healer resume [--repo NAME]` | Resume autonomous processing |
 | `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic scan checks with optional no-write mode |
 | `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Run healer loop + web dashboard + Apple Mail/Calendar pollers |
+
+## Runtime Ops
+
+For runtime debugging and recovery, the repo ships operator-focused scripts:
+
+```bash
+scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml my-repo
+scripts/verify_runtime.sh ~/.flow-healer/config.yaml my-repo
+FLOW_HEALER_RESTART=1 scripts/remediate_runtime.sh ~/.flow-healer/config.yaml my-repo
+```
+
+- `diagnose_runtime.sh` captures command resolution, PATH, launchd context, `doctor`, and `status`.
+- `verify_runtime.sh` fails fast if repo path, git state, token, connector health, or circuit-breaker readiness are not healthy.
+- `remediate_runtime.sh` suggests a safer absolute `connector_command` value and can restart the launch agent when explicitly requested.
+
+For the rest of the operator workflow, failure recovery, and maintenance guidance, use [docs/usage.md](docs/usage.md) and [docs/operations.md](docs/operations.md).
 
 ## Apple Control DSL
 

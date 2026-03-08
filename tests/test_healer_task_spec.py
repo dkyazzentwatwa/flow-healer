@@ -303,6 +303,87 @@ def test_task_spec_prompt_block_includes_execution_root_and_validation_commands(
     assert "Validation commands: cd e2e-smoke/swift && swift test" in prompt_block
 
 
+def test_compile_task_spec_infers_node_execution_root_for_e2e_apps() -> None:
+    spec = compile_task_spec(
+        issue_title="Next.js sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/node-next/app/api/todos/route.js\n"
+            "- e2e-apps/node-next/lib/todo-service.js\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/node-next && npm test\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.language_source == "issue"
+    assert spec.task_kind == "fix"
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert "Next.js" not in spec.output_targets
+    assert spec.output_targets == (
+        "e2e-apps/node-next/app/api/todos/route.js",
+        "e2e-apps/node-next/lib/todo-service.js",
+    )
+    assert spec.validation_commands == ("cd e2e-apps/node-next && npm test",)
+
+
+def test_compile_task_spec_infers_python_execution_root_for_e2e_apps() -> None:
+    spec = compile_task_spec(
+        issue_title="FastAPI sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/python-fastapi/app/api.py\n"
+            "- e2e-apps/python-fastapi/app/service.py\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/python-fastapi && pytest -q\n"
+        ),
+    )
+
+    assert spec.language == "python"
+    assert spec.language_source == "issue"
+    assert spec.task_kind == "fix"
+    assert spec.execution_root == "e2e-apps/python-fastapi"
+    assert spec.validation_commands == ("cd e2e-apps/python-fastapi && pytest -q",)
+
+
+def test_compile_task_spec_infers_swift_execution_root_for_e2e_apps() -> None:
+    spec = compile_task_spec(
+        issue_title="Swift todo sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/swift-todo/Sources/TodoCore/TodoService.swift\n"
+            "- e2e-apps/swift-todo/Tests/TodoCoreTests/TodoServiceTests.swift\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/swift-todo && swift test\n"
+        ),
+    )
+
+    assert spec.language == "swift"
+    assert spec.language_source == "issue"
+    assert spec.task_kind == "fix"
+    assert spec.execution_root == "e2e-apps/swift-todo"
+    assert "Package.swift" not in spec.output_targets
+    assert spec.validation_commands == ("cd e2e-apps/swift-todo && swift test",)
+
+
+def test_compile_task_spec_prefers_rooted_swift_paths_over_bare_filename_mentions() -> None:
+    spec = compile_task_spec(
+        issue_title="Swift todo sandbox: package target wiring for CLI test coverage",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/swift-todo/Package.swift\n"
+            "- e2e-apps/swift-todo/Tests/TodoCLITests/TodoPackageWiringTests.swift\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/swift-todo && swift test\n"
+        ),
+    )
+
+    assert spec.output_targets == (
+        "e2e-apps/swift-todo/Package.swift",
+        "e2e-apps/swift-todo/Tests/TodoCLITests/TodoPackageWiringTests.swift",
+    )
+
+
 def test_is_code_path_recognizes_go() -> None:
     assert _is_code_path("cmd/server/main.go") is True
 

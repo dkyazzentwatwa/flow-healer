@@ -19,8 +19,9 @@ class VerificationResult:
 class HealerVerifier:
     """Independent verifier pass to reduce proposer self-confirmation bias."""
 
-    def __init__(self, connector: ConnectorProtocol) -> None:
+    def __init__(self, connector: ConnectorProtocol, timeout_seconds: int = 300) -> None:
         self.connector = connector
+        self.timeout_seconds = max(30, int(timeout_seconds))
 
     def verify(
         self,
@@ -61,7 +62,7 @@ class HealerVerifier:
             + f"Test summary: {json.dumps(test_summary, ensure_ascii=True)}\n\n"
             + f"Proposer output:\n{proposer_output[:6000]}"
         )
-        raw = self.connector.run_turn(thread_id, prompt)
+        raw = self.connector.run_turn(thread_id, prompt, timeout_seconds=self.timeout_seconds)
         try:
             parsed = _parse_json(raw)
             verdict = str(parsed.get("verdict") or "").strip().lower()
@@ -72,11 +73,12 @@ class HealerVerifier:
                 raw=raw,
             )
         except Exception:
-            lowered = raw.lower()
-            passed = "pass" in lowered and "fail" not in lowered
             return VerificationResult(
-                passed=passed,
-                summary=raw.strip()[:300] or "Verifier output was empty.",
+                passed=False,
+                summary=(
+                    "Verifier output was not valid JSON; treating as fail. "
+                    f"Raw: {raw.strip()[:200]}"
+                ).strip(),
                 raw=raw,
             )
 

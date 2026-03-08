@@ -30,7 +30,7 @@ flow-healer start --once --repo demo
 
 **Symptom**: Test gate fails with "Docker not available" or "exec: docker: not found"
 
-**Solution**: Ensure Docker is running and accessible. For repos without local toolchains, configure Docker-only mode:
+**Solution**: Ensure Docker is running and accessible. For Python or Node repos without usable local toolchains, configure Docker-only mode:
 
 ```yaml
 repos:
@@ -41,9 +41,12 @@ repos:
 
 ### Local toolchain missing
 
-**Symptom**: Tests fail because local Go/Rust/Java is not installed
+**Symptom**: Tests fail because the local Python, Node.js, or Swift toolchain is unavailable or broken.
 
-**Solution**: Use `docker_only` mode to skip local testing entirely:
+**Solution**:
+
+- For Python or Node, use `docker_only` to skip local testing entirely.
+- For Swift, repair the local toolchain and use `local_only` or `local_then_docker` because Swift does not support Docker gates.
 
 ```yaml
 repos:

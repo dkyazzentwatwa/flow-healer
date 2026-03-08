@@ -77,6 +77,8 @@ repos:
 - `local_gate_policy`: `auto`, `force`, or `skip`.
 - `docker_image`, `test_command`, `install_command`: optional strategy overrides.
 
+The issue parser can still recognize validation commands and sandbox roots for additional ecosystems such as Ruby, Rust, Go, and Java so unsupported-language issues fail explicitly with the right diagnosis. Automatic execution support remains limited to `python`, `node`, and `swift`.
+
 ### test_gate_mode Options
 
 | Mode | Behavior |
@@ -87,7 +89,7 @@ repos:
 
 ### docker_only Example
 
-When local Node toolchains are unavailable, use `docker_only`:
+When local Python or Node toolchains are unavailable, use `docker_only`:
 
 ~~~yaml
 repos:
@@ -97,6 +99,8 @@ repos:
     language: node
     # Docker image and test command are auto-selected based on language
 ~~~
+
+Swift does not support `docker_only`; use `local_only` or `local_then_docker` for Swift repos.
 
 ### Custom Docker Image
 
@@ -122,4 +126,14 @@ If a healing attempt finishes with `no_patch` or `verifier_failed`, stop and rec
 
 ~~~bash
 flow-healer start --repo my-project --once
+~~~
+
+## Runtime Diagnostics
+
+Use the repo-owned runtime helpers before changing launchd config or retrying a noisy queue:
+
+~~~bash
+scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml my-project
+scripts/verify_runtime.sh ~/.flow-healer/config.yaml my-project
+FLOW_HEALER_RESTART=1 scripts/remediate_runtime.sh ~/.flow-healer/config.yaml my-project
 ~~~

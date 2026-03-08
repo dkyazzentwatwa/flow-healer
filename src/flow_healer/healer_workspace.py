@@ -23,14 +23,24 @@ class HealerWorkspaceManager:
     def __init__(self, *, repo_path: Path):
         self.repo_path = Path(repo_path).resolve()
         self.worktrees_root = self.repo_path / ".apple-flow-healer" / "worktrees"
-        self.worktrees_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_workspace(self, *, issue_id: str, title: str) -> WorkspaceInfo:
         slug = self._slugify(title)
+        self.worktrees_root.mkdir(parents=True, exist_ok=True)
         path = self.worktrees_root / f"issue-{issue_id}-{slug}"
         branch = f"healer/issue-{issue_id}-{slug}"
         if path.exists():
-            return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
+            check = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--git-dir"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if check.returncode == 0:
+                return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
+            logger.warning("Stale or corrupt worktree at %s; removing and recreating.", path)
+            self.remove_workspace(workspace_path=path)
 
         cmd = [
             "git",

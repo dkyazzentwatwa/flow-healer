@@ -180,6 +180,32 @@ def test_close_issue(monkeypatch):
     assert ok is True
 
 
+def test_close_pr_posts_comment_and_closes(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    calls: list[tuple[str, str, object | None]] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append((path, method, body))
+        if path == "/repos/owner/repo/issues/77/comments":
+            assert method == "POST"
+            assert body == {"body": "closing note"}
+            return {"id": 1001}
+        if path == "/repos/owner/repo/pulls/77":
+            assert method == "PATCH"
+            assert body == {"state": "closed"}
+            return {"number": 77, "state": "closed"}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.close_pr(pr_number=77, comment="closing note")
+    assert ok is True
+    assert calls == [
+        ("/repos/owner/repo/issues/77/comments", "POST", {"body": "closing note"}),
+        ("/repos/owner/repo/pulls/77", "PATCH", {"state": "closed"}),
+    ]
+
+
 def test_find_pr_for_issue_uses_all_prs_and_detects_merged(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

@@ -5,6 +5,7 @@ from pathlib import Path
 from flow_healer.healer_runner import (
     HealerRunner,
     ResolvedExecution,
+    _build_retry_prompt,
     _validate_artifact_outputs,
     _build_docker_test_script,
     _changed_paths,
@@ -417,6 +418,41 @@ def test_stage_workspace_changes_allows_explicit_lockfile_targets(tmp_path):
     assert _changed_paths(workspace) == ["package-lock.json"]
 
 
+def test_stage_workspace_changes_excludes_swift_build_artifacts(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "Package.swift").write_text("// swift-tools-version: 5.9\n", encoding="utf-8")
+    (workspace / "Sources" / "TodoCLI").mkdir(parents=True)
+    (workspace / "Sources" / "TodoCLI" / "main.swift").write_text('print("old")\n', encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (workspace / "Sources" / "TodoCLI" / "main.swift").write_text('print("new")\n', encoding="utf-8")
+    (workspace / ".build" / "debug").mkdir(parents=True)
+    (workspace / ".build" / "debug" / "cache.pcm").write_text("generated\n", encoding="utf-8")
+    (workspace / ".swiftpm").mkdir()
+    (workspace / ".swiftpm" / "workspace-state.json").write_text("{}\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Fix Swift CLI output",
+        issue_body="Required code outputs:\n- Sources/TodoCLI/main.swift\n",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("Sources/TodoCLI/main.swift",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="swift",
+        ),
+        language="swift",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["Sources/TodoCLI/main.swift"]
+
+
 def test_run_test_gates_marks_local_skipped_when_toolchain_unavailable(monkeypatch):
     from flow_healer.language_strategies import LanguageStrategy
 
@@ -668,6 +704,77 @@ def test_run_attempt_uses_longer_turn_timeout_for_code_change(monkeypatch, tmp_p
 
     assert result.success is True
     assert connector.timeouts == [900]
+
+
+def test_run_attempt_recleans_regenerated_lockfile_contamination(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    (workspace / "demo.js").write_text("export const add = (a, b) => a - b;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.js b/demo.js\n"
+        "--- a/demo.js\n"
+        "+++ b/demo.js\n"
+        "@@ -1 +1 @@\n"
+        "-export const add = (a, b) => a - b;\n"
+        "+export const add = (a, b) => a + b;\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_then_docker")
+
+    # First contamination appears before validation.
+    (workspace / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+
+    validate_calls = {"count": 0}
+
+    def fake_validate_workspace(*args, **kwargs):
+        # Simulate test tooling regenerating lockfile contamination on each validation pass.
+        validate_calls["count"] += 1
+        (workspace / "package-lock.json").write_text(
+            f'{{"lockfileVersion":3,"regenerated":{validate_calls["count"]}}}\n',
+            encoding="utf-8",
+        )
+        return {
+            "mode": "local_then_docker",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        }
+
+    monkeypatch.setattr(runner, "validate_workspace", fake_validate_workspace)
+
+    result = runner.run_attempt(
+        issue_id="lockfix-1",
+        issue_title="Fix demo add",
+        issue_body="Update demo.js only.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="node",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert result.failure_class == ""
+    assert result.workspace_status["cleanup_cycles_used"] >= 1
+    assert "package-lock.json" in result.workspace_status["cleaned_paths"]
+    assert validate_calls["count"] >= 2
+    assert "package-lock.json" not in _changed_paths(workspace)
 
 
 def test_run_attempt_embeds_input_context_file_contents_in_prompt(monkeypatch, tmp_path):
@@ -1561,6 +1668,8 @@ def test_run_attempt_prompt_includes_context_stop_rules_for_code_tasks(tmp_path)
     assert "Inspect only enough files" in prompt
     assert "Prefer acting once the likely root cause is confirmed" in prompt
     assert "do not return exploratory summaries" in prompt
+    assert "patch them in place" in prompt
+    assert "Do not recreate surrounding scaffolding" in prompt
 
 
 def test_run_attempt_prompt_keeps_web_guidance_only_for_research_tasks(tmp_path):
@@ -1613,12 +1722,6 @@ def test_run_attempt_prompt_keeps_web_guidance_only_for_research_tasks(tmp_path)
     assert "Use web browsing only when repo context is insufficient" not in connector_two.turns[0][1]
 
 
-# --- Change 1: _build_retry_prompt includes class-specific guidance ---
-
-
-from flow_healer.healer_runner import _build_retry_prompt
-
-
 def test_build_retry_prompt_includes_tests_failed_guidance():
     prompt = _build_retry_prompt(
         base_prompt="Fix the bug",
@@ -1637,3 +1740,4 @@ def test_build_retry_prompt_includes_verifier_failed_guidance():
     )
     assert "verifier rejected" in prompt.lower()
     assert "root cause" in prompt.lower()
+    assert "do not rebuild sandbox scaffolding" in prompt.lower()

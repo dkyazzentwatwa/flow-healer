@@ -230,6 +230,21 @@ class HealerPreflight:
         failed_tests = int(summary.get("failed_tests", 0))
         output_tail = _best_output_tail(summary)
         if failed_tests > 0:
+            if not _has_environment_gate_failure(summary):
+                return PreflightReport(
+                    language=language,
+                    execution_root=execution_root,
+                    gate_mode=self.runner.test_gate_mode,
+                    status="ready",
+                    failure_class="",
+                    summary=(
+                        f"Preflight toolchain check passed for {language} in {execution_root}; "
+                        f"baseline tests currently fail (mode={self.runner.test_gate_mode}, failed_tests={failed_tests})."
+                    ),
+                    output_tail=output_tail,
+                    checked_at=checked_at,
+                    test_summary=summary,
+                )
             return PreflightReport(
                 language=language,
                 execution_root=execution_root,
@@ -290,6 +305,25 @@ def _best_output_tail(summary: dict[str, object]) -> str:
         if value:
             return value[-2000:]
     return ""
+
+
+def _has_environment_gate_failure(summary: dict[str, object]) -> bool:
+    infra_reasons = {
+        "tool_missing",
+        "docker_unsupported_for_language",
+        "local_only_requires_local_gate",
+        "no_local_test_command",
+    }
+    for runner in ("local", "docker"):
+        status = str(summary.get(f"{runner}_full_status") or "").strip().lower()
+        reason = str(summary.get(f"{runner}_full_reason") or "").strip().lower()
+        if status != "failed":
+            continue
+        if reason in infra_reasons:
+            return True
+        if reason:
+            return True
+    return False
 
 
 def _parse_store_timestamp(raw: str) -> datetime | None:

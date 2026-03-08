@@ -86,3 +86,43 @@ def test_preflight_reports_unsupported_docker_only_mode_for_swift(tmp_path) -> N
     assert report.status == "failed"
     assert report.failure_class == "unsupported_gate_mode"
     assert runner.calls == []
+
+
+def test_preflight_treats_baseline_test_failures_as_ready(tmp_path) -> None:
+    (tmp_path / "e2e-smoke" / "swift").mkdir(parents=True)
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    runner = _FakeRunner()
+    runner.test_gate_mode = "local_then_docker"
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 1,
+        "local_full_status": "failed",
+        "local_full_output_tail": "XCTAssertEqual failed",
+    }
+    preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
+
+    report = preflight.ensure_language_ready(language="swift", execution_root="e2e-smoke/swift", force=True)
+
+    assert report.status == "ready"
+    assert report.failure_class == ""
+    assert "baseline tests currently fail" in report.summary
+
+
+def test_preflight_still_blocks_environment_gate_failures(tmp_path) -> None:
+    (tmp_path / "e2e-smoke" / "swift").mkdir(parents=True)
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    runner = _FakeRunner()
+    runner.test_gate_mode = "local_then_docker"
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 1,
+        "local_full_status": "failed",
+        "local_full_reason": "tool_missing",
+        "local_full_output_tail": "swift toolchain missing",
+    }
+    preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
+
+    report = preflight.ensure_language_ready(language="swift", execution_root="e2e-smoke/swift", force=True)
+
+    assert report.status == "failed"
+    assert report.failure_class == "validation_failed"

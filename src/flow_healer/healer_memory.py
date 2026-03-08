@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -226,7 +227,7 @@ class HealerMemoryService:
                 overlap = predicted_keys & lesson_keys
                 overlap_count = len(overlap)
                 if overlap:
-                    score += 12 * len(overlap)
+                    score += min(24, 12 * len(overlap))
                 elif "repo:*" in predicted_keys and row.get("scope_key") == "repo:*":
                     score += 4
             if scope_key and scope_key in predicted_keys:
@@ -251,6 +252,19 @@ class HealerMemoryService:
                 score += 2
             if issue_id and str(row.get("issue_id") or "") == issue_id:
                 score += 10
+            created_at = str(row.get("created_at") or "").strip()
+            if created_at:
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=UTC)
+                    lesson_age_days = (datetime.now(UTC) - created_dt).days
+                    if lesson_age_days > 30:
+                        score = int(score * 0.7)
+                    elif lesson_age_days > 7:
+                        score = int(score * 0.85)
+                except (TypeError, ValueError):
+                    pass
 
             if predicted_keys and overlap_count == 0 and term_overlap < 2:
                 continue

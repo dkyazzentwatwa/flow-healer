@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -53,16 +58,38 @@ class GitHubHealerTracker:
         repo_path: Path,
         token: str | None = None,
         api_base_url: str = "https://api.github.com",
+        mutation_min_interval_ms: int = 1000,
+        retry_respect_retry_after: bool = True,
+        retry_jitter_mode: str = "full_jitter",
+        retry_max_backoff_seconds: int = 300,
+        poll_use_conditional_requests: bool = True,
+        poll_etag_ttl_seconds: int = 300,
     ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.token = (token or os.getenv("GITHUB_TOKEN", "")).strip()
         self.api_base_url = api_base_url.rstrip("/")
         self.repo_slug = self._infer_repo_slug(self.repo_path)
         self._viewer_login: str | None = None
+        self.mutation_min_interval_ms = max(0, int(mutation_min_interval_ms))
+        self.retry_respect_retry_after = bool(retry_respect_retry_after)
+        self.retry_jitter_mode = str(retry_jitter_mode or "full_jitter").strip().lower()
+        if self.retry_jitter_mode not in {"full_jitter", "none"}:
+            self.retry_jitter_mode = "full_jitter"
+        self.retry_max_backoff_seconds = max(5, int(retry_max_backoff_seconds))
+        self.poll_use_conditional_requests = bool(poll_use_conditional_requests)
+        self.poll_etag_ttl_seconds = max(60, int(poll_etag_ttl_seconds))
+        self._mutation_lock = threading.Lock()
+        self._last_mutation_at = 0.0
+        self._etag_cache: dict[str, tuple[str, Any, float]] = {}
+        self._last_error_class = ""
+        self._last_error_reason = ""
 
     @property
     def enabled(self) -> bool:
         return bool(self.token and self.repo_slug)
+
+    def get_last_error(self) -> tuple[str, str]:
+        return self._last_error_class, self._last_error_reason
 
     def list_ready_issues(
         self,
@@ -446,29 +473,158 @@ class GitHubHealerTracker:
         return state
 
     def _request_json(self, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
+        self._last_error_class = ""
+        self._last_error_reason = ""
+        method_upper = method.strip().upper() or "GET"
         url = f"{self.api_base_url}{path}"
         data: bytes | None = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-        req = Request(url, method=method, data=data)
-        req.add_header("Accept", "application/vnd.github+json")
-        req.add_header("User-Agent", "apple-flow-healer")
-        req.add_header("Authorization", f"Bearer {self.token}")
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
+        is_mutating = method_upper in {"POST", "PUT", "PATCH", "DELETE"}
+        max_attempts = 3 if is_mutating else 4
+        use_conditional = (
+            method_upper == "GET"
+            and body is None
+            and self.poll_use_conditional_requests
+        )
+        cache_key = f"{method_upper}:{path}"
+        cached_etag = ""
+        cached_payload: Any = None
+        if use_conditional:
+            cached = self._etag_cache.get(cache_key)
+            if cached is not None:
+                etag, payload, cached_at = cached
+                if (time.monotonic() - float(cached_at)) <= float(self.poll_etag_ttl_seconds):
+                    cached_etag = etag
+                    cached_payload = payload
+                else:
+                    self._etag_cache.pop(cache_key, None)
+
+        for attempt in range(max_attempts):
+            if is_mutating:
+                self._enforce_mutation_spacing()
+            req = Request(url, method=method_upper, data=data)
+            req.add_header("Accept", "application/vnd.github+json")
+            req.add_header("User-Agent", "apple-flow-healer")
+            req.add_header("Authorization", f"Bearer {self.token}")
+            if data is not None:
+                req.add_header("Content-Type", "application/json")
+            if use_conditional and cached_etag:
+                req.add_header("If-None-Match", cached_etag)
+            try:
+                with urlopen(req, timeout=20) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+                    payload = json.loads(raw) if raw else {}
+                    if use_conditional:
+                        etag = str(resp.headers.get("ETag") or "").strip()
+                        if etag:
+                            self._etag_cache[cache_key] = (etag, payload, time.monotonic())
+                    return payload
+            except HTTPError as exc:
+                if use_conditional and exc.code == 304 and cached_payload is not None:
+                    return cached_payload
+                reason = self._http_error_reason(exc)
+                is_rate_limited = self._is_rate_limited_error(exc=exc, reason=reason)
+                self._last_error_class = "github_rate_limited" if is_rate_limited else "github_api_error"
+                self._last_error_reason = reason[:500]
+                retryable = exc.code in {403, 429, 500, 502, 503, 504}
+                if retryable and attempt < (max_attempts - 1):
+                    delay = self._retry_delay_seconds(attempt=attempt, headers=dict(exc.headers or {}))
+                    logger.warning(
+                        "GitHub API %s %s failed (status=%s). Retrying in %.2fs (%d/%d).",
+                        method_upper,
+                        path,
+                        exc.code,
+                        delay,
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning("GitHub API %s %s failed: %s", method_upper, path, reason)
+                return {}
+            except URLError as exc:
+                self._last_error_class = "github_network_error"
+                self._last_error_reason = str(exc)[:500]
+                if attempt < (max_attempts - 1):
+                    delay = self._retry_delay_seconds(attempt=attempt, headers={})
+                    logger.warning(
+                        "GitHub API network error for %s %s: %s. Retrying in %.2fs (%d/%d).",
+                        method_upper,
+                        path,
+                        exc,
+                        delay,
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning("GitHub API network error for %s %s: %s", method_upper, path, exc)
+                return {}
+            except json.JSONDecodeError:
+                self._last_error_class = "github_parse_error"
+                self._last_error_reason = f"GitHub API returned non-JSON response for {method_upper} {path}"
+                logger.warning(self._last_error_reason)
+                return {}
+        return {}
+
+    def _enforce_mutation_spacing(self) -> None:
+        if self.mutation_min_interval_ms <= 0:
+            return
+        with self._mutation_lock:
+            now = time.monotonic()
+            min_interval = float(self.mutation_min_interval_ms) / 1000.0
+            wait_seconds = (self._last_mutation_at + min_interval) - now
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            self._last_mutation_at = time.monotonic()
+
+    def _retry_delay_seconds(self, *, attempt: int, headers: dict[str, Any]) -> float:
+        if self.retry_respect_retry_after:
+            retry_after = self._parse_retry_after(headers)
+            if retry_after is not None:
+                return retry_after
+        capped = min(self.retry_max_backoff_seconds, max(1, 2 ** max(0, int(attempt))))
+        if self.retry_jitter_mode == "none":
+            return float(capped)
+        return random.uniform(0.0, float(capped))
+
+    @staticmethod
+    def _parse_retry_after(headers: dict[str, Any]) -> float | None:
+        raw = str(headers.get("Retry-After") or "").strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            return max(0.0, float(raw))
         try:
-            with urlopen(req, timeout=20) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-                return json.loads(raw) if raw else {}
-        except HTTPError as exc:
-            logger.warning("GitHub API %s %s failed: %s", method, path, exc)
-            return {}
-        except URLError as exc:
-            logger.warning("GitHub API network error for %s %s: %s", method, path, exc)
-            return {}
-        except json.JSONDecodeError:
-            logger.warning("GitHub API returned non-JSON response for %s %s", method, path)
-            return {}
+            parsed = parsedate_to_datetime(raw)
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        delay = (parsed - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, float(delay))
+
+    @staticmethod
+    def _http_error_reason(exc: HTTPError) -> str:
+        payload = ""
+        try:
+            payload = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            payload = ""
+        payload = payload.strip()
+        if payload:
+            return f"{exc} body={payload[:280]}"
+        return str(exc)
+
+    @staticmethod
+    def _is_rate_limited_error(*, exc: HTTPError, reason: str) -> bool:
+        lowered = (reason or "").lower()
+        if exc.code == 429:
+            return True
+        if exc.code == 403 and ("rate limit" in lowered or "secondary rate limit" in lowered):
+            return True
+        return False
 
     @staticmethod
     def _priority_from_labels(labels: list[str]) -> int:

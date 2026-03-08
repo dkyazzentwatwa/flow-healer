@@ -44,6 +44,7 @@ config.yaml
 
 # Flow Healer local artifacts
 .apple-flow-healer/
+.tmp-home/
 *.patch
 *.orig
 *.rej

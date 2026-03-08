@@ -167,3 +167,56 @@ def test_relay_settings_stuck_pr_timeout_configurable(tmp_path) -> None:
 
     relay = config.select_repos("demo")[0]
     assert relay.healer_stuck_pr_timeout_minutes == 30
+
+
+def test_relay_settings_conflict_requeue_and_dedupe_defaults(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+    relay = config.select_repos("demo")[0]
+
+    assert relay.healer_conflict_auto_requeue_enabled is True
+    assert relay.healer_conflict_auto_requeue_max_attempts == 3
+    assert relay.healer_overlap_scope_queue_enabled is True
+    assert relay.healer_dedupe_enabled is True
+    assert relay.healer_dedupe_close_duplicates is True
+
+
+def test_relay_settings_conflict_requeue_and_dedupe_configurable(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    conflict_auto_requeue_enabled: false",
+                "    conflict_auto_requeue_max_attempts: 5",
+                "    overlap_scope_queue_enabled: false",
+                "    dedupe_enabled: false",
+                "    dedupe_close_duplicates: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+    relay = config.select_repos("demo")[0]
+
+    assert relay.healer_conflict_auto_requeue_enabled is False
+    assert relay.healer_conflict_auto_requeue_max_attempts == 5
+    assert relay.healer_overlap_scope_queue_enabled is False
+    assert relay.healer_dedupe_enabled is False
+    assert relay.healer_dedupe_close_duplicates is False

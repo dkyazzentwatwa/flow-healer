@@ -13,19 +13,25 @@ from .healer_locks import lock_keys_conflict
 class SQLiteStore:
     """Healer-only SQLite store for standalone Flow Healer."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, *, busy_timeout_ms: int = 5000):
         self.db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
+        self._busy_timeout_ms = max(1000, int(busy_timeout_ms))
 
     def _connect(self) -> sqlite3.Connection:
         with self._lock:
             if self._conn is None:
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                conn = sqlite3.connect(
+                    self.db_path,
+                    check_same_thread=False,
+                    timeout=max(1.0, float(self._busy_timeout_ms) / 1000.0),
+                )
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
                 self._conn = conn
             return self._conn
 
@@ -72,6 +78,10 @@ class SQLiteStore:
                     output_targets_json TEXT NOT NULL DEFAULT '[]',
                     tool_policy TEXT NOT NULL DEFAULT '',
                     validation_profile TEXT NOT NULL DEFAULT '',
+                    scope_key TEXT NOT NULL DEFAULT '',
+                    dedupe_key TEXT NOT NULL DEFAULT '',
+                    conflict_requeue_count INTEGER NOT NULL DEFAULT 0,
+                    superseded_by_issue_id TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -167,6 +177,14 @@ class SQLiteStore:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS healer_mutation_log (
+                    mutation_key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT DEFAULT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS control_commands (
                     command_id TEXT PRIMARY KEY,
                     source TEXT NOT NULL,
@@ -212,6 +230,10 @@ class SQLiteStore:
                 ("tool_policy", "ALTER TABLE healer_issues ADD COLUMN tool_policy TEXT NOT NULL DEFAULT ''"),
                 ("validation_profile", "ALTER TABLE healer_issues ADD COLUMN validation_profile TEXT NOT NULL DEFAULT ''"),
                 ("stuck_since", "ALTER TABLE healer_issues ADD COLUMN stuck_since TEXT DEFAULT NULL"),
+                ("scope_key", "ALTER TABLE healer_issues ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''"),
+                ("dedupe_key", "ALTER TABLE healer_issues ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''"),
+                ("conflict_requeue_count", "ALTER TABLE healer_issues ADD COLUMN conflict_requeue_count INTEGER NOT NULL DEFAULT 0"),
+                ("superseded_by_issue_id", "ALTER TABLE healer_issues ADD COLUMN superseded_by_issue_id TEXT NOT NULL DEFAULT ''"),
             ]
             for column, statement in migrations:
                 if column not in existing_cols:
@@ -229,6 +251,12 @@ class SQLiteStore:
             for column, statement in attempt_migrations:
                 if column not in attempt_cols:
                     conn.execute(statement)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_scope_state ON healer_issues(scope_key, state, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_dedupe_state ON healer_issues(dedupe_key, state, updated_at)"
+            )
             conn.commit()
 
     @staticmethod
@@ -288,13 +316,17 @@ class SQLiteStore:
         author: str,
         labels: list[str],
         priority: int = 100,
+        scope_key: str = "",
+        dedupe_key: str = "",
     ) -> None:
         conn = self._connect()
         with self._lock:
             conn.execute(
                 """
-                INSERT INTO healer_issues(issue_id, repo, title, body, author, labels_json, priority, state)
-                VALUES(?, ?, ?, ?, ?, ?, ?, 'queued')
+                INSERT INTO healer_issues(
+                    issue_id, repo, title, body, author, labels_json, priority, state, scope_key, dedupe_key
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
                 ON CONFLICT(issue_id) DO UPDATE SET
                     repo = excluded.repo,
                     title = excluded.title,
@@ -302,9 +334,21 @@ class SQLiteStore:
                     author = excluded.author,
                     labels_json = excluded.labels_json,
                     priority = excluded.priority,
+                    scope_key = excluded.scope_key,
+                    dedupe_key = excluded.dedupe_key,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (issue_id, repo, title, body, author, json.dumps(labels or []), int(priority)),
+                (
+                    issue_id,
+                    repo,
+                    title,
+                    body,
+                    author,
+                    json.dumps(labels or []),
+                    int(priority),
+                    str(scope_key or ""),
+                    str(dedupe_key or ""),
+                ),
             )
             conn.commit()
 
@@ -330,12 +374,40 @@ class SQLiteStore:
                 ).fetchall()
         return [issue for row in rows if (issue := self._decode_healer_issue_row(self._row_to_dict(row))) is not None]
 
+    def find_active_issue_by_dedupe_key(
+        self,
+        *,
+        dedupe_key: str,
+        exclude_issue_id: str = "",
+        states: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            return None
+        active_states = states or ["queued", "claimed", "running", "verify_pending", "pr_open", "pr_pending_approval"]
+        conn = self._connect()
+        with self._lock:
+            placeholders = ",".join("?" for _ in active_states)
+            params: list[Any] = [key, *active_states]
+            sql = (
+                "SELECT * FROM healer_issues "
+                f"WHERE dedupe_key = ? AND state IN ({placeholders}) "
+            )
+            exclude = str(exclude_issue_id or "").strip()
+            if exclude:
+                sql += "AND issue_id != ? "
+                params.append(exclude)
+            sql += "ORDER BY created_at ASC, updated_at ASC LIMIT 1"
+            row = conn.execute(sql, params).fetchone()
+        return self._decode_healer_issue_row(self._row_to_dict(row))
+
     def claim_next_healer_issue(
         self,
         *,
         worker_id: str,
         lease_seconds: int,
         max_active_issues: int = 1,
+        enforce_scope_queue: bool = True,
     ) -> dict[str, Any] | None:
         conn = self._connect()
         with self._lock:
@@ -350,12 +422,23 @@ class SQLiteStore:
             active_count = int(active_row["count"]) if active_row is not None else 0
             if active_count >= active_limit:
                 return None
+            scope_conflict_clause = ""
+            if enforce_scope_queue:
+                scope_conflict_clause = (
+                    "AND (COALESCE(scope_key, '') = '' OR NOT EXISTS ("
+                    "SELECT 1 FROM healer_issues active "
+                    "WHERE active.issue_id != healer_issues.issue_id "
+                    "AND active.state IN ('claimed', 'running', 'verify_pending', 'pr_open', 'pr_pending_approval') "
+                    "AND COALESCE(active.scope_key, '') = COALESCE(healer_issues.scope_key, '')"
+                    "))"
+                )
             row = conn.execute(
-                """
+                f"""
                 SELECT issue_id
                 FROM healer_issues
                 WHERE state = 'queued'
                   AND (backoff_until IS NULL OR backoff_until <= CURRENT_TIMESTAMP)
+                  {scope_conflict_clause}
                 ORDER BY priority ASC, updated_at ASC
                 LIMIT 1
                 """
@@ -406,6 +489,25 @@ class SQLiteStore:
             conn.commit()
         return int(row["attempt_count"]) if row is not None else 0
 
+    def increment_conflict_requeue_count(self, issue_id: str) -> int:
+        conn = self._connect()
+        with self._lock:
+            conn.execute(
+                """
+                UPDATE healer_issues
+                SET conflict_requeue_count = conflict_requeue_count + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE issue_id = ?
+                """,
+                (issue_id,),
+            )
+            row = conn.execute(
+                "SELECT conflict_requeue_count FROM healer_issues WHERE issue_id = ?",
+                (issue_id,),
+            ).fetchone()
+            conn.commit()
+        return int(row["conflict_requeue_count"]) if row is not None else 0
+
     def set_healer_issue_state(
         self,
         *,
@@ -426,6 +528,10 @@ class SQLiteStore:
         output_targets: list[str] | None = None,
         tool_policy: str | None = None,
         validation_profile: str | None = None,
+        scope_key: str | None = None,
+        dedupe_key: str | None = None,
+        conflict_requeue_count: int | None = None,
+        superseded_by_issue_id: str | None = None,
         clear_lease: bool = False,
     ) -> bool:
         conn = self._connect()
@@ -477,6 +583,18 @@ class SQLiteStore:
             if validation_profile is not None:
                 updates.append("validation_profile = ?")
                 params.append(validation_profile)
+            if scope_key is not None:
+                updates.append("scope_key = ?")
+                params.append(scope_key)
+            if dedupe_key is not None:
+                updates.append("dedupe_key = ?")
+                params.append(dedupe_key)
+            if conflict_requeue_count is not None:
+                updates.append("conflict_requeue_count = ?")
+                params.append(int(conflict_requeue_count))
+            if superseded_by_issue_id is not None:
+                updates.append("superseded_by_issue_id = ?")
+                params.append(superseded_by_issue_id)
             if clear_lease:
                 updates.append("lease_owner = NULL")
                 updates.append("lease_expires_at = NULL")
@@ -989,6 +1107,60 @@ class SQLiteStore:
         with self._lock:
             row = conn.execute("SELECT * FROM healer_runtime WHERE singleton = 1").fetchone()
         return self._row_to_dict(row)
+
+    def claim_healer_mutation(self, *, mutation_key: str) -> str:
+        key = str(mutation_key or "").strip()
+        if not key:
+            return "failed"
+        conn = self._connect()
+        with self._lock:
+            row = conn.execute(
+                "SELECT status FROM healer_mutation_log WHERE mutation_key = ?",
+                (key,),
+            ).fetchone()
+            if row is not None:
+                status = str(row["status"] or "").strip().lower()
+                if status == "success":
+                    return "already_success"
+                if status == "pending":
+                    return "inflight"
+                conn.execute(
+                    "UPDATE healer_mutation_log SET status='pending', updated_at=CURRENT_TIMESTAMP, completed_at=NULL WHERE mutation_key = ?",
+                    (key,),
+                )
+                conn.commit()
+                return "claimed"
+            conn.execute(
+                """
+                INSERT INTO healer_mutation_log(mutation_key, status, completed_at)
+                VALUES(?, 'pending', NULL)
+                """,
+                (key,),
+            )
+            conn.commit()
+            return "claimed"
+
+    def complete_healer_mutation(self, *, mutation_key: str, success: bool) -> None:
+        key = str(mutation_key or "").strip()
+        if not key:
+            return
+        conn = self._connect()
+        with self._lock:
+            if success:
+                conn.execute(
+                    """
+                    UPDATE healer_mutation_log
+                    SET status='success', updated_at=CURRENT_TIMESTAMP, completed_at=CURRENT_TIMESTAMP
+                    WHERE mutation_key = ?
+                    """,
+                    (key,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM healer_mutation_log WHERE mutation_key = ?",
+                    (key,),
+                )
+            conn.commit()
 
     def create_scan_run(self, *, run_id: str, dry_run: bool) -> None:
         conn = self._connect()

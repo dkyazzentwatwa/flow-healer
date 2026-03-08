@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -14,7 +17,7 @@ from uuid import uuid4
 
 from .config import RelaySettings
 from .healer_dispatcher import HealerDispatcher
-from .healer_locks import diff_paths_to_lock_keys, predict_lock_set
+from .healer_locks import canonicalize_lock_keys, diff_paths_to_lock_keys, predict_lock_set
 from .healer_memory import HealerMemoryService
 from .healer_preflight import (
     HealerPreflight,
@@ -38,12 +41,23 @@ _TARGETED_TEST_RE = re.compile(
     r"\btests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py\b"
 )
 _FLOW_COMMENT_PERSONA = (
-    "Laid-back tech bro vibes, light emoji use, concise status updates, "
-    "and always sign off with '-- Flow 🌊'."
+    "Professional, concise status updates in Markdown, "
+    "and always sign off with '-- Flow Healer'."
 )
-_INFRA_FAILURE_CLASSES = {"connector_unavailable", "connector_runtime_error", "preflight_failed"}
+_INFRA_FAILURE_CLASSES = {
+    "connector_unavailable",
+    "connector_runtime_error",
+    "github_rate_limited",
+    "lease_expired",
+    "preflight_failed",
+    "sqlite_busy",
+    "subprocess_timeout_hard_kill",
+    "workspace_corrupt",
+}
 _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "empty_diff",
+    "lock_conflict",
+    "lock_upgrade_conflict",
     "malformed_diff",
     "no_patch",
     "no_workspace_change",
@@ -111,6 +125,7 @@ class AutonomousHealerLoop:
             worker_id=self.worker_id,
             lease_seconds=max(60, int(settings.healer_poll_interval_seconds * 3)),
             max_active_issues=max(1, int(settings.healer_max_concurrent_issues)),
+            overlap_scope_queue_enabled=bool(getattr(settings, "healer_overlap_scope_queue_enabled", True)),
         )
         self.runner = HealerRunner(
             connector=connector,
@@ -123,7 +138,7 @@ class AutonomousHealerLoop:
             install_command=settings.healer_install_command,
             auto_clean_generated_artifacts=settings.healer_auto_clean_generated_artifacts,
         )
-        self.verifier = HealerVerifier(connector=connector)
+        self.verifier = HealerVerifier(connector=connector, timeout_seconds=300)
         self.reviewer = HealerReviewer(connector=connector)
         self.scanner = FlowHealerScanner(
             repo_path=self.repo_path,
@@ -202,6 +217,15 @@ class AutonomousHealerLoop:
                 breaker.cooldown_remaining_seconds,
             )
             return
+        if self._infra_pause_active():
+            pause_until = self.store.get_state("healer_infra_pause_until") or ""
+            pause_reason = self.store.get_state("healer_infra_pause_reason") or ""
+            logger.warning(
+                "Infra safety pause active; skipping claim cycle until %s (%s).",
+                pause_until,
+                pause_reason,
+            )
+            return
         connector_health = self._connector_health_snapshot()
         self._record_connector_health(connector_health)
         if not bool(connector_health.get("available")):
@@ -213,6 +237,15 @@ class AutonomousHealerLoop:
             return
         processed = 0
         while processed < max(1, self.settings.healer_max_concurrent_issues):
+            connector_health = self._connector_health_snapshot()
+            self._record_connector_health(connector_health)
+            if not bool(connector_health.get("available")):
+                logger.warning(
+                    "Healer connector became unavailable mid-cycle; stopping claims. reason=%s command=%s",
+                    str(connector_health.get("availability_reason") or ""),
+                    str(connector_health.get("configured_command") or ""),
+                )
+                break
             issue = self.dispatcher.claim_next_issue()
             if not issue:
                 break
@@ -353,6 +386,11 @@ class AutonomousHealerLoop:
                     continue
                 pr_state = pr_details.state
                 mergeable_state = pr_details.mergeable_state
+                pr_state, mergeable_state = self._recheck_conflict_state(
+                    pr_number=pr_number,
+                    current_state=pr_state,
+                    current_mergeable_state=mergeable_state,
+                )
             else:
                 discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
                 if discovered_pr is None:
@@ -361,11 +399,16 @@ class AutonomousHealerLoop:
                 pr_state = discovered_pr.state.strip().lower()
 
             if pr_state == "conflict":
-                if not self._is_conflict_blocked_row(row, pr_number=pr_number):
-                    auto_resolve = getattr(self.settings, "healer_auto_resolve_conflicts", True)
-                    if auto_resolve and self._attempt_conflict_resolution(issue_id=issue_id, pr_number=pr_number, row=row):
-                        resolved += 1
+                auto_resolve = getattr(self.settings, "healer_auto_resolve_conflicts", True)
+                if auto_resolve and self._attempt_conflict_resolution(issue_id=issue_id, pr_number=pr_number, row=row):
+                    resolved += 1
+                else:
+                    auto_requeue = bool(getattr(self.settings, "healer_conflict_auto_requeue_enabled", True))
+                    if auto_requeue:
+                        handled = self._close_conflicted_pr_and_requeue_issue(issue_id=issue_id, pr_number=pr_number)
                     else:
+                        handled = self._close_conflicted_pr_and_issue(issue_id=issue_id, pr_number=pr_number)
+                    if not handled:
                         self._block_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
                 continue
 
@@ -418,7 +461,12 @@ class AutonomousHealerLoop:
                     )
                 continue
 
-            if not self.tracker.close_issue(issue_id=issue_id):
+            close_issue_key = self._mutation_key(action="close_issue", issue_id=issue_id)
+            close_issue_ok = self._run_idempotent_mutation(
+                mutation_key=close_issue_key,
+                action=lambda: self.tracker.close_issue(issue_id=issue_id),
+            )
+            if not close_issue_ok:
                 logger.warning(
                     "PR #%d is merged but Flow Healer could not close issue #%s yet.",
                     pr_number,
@@ -442,14 +490,15 @@ class AutonomousHealerLoop:
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
-                    "Merged and wrapped up 🌊",
-                    "The PR landed on the base branch, so I'm closing this one out.",
+                    "Issue resolved",
+                    "The pull request was merged into the base branch, so this issue is now complete.",
                     [
                         "Status: `resolved`",
                         f"PR: `#{pr_number}`",
                     ],
                 ),
             )
+            self._reset_infra_failure_streak()
             resolved += 1
         return resolved
 
@@ -475,8 +524,8 @@ class AutonomousHealerLoop:
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
-                "Merge conflict needs a hand 🧩",
-                "This PR is blocked on merge conflicts, so I'm stepping back until it's resolved or closed.",
+                "Merge conflict requires manual resolution",
+                "This pull request is blocked on merge conflicts, so automation is paused until it is resolved or closed.",
                 [
                     "Status: `blocked`",
                     f"PR: `#{pr_number}`",
@@ -485,6 +534,150 @@ class AutonomousHealerLoop:
                 outro="Resolve the conflicts in that PR, or close it if you want me to queue a fresh attempt.",
             ),
         )
+
+    def _close_conflicted_pr_and_requeue_issue(self, *, issue_id: str, pr_number: int) -> bool:
+        close_pr_comment = self._format_flow_status_comment(
+            "Closing stale conflicted pull request",
+            "This appears to be a stale-branch conflict after newer base-branch changes landed.",
+            [
+                "Status: `closed`",
+                f"PR: `#{pr_number}`",
+                "Reason: base branch moved first",
+            ],
+            outro="Flow Healer will retry this same issue from the latest base branch.",
+        )
+        close_pr_key = self._mutation_key(
+            action="close_pr_conflict_requeue",
+            issue_id=issue_id,
+            pr_number=pr_number,
+            body=close_pr_comment,
+        )
+        if not self._run_idempotent_mutation(
+            mutation_key=close_pr_key,
+            action=lambda: self.tracker.close_pr(pr_number=pr_number, comment=close_pr_comment),
+        ):
+            logger.warning("Failed to close conflicted PR #%d for issue #%s", pr_number, issue_id)
+            return False
+
+        requeue_count = self.store.increment_conflict_requeue_count(issue_id)
+        max_attempts = max(1, int(getattr(self.settings, "healer_conflict_auto_requeue_max_attempts", 3)))
+        if requeue_count > max_attempts:
+            reason = (
+                f"PR #{pr_number} hit stale-branch conflicts {requeue_count} times, "
+                f"exceeding max auto-requeue attempts ({max_attempts})."
+            )
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="blocked",
+                pr_number=0,
+                pr_state="",
+                last_failure_class="pr_conflict_retry_exhausted",
+                last_failure_reason=reason[:500],
+                feedback_context=reason[:500],
+                clear_lease=True,
+            )
+            self._post_issue_status(
+                issue_id=issue_id,
+                body=self._format_flow_status_comment(
+                    "Auto-requeue limit reached for stale conflicts",
+                    "This issue exceeded the conflict retry cap and is now paused for review.",
+                    [
+                        "Status: `blocked`",
+                        f"Previous PR: `#{pr_number}`",
+                        f"Conflict retries: `{requeue_count}` / `{max_attempts}`",
+                    ],
+                    outro="Review scope overlap and reopen/requeue when ready.",
+                ),
+            )
+            return True
+
+        delay_seconds = 30
+        backoff_until = (datetime.now(UTC) + timedelta(seconds=delay_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        reason = (
+            f"PR #{pr_number} was closed due to stale-branch conflict; "
+            f"queued fresh retry {requeue_count}/{max_attempts}."
+        )
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="queued",
+            backoff_until=backoff_until,
+            pr_number=0,
+            pr_state="",
+            last_failure_class="pr_conflict_requeued",
+            last_failure_reason=reason[:500],
+            feedback_context=reason[:500],
+            clear_lease=True,
+        )
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Queued fresh retry after stale conflict",
+                "The conflicted PR was closed and this issue was queued for a fresh attempt on latest base.",
+                [
+                    "Status: `queued`",
+                    f"Closed PR: `#{pr_number}`",
+                    f"Conflict retries: `{requeue_count}` / `{max_attempts}`",
+                    f"Next retry not before: `{backoff_until} UTC`",
+                ],
+            ),
+        )
+        return True
+
+    def _close_conflicted_pr_and_issue(self, *, issue_id: str, pr_number: int) -> bool:
+        reason = (
+            f"PR #{pr_number} hit a normal line-level merge conflict after newer changes landed on the base branch."
+        )
+        pr_comment = self._format_flow_status_comment(
+            "Closing stale conflicted pull request",
+            "This appears to be a stale-branch conflict after newer base-branch changes landed.",
+            [
+                "Status: `closed`",
+                f"PR: `#{pr_number}`",
+                "Reason: base branch moved first",
+            ],
+            outro=(
+                "Closing this PR to keep the queue clean. If the follow-up still matters, queue a fresh issue "
+                "against the latest `main`."
+            ),
+        )
+        issue_comment = self._format_flow_status_comment(
+            "Archiving issue after stale pull request conflict",
+            "This is a normal line-level merge conflict caused by newer base-branch changes landing first.",
+            [
+                "Status: `archived`",
+                f"PR: `#{pr_number}`",
+                "Why: not a semantic conflict, just a stale branch",
+            ],
+            outro=(
+                "The real fix is to start from current `main` and keep both sets of valid changes together. "
+                "Open a fresh issue if that follow-up is still needed."
+            ),
+        )
+        close_pr_key = self._mutation_key(action="close_pr", issue_id=issue_id, pr_number=pr_number, body=pr_comment)
+        if not self._run_idempotent_mutation(
+            mutation_key=close_pr_key,
+            action=lambda: self.tracker.close_pr(pr_number=pr_number, comment=pr_comment),
+        ):
+            logger.warning("Failed to close conflicted PR #%d for issue #%s", pr_number, issue_id)
+            return False
+        self._post_issue_status(issue_id=issue_id, body=issue_comment)
+        close_issue_key = self._mutation_key(action="close_issue", issue_id=issue_id)
+        if not self._run_idempotent_mutation(
+            mutation_key=close_issue_key,
+            action=lambda: self.tracker.close_issue(issue_id=issue_id),
+        ):
+            logger.warning("Closed conflicted PR #%d but could not close issue #%s", pr_number, issue_id)
+            return False
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="archived",
+            pr_number=pr_number,
+            pr_state="closed",
+            last_failure_class="pr_conflict_superseded",
+            last_failure_reason=reason[:500],
+            clear_lease=True,
+        )
+        return True
 
     def _attempt_conflict_resolution(self, *, issue_id: str, pr_number: int, row: dict) -> bool:
         """Try to automatically resolve merge conflicts via rebase + AI-assisted resolution."""
@@ -544,7 +737,14 @@ class AutonomousHealerLoop:
                 if push.returncode == 0:
                     self.tracker.add_pr_comment(
                         pr_number=pr_number,
-                        body="Merge conflicts resolved automatically via clean rebase.",
+                        body=self._format_flow_status_comment(
+                            "Merge conflicts resolved automatically",
+                            "A clean rebase onto the base branch succeeded and validation passed.",
+                            [
+                                "Status: `resolved`",
+                                f"PR: `#{pr_number}`",
+                            ],
+                        ),
                     )
                     logger.info("Issue #%s: clean rebase resolved conflicts for PR #%d", issue_id, pr_number)
                     return True
@@ -622,7 +822,14 @@ class AutonomousHealerLoop:
 
             self.tracker.add_pr_comment(
                 pr_number=pr_number,
-                body="Merge conflicts resolved automatically via AI-assisted rebase.",
+                body=self._format_flow_status_comment(
+                    "Merge conflicts resolved automatically",
+                    "An AI-assisted rebase conflict resolution completed successfully and validation passed.",
+                    [
+                        "Status: `resolved`",
+                        f"PR: `#{pr_number}`",
+                    ],
+                ),
             )
             logger.info("Issue #%s: AI-resolved conflicts for PR #%d", issue_id, pr_number)
             return True
@@ -660,8 +867,8 @@ class AutonomousHealerLoop:
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
-                "Fresh retry queued up 🔁",
-                "The conflicted PR was closed without merge, so I'm putting this back in the queue for a clean pass.",
+                "Queued a fresh retry",
+                "The conflicted pull request was closed without merge, so this issue has been requeued for a clean retry.",
                 [
                     "Status: `queued`",
                     f"Previous PR: `#{pr_number}`",
@@ -671,9 +878,20 @@ class AutonomousHealerLoop:
 
     def _close_and_requeue_stuck_pr(self, *, issue_id: str, pr_number: int, mergeable_state: str) -> None:
         reason = f"PR #{pr_number} has been stuck in `{mergeable_state}` state past the timeout."
-        self.tracker.close_pr(
-            pr_number=pr_number,
-            comment=f"Closing this PR — it has been stuck (`{mergeable_state}`) for too long. Flow Healer will open a fresh attempt.",
+        close_body = self._format_flow_status_comment(
+            "Closing stale pull request",
+            "This pull request has remained non-mergeable past the configured timeout.",
+            [
+                "Status: `closed`",
+                f"PR: `#{pr_number}`",
+                f"Mergeable state: `{mergeable_state}`",
+            ],
+            outro="Flow Healer will queue a fresh attempt from the latest base branch.",
+        )
+        close_pr_key = self._mutation_key(action="close_pr", issue_id=issue_id, pr_number=pr_number, body=close_body)
+        self._run_idempotent_mutation(
+            mutation_key=close_pr_key,
+            action=lambda: self.tracker.close_pr(pr_number=pr_number, comment=close_body),
         )
         self.store.set_healer_issue_state(
             issue_id=issue_id,
@@ -686,8 +904,8 @@ class AutonomousHealerLoop:
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
-                "Stuck PR closed, retrying 🔁",
-                f"PR #{pr_number} was non-mergeable (`{mergeable_state}`) past the configured timeout, so I closed it and queued a fresh attempt.",
+                "Closed stuck pull request and requeued issue",
+                f"PR #{pr_number} remained non-mergeable (`{mergeable_state}`) past the configured timeout, so it was closed and this issue was requeued.",
                 [
                     "Status: `queued`",
                     f"Closed PR: `#{pr_number}`",
@@ -761,6 +979,103 @@ class AutonomousHealerLoop:
             logger.warning("Failed to auto-merge PR #%d: %s", pr_number, exc)
             return False
 
+    @staticmethod
+    def _normalize_repo_path(value: str) -> str:
+        text = (value or "").strip().replace("\\", "/")
+        text = text.lstrip("./").strip("/")
+        return text.lower()
+
+    def _issue_scope_key(self, *, task_spec, prediction) -> str:
+        execution_root = self._normalize_repo_path(str(getattr(task_spec, "execution_root", "") or ""))
+        if execution_root:
+            return f"path:{execution_root}"
+        for key in canonicalize_lock_keys(list(getattr(prediction, "keys", []) or [])):
+            if key.startswith(("path:", "dir:", "module:", "repo:")):
+                return key
+        return "repo:*"
+
+    def _issue_dedupe_key(self, *, task_spec, scope_key: str) -> str:
+        targets = [
+            self._normalize_repo_path(str(path))
+            for path in list(getattr(task_spec, "output_targets", ()) or [])
+            if self._normalize_repo_path(str(path))
+        ]
+        commands = [
+            re.sub(r"\s+", " ", str(command or "").strip()).lower()
+            for command in list(getattr(task_spec, "validation_commands", ()) or [])
+            if str(command or "").strip()
+        ]
+        if not targets and not commands:
+            return ""
+        material = "|".join(
+            [
+                scope_key or "repo:*",
+                str(getattr(task_spec, "task_kind", "") or "").strip().lower(),
+                ",".join(sorted(targets)),
+                ",".join(sorted(commands)),
+            ]
+        )
+        return hashlib.sha1(material.encode("utf-8")).hexdigest()[:24]
+
+    def _maybe_coalesce_duplicate_issue(self, *, issue: HealerIssue, canonical_issue: dict[str, object]) -> bool:
+        if not bool(getattr(self.settings, "healer_dedupe_close_duplicates", True)):
+            return False
+        canonical_issue_id = str(canonical_issue.get("issue_id") or "").strip()
+        if not canonical_issue_id or canonical_issue_id == issue.issue_id:
+            return False
+
+        repo_slug = str(getattr(self.tracker, "repo_slug", "") or "").strip()
+        canonical_ref = (
+            f"[#{canonical_issue_id}](https://github.com/{repo_slug}/issues/{canonical_issue_id})"
+            if repo_slug
+            else f"#{canonical_issue_id}"
+        )
+        self._post_issue_status(
+            issue_id=issue.issue_id,
+            body=self._format_flow_status_comment(
+                "Duplicate issue coalesced into active work item",
+                "This issue overlaps an existing active issue, so it was coalesced to avoid conflicting parallel PRs.",
+                [
+                    "Status: `archived`",
+                    f"Canonical issue: {canonical_ref}",
+                ],
+                outro="Follow the canonical issue for updates. Open a new issue only if scope changes materially.",
+            ),
+        )
+
+        close_key = self._mutation_key(action="close_issue_duplicate", issue_id=issue.issue_id)
+        if not self._run_idempotent_mutation(
+            mutation_key=close_key,
+            action=lambda: self.tracker.close_issue(issue_id=issue.issue_id),
+        ):
+            logger.warning(
+                "Failed to close duplicate issue #%s (canonical=%s).",
+                issue.issue_id,
+                canonical_issue_id,
+            )
+            return False
+
+        reason = f"Issue coalesced into active issue #{canonical_issue_id} to avoid overlap conflicts."
+        self.store.set_healer_issue_state(
+            issue_id=issue.issue_id,
+            state="archived",
+            pr_state="closed",
+            last_failure_class="duplicate_superseded",
+            last_failure_reason=reason[:500],
+            superseded_by_issue_id=canonical_issue_id,
+            clear_lease=True,
+        )
+        canonical_state = str(canonical_issue.get("state") or "queued").strip().lower() or "queued"
+        existing_feedback = str(canonical_issue.get("feedback_context") or "").strip()
+        coalesce_note = f"Coalesced duplicate issue #{issue.issue_id}: {self._clean_comment_text(issue.title, max_chars=180)}"
+        merged_feedback = "\n".join(part for part in [existing_feedback, coalesce_note] if part)[:500]
+        self.store.set_healer_issue_state(
+            issue_id=canonical_issue_id,
+            state=canonical_state,
+            feedback_context=merged_feedback,
+        )
+        return True
+
     def _ingest_ready_issues(self) -> None:
         issues = self.tracker.list_ready_issues(
             required_labels=self.settings.healer_issue_required_labels,
@@ -768,6 +1083,10 @@ class AutonomousHealerLoop:
             limit=max(10, self.settings.healer_max_concurrent_issues * 5),
         )
         for issue in issues:
+            task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
+            prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
+            scope_key = self._issue_scope_key(task_spec=task_spec, prediction=prediction)
+            dedupe_key = self._issue_dedupe_key(task_spec=task_spec, scope_key=scope_key)
             existing_issue = self.store.get_healer_issue(issue.issue_id)
             self.store.upsert_healer_issue(
                 issue_id=issue.issue_id,
@@ -777,6 +1096,8 @@ class AutonomousHealerLoop:
                 author=issue.author,
                 labels=issue.labels,
                 priority=issue.priority,
+                scope_key=scope_key,
+                dedupe_key=dedupe_key,
             )
             if existing_issue is not None:
                 existing_state = str(existing_issue.get("state") or "").strip().lower()
@@ -793,8 +1114,20 @@ class AutonomousHealerLoop:
                         pr_state="",
                         last_failure_class="",
                         last_failure_reason="",
+                        conflict_requeue_count=0,
+                        superseded_by_issue_id="",
                         clear_lease=True,
                     )
+            if bool(getattr(self.settings, "healer_dedupe_enabled", True)) and dedupe_key:
+                canonical_issue = self.store.find_active_issue_by_dedupe_key(
+                    dedupe_key=dedupe_key,
+                    exclude_issue_id=issue.issue_id,
+                )
+                if canonical_issue is not None and self._maybe_coalesce_duplicate_issue(
+                    issue=issue,
+                    canonical_issue=canonical_issue,
+                ):
+                    continue
             if existing_issue is None:
                 try:
                     self.tracker.add_issue_reaction(issue_id=issue.issue_id, reaction="eyes")
@@ -824,8 +1157,8 @@ class AutonomousHealerLoop:
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
-                    "Approval's in, we're back on the move 🌊",
-                    "Picking this up again now that the PR label is on the issue.",
+                    "Approval label detected; issue requeued",
+                    "A required approval label is now present, so this issue is back in the queue.",
                     [
                         f"Status: `queued`",
                         f"Approval label found: `{self.settings.healer_pr_required_label}`",
@@ -873,64 +1206,73 @@ class AutonomousHealerLoop:
             return
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
-        self.store.set_healer_issue_state(issue_id=issue.issue_id, state="running")
+        prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
+        scope_key = self._issue_scope_key(task_spec=task_spec, prediction=prediction)
+        dedupe_key = self._issue_dedupe_key(task_spec=task_spec, scope_key=scope_key)
+        self.store.set_healer_issue_state(
+            issue_id=issue.issue_id,
+            state="claimed",
+            scope_key=scope_key,
+            dedupe_key=dedupe_key,
+        )
+        proposed_attempt_no = max(1, int(row.get("attempt_count") or 0) + 1)
         lease_stop = threading.Event()
+        lease_lost = threading.Event()
         lease_thread = threading.Thread(
             target=self._lease_heartbeat,
-            args=(issue.issue_id, lease_stop),
+            args=(issue.issue_id, lease_stop, lease_lost),
             daemon=True,
         )
         lease_thread.start()
-        attempt_no = self.store.increment_healer_attempt(issue.issue_id)
-        prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
-        lock_result = self.dispatcher.acquire_prediction_locks(issue_id=issue.issue_id, lock_keys=prediction.keys)
-        if not lock_result.acquired:
-            logger.info(
-                "Issue #%s blocked by prediction lock conflict (%s)",
-                issue.issue_id,
-                lock_result.reason,
-            )
-            final_state = self._backoff_or_fail(
-                issue_id=issue.issue_id,
-                attempt_no=attempt_no,
-                failure_class="lock_conflict",
-                failure_reason=lock_result.reason,
-            )
-            return
-
-        attempt_id = f"hat_{uuid4().hex[:10]}"
-        self.store.create_healer_attempt(
-            attempt_id=attempt_id,
-            issue_id=issue.issue_id,
-            attempt_no=attempt_no,
-            state="running",
-            prediction_source=prediction.source,
-            predicted_lock_set=prediction.keys,
-            task_kind=task_spec.task_kind,
-            output_targets=list(task_spec.output_targets),
-            tool_policy=task_spec.tool_policy,
-            validation_profile=task_spec.validation_profile,
-        )
+        attempt_no = 0
+        attempt_id = ""
         actual_diff: list[str] = []
         test_summary: dict[str, object] = {}
         verifier_summary: dict[str, object] = {}
         failure_class = ""
         failure_reason = ""
         proposer_output_excerpt = ""
-        issue_state = "failed"
+        issue_state = "claimed"
         attempt_state = "failed"
         workspace = None
+
+        def _attempt_label() -> int:
+            return max(1, attempt_no or proposed_attempt_no)
+
+        def _abort_for_lost_lease() -> bool:
+            nonlocal failure_class, failure_reason, issue_state
+            if not lease_lost.is_set():
+                return False
+            failure_class = "lease_expired"
+            failure_reason = "Lease lost during processing; aborting to avoid race."
+            issue_state = self._backoff_or_fail(
+                issue_id=issue.issue_id,
+                attempt_no=_attempt_label(),
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+            )
+            return True
+
+        def _fail_without_attempt(*, failure_class_value: str, failure_reason_value: str) -> None:
+            nonlocal failure_class, failure_reason, issue_state
+            failure_class = failure_class_value
+            failure_reason = failure_reason_value
+            issue_state = "failed"
+            self.store.set_healer_issue_state(
+                issue_id=issue.issue_id,
+                state="failed",
+                last_failure_class=failure_class_value,
+                last_failure_reason=failure_reason_value[:500],
+                clear_lease=True,
+            )
+
         try:
             try:
                 resolved_execution = self.runner.resolve_execution(workspace=self.repo_path, task_spec=task_spec)
             except UnsupportedLanguageError as exc:
-                failure_class = "unsupported_language"
-                failure_reason = str(exc)
-                issue_state = self._backoff_or_fail(
-                    issue_id=issue.issue_id,
-                    attempt_no=attempt_no,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
+                _fail_without_attempt(
+                    failure_class_value="unsupported_language",
+                    failure_reason_value=str(exc),
                 )
                 return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
@@ -953,42 +1295,85 @@ class AutonomousHealerLoop:
                     logger.info(
                         "Issue #%s attempt %s blocked by %s preflight: %s",
                         issue.issue_id,
-                        attempt_no,
+                        _attempt_label(),
                         detected_language,
                         failure_reason,
                     )
                     issue_state = self._backoff_or_fail(
                         issue_id=issue.issue_id,
-                        attempt_no=attempt_no,
+                        attempt_no=_attempt_label(),
                         failure_class=failure_class,
                         failure_reason=failure_reason,
                     )
                     return
-            workspace = self.workspace_manager.ensure_workspace(
-                issue_id=issue.issue_id,
-                title=issue.title,
-            )
-            self.workspace_manager.prepare_workspace(
-                workspace_path=workspace.path,
-                branch=workspace.branch,
-            )
-            task_spec = compile_task_spec(
-                issue_title=issue.title,
-                issue_body=issue.body,
-            )
+            if _abort_for_lost_lease():
+                return
             try:
-                resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
-            except UnsupportedLanguageError as exc:
-                failure_class = "unsupported_language"
-                failure_reason = str(exc)
+                workspace = self.workspace_manager.ensure_workspace(
+                    issue_id=issue.issue_id,
+                    title=issue.title,
+                )
+                self.workspace_manager.prepare_workspace(
+                    workspace_path=workspace.path,
+                    branch=workspace.branch,
+                )
+            except Exception as exc:
+                failure_class = "workspace_corrupt"
+                failure_reason = f"Workspace unavailable or corrupt: {exc}"
+                logger.warning(
+                    "Issue #%s workspace preparation failed before attempt start: %s",
+                    issue.issue_id,
+                    failure_reason,
+                )
                 issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
-                    attempt_no=attempt_no,
+                    attempt_no=_attempt_label(),
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                 )
                 return
+            if _abort_for_lost_lease():
+                return
+            try:
+                resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
+            except UnsupportedLanguageError as exc:
+                _fail_without_attempt(
+                    failure_class_value="unsupported_language",
+                    failure_reason_value=str(exc),
+                )
+                return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
+            lock_result = self.dispatcher.acquire_prediction_locks(issue_id=issue.issue_id, lock_keys=prediction.keys)
+            if not lock_result.acquired:
+                failure_class = "lock_conflict"
+                failure_reason = lock_result.reason
+                logger.info(
+                    "Issue #%s blocked by prediction lock conflict (%s)",
+                    issue.issue_id,
+                    failure_reason,
+                )
+                issue_state = self._backoff_or_fail(
+                    issue_id=issue.issue_id,
+                    attempt_no=_attempt_label(),
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
+                return
+            attempt_no = self.store.increment_healer_attempt(issue.issue_id)
+
+            attempt_id = f"hat_{uuid4().hex[:10]}"
+            self.store.create_healer_attempt(
+                attempt_id=attempt_id,
+                issue_id=issue.issue_id,
+                attempt_no=attempt_no,
+                state="running",
+                prediction_source=prediction.source,
+                predicted_lock_set=prediction.keys,
+                task_kind=task_spec.task_kind,
+                output_targets=list(task_spec.output_targets),
+                tool_policy=task_spec.tool_policy,
+                validation_profile=task_spec.validation_profile,
+            )
             self.store.set_healer_issue_state(
                 issue_id=issue.issue_id,
                 state="running",
@@ -998,6 +1383,8 @@ class AutonomousHealerLoop:
                 output_targets=list(task_spec.output_targets),
                 tool_policy=task_spec.tool_policy,
                 validation_profile=task_spec.validation_profile,
+                scope_key=scope_key,
+                dedupe_key=dedupe_key,
             )
             logger.info(
                 "Issue #%s attempt %s running in %s",
@@ -1008,13 +1395,13 @@ class AutonomousHealerLoop:
             self._post_issue_status(
                 issue_id=issue.issue_id,
                 body=self._format_flow_status_comment(
-                    "Yo, Flow's on it 👀",
-                    "Kicking off a fresh pass now.",
+                    "Started automated fix attempt",
+                    "Beginning a new automated pass for this issue.",
                     [
                         f"Attempt: `{attempt_no}`",
                         f"Branch: `{workspace.branch}`",
                         f"Task kind: `{task_spec.task_kind}`",
-                        f"Targets: `{', '.join(task_spec.output_targets) if task_spec.output_targets else 'inferred in code'}`",
+                        f"Targets: `{self._clean_comment_text(', '.join(task_spec.output_targets) if task_spec.output_targets else 'inferred in code', max_chars=220)}`",
                         f"Test gate mode: `{self.runner.test_gate_mode}`",
                     ],
                 ),
@@ -1086,6 +1473,9 @@ class AutonomousHealerLoop:
                 )
                 return
 
+            if _abort_for_lost_lease():
+                return
+
             upgrade = self.dispatcher.upgrade_locks(
                 issue_id=issue.issue_id,
                 lock_keys=diff_paths_to_lock_keys(run_result.diff_paths),
@@ -1137,6 +1527,9 @@ class AutonomousHealerLoop:
                 )
                 return
 
+            if _abort_for_lost_lease():
+                return
+
             if (
                 self.settings.healer_pr_actions_require_approval
                 and not self._issue_has_approval_label(
@@ -1152,20 +1545,23 @@ class AutonomousHealerLoop:
                 self._post_issue_status(
                     issue_id=issue.issue_id,
                     body=self._format_flow_status_comment(
-                        "Nice, this one's looking clean ✅",
-                        "Patch is in, checks passed, and I'm ready to keep it moving.",
+                        "Patch is ready for approval",
+                        "The patch and validation passed. Approval is required before pull-request actions continue.",
                         [
                             "Status: `pr_pending_approval`",
                             f"Required label to continue: `{self.settings.healer_pr_required_label}`",
-                            f"Test summary: `{run_result.test_summary}`",
-                            f"Verifier: {verification.summary}",
+                            f"Verifier: {self._clean_comment_text(verification.summary, max_chars=260)}",
+                            *self._format_test_summary_bullets(run_result.test_summary),
                         ],
-                        outro="Drop that approval label on here and I'll take it the rest of the way.",
+                        outro="Add the approval label to continue automatic pull-request actions.",
                     ),
                 )
                 issue_state = "pr_pending_approval"
                 attempt_state = "pr_pending_approval"
                 logger.info("Issue #%s is waiting for PR approval label", issue.issue_id)
+                return
+
+            if _abort_for_lost_lease():
                 return
 
             commit_ok, commit_reason = self._commit_and_push(
@@ -1194,14 +1590,17 @@ class AutonomousHealerLoop:
                 )
                 return
 
+            if _abort_for_lost_lease():
+                return
+
             pr = self.tracker.open_or_update_pr(
                 issue_id=issue.issue_id,
                 branch=workspace.branch,
                 title=f"healer: fix issue #{issue.issue_id} - {issue.title[:80]}",
-                body=(
-                    f"Automated healer proposal for issue #{issue.issue_id}.\n\n"
-                    f"- Verifier: passed\n"
-                    f"- Targeted/full test gates: {run_result.test_summary}\n"
+                body=self._format_pr_description(
+                    issue_id=issue.issue_id,
+                    verifier_summary=verification.summary,
+                    test_summary=run_result.test_summary,
                 ),
                 base=self.settings.healer_default_branch,
             )
@@ -1227,12 +1626,11 @@ class AutonomousHealerLoop:
             self._post_issue_status(
                 issue_id=issue.issue_id,
                 body=self._format_flow_status_comment(
-                    "PR is up and cruising 🚀",
-                    "I opened or updated the PR for this issue.",
+                    "Pull request opened or updated",
+                    "I opened or updated the pull request for this issue.",
                     [
-                        f"PR: #{pr.number}",
-                        f"URL: {pr.html_url}",
-                        f"Test summary: `{run_result.test_summary}`",
+                        f"PR: [#{pr.number}]({pr.html_url})",
+                        *self._format_test_summary_bullets(run_result.test_summary),
                     ],
                 ),
             )
@@ -1259,43 +1657,47 @@ class AutonomousHealerLoop:
         finally:
             lease_stop.set()
             lease_thread.join(timeout=1.0)
-            self.store.finish_healer_attempt(
-                attempt_id=attempt_id,
-                state=attempt_state,
-                actual_diff_set=actual_diff,
-                test_summary=test_summary,
-                verifier_summary=verifier_summary,
-                failure_class=failure_class,
-                failure_reason=failure_reason,
-                proposer_output_excerpt=proposer_output_excerpt,
-            )
-            self.memory.maybe_record_lesson(
-                issue=issue,
-                attempt_id=attempt_id,
-                final_state=attempt_state,
-                predicted_lock_set=prediction.keys,
-                actual_diff_set=actual_diff,
-                test_summary=test_summary,
-                verifier_summary=verifier_summary,
-                failure_class=failure_class,
-                failure_reason=failure_reason,
-            )
-            self.store.release_healer_locks(issue_id=issue.issue_id)
+            if attempt_id:
+                self.store.finish_healer_attempt(
+                    attempt_id=attempt_id,
+                    state=attempt_state,
+                    actual_diff_set=actual_diff,
+                    test_summary=test_summary,
+                    verifier_summary=verifier_summary,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    proposer_output_excerpt=proposer_output_excerpt,
+                )
+                self.memory.maybe_record_lesson(
+                    issue=issue,
+                    attempt_id=attempt_id,
+                    final_state=attempt_state,
+                    predicted_lock_set=prediction.keys,
+                    actual_diff_set=actual_diff,
+                    test_summary=test_summary,
+                    verifier_summary=verifier_summary,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
+            try:
+                self.store.release_healer_locks(issue_id=issue.issue_id)
+            except Exception as exc:
+                logger.error("Failed to release locks for issue #%s: %s", issue.issue_id, exc)
             if workspace is not None:
                 self._cleanup_workspace(issue_id=issue.issue_id, state=issue_state, workspace_path=workspace.path)
             logger.info("Issue #%s attempt finished with state=%s", issue.issue_id, attempt_state)
-            if attempt_state == "failed" and failure_class:
+            if attempt_state == "failed" and failure_class and issue_state in {"failed", "blocked"}:
                 self._post_issue_status(
                     issue_id=issue.issue_id,
                     body=self._format_flow_status_comment(
-                        "Quick heads-up: this pass hit a snag ⚠️",
+                        "Attempt failed",
                         None,
                         [
                             f"Attempt state: `{attempt_state}`",
                             f"Failure class: `{failure_class}`",
-                            f"Reason: {failure_reason}",
+                            f"Reason: {self._clean_comment_text(failure_reason, max_chars=320)}",
                         ],
-                        outro="I saved the failure details so the next pass has better context.",
+                        outro="Failure details were saved so the next pass can reuse the context.",
                         ),
                 )
 
@@ -1409,7 +1811,12 @@ class AutonomousHealerLoop:
             if (normalized := str(label or "").strip().lower())
         }
 
-    def _lease_heartbeat(self, issue_id: str, stop_event: threading.Event) -> None:
+    def _lease_heartbeat(
+        self,
+        issue_id: str,
+        stop_event: threading.Event,
+        lease_lost: threading.Event,
+    ) -> None:
         interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
         while not stop_event.wait(interval):
             renewed = self.store.renew_healer_issue_lease(
@@ -1419,6 +1826,7 @@ class AutonomousHealerLoop:
             )
             if not renewed:
                 logger.warning("Lease heartbeat stopped for issue #%s; lease could not be renewed.", issue_id)
+                lease_lost.set()
                 return
 
     def _backoff_or_fail(
@@ -1435,6 +1843,8 @@ class AutonomousHealerLoop:
         if is_always_requeue:
             if is_infra:
                 delay = max(15, min(300, int(self.settings.healer_backoff_initial_seconds)))
+            elif failure_class in {"lock_conflict", "lock_upgrade_conflict"}:
+                delay = 15
             else:
                 delay = min(
                     self.settings.healer_backoff_max_seconds,
@@ -1464,12 +1874,12 @@ class AutonomousHealerLoop:
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
-                    "Auto-retrying this one 🔁",
-                    "This failure class is configured to requeue automatically.",
+                    "Issue requeued automatically",
+                    "This failure class is configured for automatic requeue.",
                     [
                         f"Attempt: `{attempt_no}`",
                         f"Failure class: `{failure_class}`",
-                        f"Reason: {failure_reason}",
+                        f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
                         f"Next retry not before: `{backoff_until} UTC`",
                     ],
                 ),
@@ -1520,12 +1930,12 @@ class AutonomousHealerLoop:
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
-                "Queueing another pass 🔁",
-                "This attempt failed, but we're still under retry budget.",
+                "Issue requeued for another attempt",
+                "This attempt failed, but the issue is still within retry budget.",
                 [
                     f"Attempt: `{attempt_no}`",
                     f"Failure class: `{failure_class}`",
-                    f"Reason: {failure_reason}",
+                    f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
                     f"Next retry not before: `{backoff_until} UTC`",
                     f"Retry budget: `{self.settings.healer_retry_budget}`",
                 ],
@@ -1646,8 +2056,8 @@ class AutonomousHealerLoop:
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
-                "Repeated failure loop paused ⏸️",
-                "I hit the same deterministic failure pattern again, so I'm blocking this issue instead of churning retries.",
+                "Repeated failure pattern detected; issue paused",
+                "The same deterministic failure repeated, so this issue is blocked instead of retrying indefinitely.",
                 details,
                 outro="Clear the workspace hygiene issue or adjust the guardrails, then requeue for another pass.",
             ),
@@ -1713,11 +2123,114 @@ class AutonomousHealerLoop:
     def _circuit_breaker_open(self) -> bool:
         return self._circuit_breaker_status().open
 
-    def _post_issue_status(self, *, issue_id: str, body: str) -> None:
+    def _mutation_key(self, *, action: str, issue_id: str = "", pr_number: int = 0, body: str = "") -> str:
+        body_hash = hashlib.sha1((body or "").encode("utf-8")).hexdigest()[:16] if body else ""
+        return "|".join(
+            [
+                "gh_mutation",
+                self.settings.repo_name,
+                action.strip(),
+                str(issue_id or ""),
+                str(int(pr_number) if pr_number else 0),
+                body_hash,
+            ]
+        )
+
+    def _run_idempotent_mutation(self, *, mutation_key: str, action: Callable[[], bool]) -> bool:
+        claim = self.store.claim_healer_mutation(mutation_key=mutation_key)
+        if claim in {"already_success", "inflight"}:
+            return True
+        ok = False
         try:
-            self.tracker.add_issue_comment(issue_id=issue_id, body=body)
+            ok = bool(action())
         except Exception as exc:
-            logger.warning("Failed to post issue comment for issue #%s: %s", issue_id, exc)
+            logger.warning("GitHub mutation %s failed with exception: %s", mutation_key, exc)
+            ok = False
+        self.store.complete_healer_mutation(mutation_key=mutation_key, success=ok)
+        return ok
+
+    def _tracker_last_error(self) -> tuple[str, str]:
+        try:
+            return self.tracker.get_last_error()
+        except Exception:
+            return "", ""
+
+    def _note_infra_failure(self, *, failure_class: str, failure_reason: str) -> None:
+        if failure_class not in _INFRA_FAILURE_CLASSES:
+            return
+        streak = self._coerce_int(self.store.get_state("healer_infra_failure_streak"), default=0) + 1
+        self.store.set_state("healer_infra_failure_streak", str(streak))
+        threshold = max(1, int(getattr(self.settings, "healer_infra_dlq_threshold", 8)))
+        if streak < threshold:
+            return
+        cooldown_seconds = max(60, int(getattr(self.settings, "healer_infra_dlq_cooldown_seconds", 3600)))
+        pause_until = datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
+        pause_until_str = pause_until.strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_state("healer_infra_pause_until", pause_until_str)
+        self.store.set_state("healer_infra_pause_reason", f"{failure_class}: {failure_reason[:300]}")
+        logger.warning(
+            "Infra failure streak reached %d/%d. Pausing claims until %s.",
+            streak,
+            threshold,
+            pause_until_str,
+        )
+
+    def _reset_infra_failure_streak(self) -> None:
+        self.store.set_state("healer_infra_failure_streak", "0")
+        self.store.set_state("healer_infra_pause_until", "")
+        self.store.set_state("healer_infra_pause_reason", "")
+
+    def _infra_pause_active(self) -> bool:
+        raw = str(self.store.get_state("healer_infra_pause_until") or "").strip()
+        if not raw:
+            return False
+        try:
+            pause_until = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        except ValueError:
+            return False
+        return datetime.now(UTC) < pause_until
+
+    def _recheck_conflict_state(self, *, pr_number: int, current_state: str, current_mergeable_state: str) -> tuple[str, str]:
+        if current_state != "conflict":
+            return current_state, current_mergeable_state
+        delay = max(1, int(getattr(self.settings, "healer_mergeability_recheck_delay_seconds", 2)))
+        time.sleep(delay)
+        details = self.tracker.get_pr_details(pr_number=pr_number)
+        if details is None:
+            return current_state, current_mergeable_state
+        if details.state != "conflict":
+            logger.info(
+                "PR #%d conflict cleared on recheck (state=%s mergeable_state=%s).",
+                pr_number,
+                details.state,
+                details.mergeable_state,
+            )
+        return details.state, details.mergeable_state
+
+    def _post_issue_status(self, *, issue_id: str, body: str) -> None:
+        mutation_key = self._mutation_key(action="issue_comment", issue_id=issue_id, body=body)
+        for attempt in range(2):
+            try:
+                if self._run_idempotent_mutation(
+                    mutation_key=mutation_key,
+                    action=lambda: self.tracker.add_issue_comment(issue_id=issue_id, body=body),
+                ):
+                    return
+                last_error_class, last_error_reason = self._tracker_last_error()
+                if last_error_class == "github_rate_limited":
+                    self._note_infra_failure(
+                        failure_class="github_rate_limited",
+                        failure_reason=last_error_reason or "GitHub rate limit while posting issue status.",
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to post issue comment for issue #%s (attempt %d): %s",
+                    issue_id,
+                    attempt + 1,
+                    exc,
+                )
+                if attempt == 0:
+                    time.sleep(2)
 
     @staticmethod
     def _format_flow_status_comment(
@@ -1727,20 +2240,115 @@ class AutonomousHealerLoop:
         *,
         outro: str | None = None,
     ) -> str:
-        lines = [title.strip(), ""]
+        lines = [f"### {title.strip()}", ""]
         if intro:
             lines.extend([intro.strip(), ""])
         lines.extend(f"- {item}" for item in bullets if item.strip())
         if outro:
             lines.extend(["", outro.strip()])
-        lines.extend(["", "-- Flow 🌊"])
+        lines.extend(["", "-- Flow Healer"])
         return "\n".join(lines)
+
+    @staticmethod
+    def _clean_comment_text(value: object, *, max_chars: int = 240) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        if not text:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        return f"{text[: max_chars - 3].rstrip()}..."
+
+    @staticmethod
+    def _coerce_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _format_full_gate_bullet(cls, summary: dict[str, object], *, runner: str) -> str:
+        status = cls._clean_comment_text(summary.get(f"{runner}_full_status") or "", max_chars=40)
+        exit_code_raw = summary.get(f"{runner}_full_exit_code")
+        exit_code = cls._clean_comment_text(exit_code_raw, max_chars=20) if exit_code_raw not in (None, "") else ""
+        reason = cls._clean_comment_text(summary.get(f"{runner}_full_reason") or "", max_chars=120)
+        if not status and not exit_code:
+            return ""
+        if not status:
+            status = "passed" if cls._coerce_int(exit_code_raw, default=1) == 0 else "failed"
+        details: list[str] = []
+        if exit_code:
+            details.append(f"exit `{exit_code}`")
+        if reason:
+            details.append(f"reason `{reason}`")
+        suffix = f" ({', '.join(details)})" if details else ""
+        return f"{runner.capitalize()} full gate: `{status}`{suffix}"
+
+    @classmethod
+    def _format_test_summary_bullets(cls, summary: dict[str, object] | None) -> list[str]:
+        if not summary:
+            return ["Test gates: `not reported`"]
+        failed_tests = cls._coerce_int(summary.get("failed_tests"), default=0)
+        overall_status = "passed" if failed_tests == 0 else "failed"
+        bullets = [
+            f"Test gates: `{overall_status}`",
+            f"Failed tests: `{failed_tests}`",
+        ]
+        mode = cls._clean_comment_text(summary.get("mode") or "", max_chars=40)
+        if mode:
+            bullets.append(f"Gate mode: `{mode}`")
+        language = cls._clean_comment_text(
+            summary.get("language_effective") or summary.get("language_detected") or "",
+            max_chars=40,
+        )
+        if language:
+            bullets.append(f"Language: `{language}`")
+        execution_root = cls._clean_comment_text(summary.get("execution_root") or "", max_chars=80)
+        if execution_root:
+            bullets.append(f"Execution root: `{execution_root}`")
+        targeted_raw = summary.get("targeted_tests")
+        if isinstance(targeted_raw, list):
+            targeted: list[str] = []
+            for item in targeted_raw:
+                cleaned = cls._clean_comment_text(item, max_chars=90)
+                if cleaned:
+                    targeted.append(cleaned)
+            if targeted:
+                preview = ", ".join(f"`{item}`" for item in targeted[:3])
+                if len(targeted) > 3:
+                    preview = f"{preview} (+{len(targeted) - 3} more)"
+                bullets.append(f"Targeted tests: {preview}")
+        for runner in ("local", "docker"):
+            gate_bullet = cls._format_full_gate_bullet(summary, runner=runner)
+            if gate_bullet:
+                bullets.append(gate_bullet)
+        return bullets
+
+    @classmethod
+    def _format_pr_description(
+        cls,
+        *,
+        issue_id: str,
+        verifier_summary: str,
+        test_summary: dict[str, object],
+    ) -> str:
+        verifier_line = cls._clean_comment_text(verifier_summary or "passed", max_chars=260) or "passed"
+        lines = [
+            f"Automated Flow Healer proposal for issue #{issue_id}.",
+            "",
+            "### Verification",
+            f"- Verifier: `{verifier_line}`",
+            "",
+            "### Test Summary",
+        ]
+        lines.extend(f"- {item}" for item in cls._format_test_summary_bullets(test_summary))
+        return "\n".join(lines) + "\n"
 
     def _cleanup_workspace(self, *, issue_id: str, state: str, workspace_path: Path) -> None:
         try:
             self.workspace_manager.remove_workspace(workspace_path=workspace_path)
         except Exception as exc:
-            logger.warning("Failed to clean workspace for issue #%s: %s", issue_id, exc)
+            logger.error("Failed to clean workspace for issue #%s: %s", issue_id, exc)
+            self.store.set_state("healer_last_workspace_cleanup_error", str(exc)[:500])
             return
         self.store.set_healer_issue_state(
             issue_id=issue_id,

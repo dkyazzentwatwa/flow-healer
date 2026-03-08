@@ -1,5 +1,9 @@
-from app.repository import ServiceRecord, ServiceRepository
-from app.service import DomainService
+from __future__ import annotations
+
+import pytest
+
+from app.repository import InMemoryTodoRepository, ServiceRecord, ServiceRepository
+from app.service import DomainService, TodoService
 
 
 def test_repository_list_services_returns_detached_records() -> None:
@@ -51,3 +55,31 @@ def test_domain_service_list_services_returns_detached_records() -> None:
     assert fresh_services[0].tags == ["core"]
     assert fresh_services[0].metadata == {"region": "us-west-2"}
     assert repository_services[0].name == "billing"
+
+
+def test_create_todo_trims_title_and_assigns_incrementing_ids() -> None:
+    service = TodoService(repository=InMemoryTodoRepository())
+
+    first = service.create_todo("  Ship release  ")
+    second = service.create_todo("Stabilize retries")
+
+    assert first.id == "1"
+    assert first.title == "Ship release"
+    assert second.id == "2"
+
+
+def test_complete_todo_marks_item_done_with_timestamp() -> None:
+    service = TodoService(repository=InMemoryTodoRepository())
+    created = service.create_todo("Fix stale lock")
+
+    completed = service.complete_todo(created.id)
+
+    assert completed.completed is True
+    assert completed.completed_at is not None
+
+
+def test_complete_todo_raises_for_unknown_id() -> None:
+    service = TodoService(repository=InMemoryTodoRepository())
+
+    with pytest.raises(KeyError):
+        service.complete_todo("404")
