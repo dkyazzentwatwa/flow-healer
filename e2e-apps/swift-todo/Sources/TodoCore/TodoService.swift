@@ -16,7 +16,7 @@ public struct TodoItem: Equatable {
 
 public enum TodoServiceError: Error, Equatable {
     case titleRequired
-    case itemNotFound
+    case itemNotFound(id: String)
 }
 
 public final class TodoService {
@@ -43,7 +43,7 @@ public final class TodoService {
 
     public func complete(id: String) throws -> TodoItem {
         guard let index = items.firstIndex(where: { $0.id == id }) else {
-            throw TodoServiceError.itemNotFound
+            throw TodoServiceError.itemNotFound(id: id)
         }
         if !items[index].completed {
             items[index].completed = true
