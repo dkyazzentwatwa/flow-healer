@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 from types import ModuleType
 
 import pytest
@@ -97,3 +98,13 @@ def test_add_case_groups_keep_expected_coverage_shape(
 ) -> None:
     """Keep each smoke coverage group intentionally compact."""
     assert len(cases) == expected_size
+
+
+def test_missing_digit_guardrail_api_falls_back_to_unlimited_strings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat runtimes without the digit-limit API as having no guardrail."""
+    monkeypatch.setattr(SMOKE_MATH_MODULE, "sys", SimpleNamespace())
+
+    assert SMOKE_MATH_MODULE._get_max_integer_string_digits() == 0
+    assert SMOKE_MATH_MODULE._has_supported_digit_count("9" * 5000) is True
