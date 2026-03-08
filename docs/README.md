@@ -23,6 +23,7 @@ flow-healer start --once
 - [architecture.md](architecture.md): control loop and module map
 - [operations.md](operations.md): common maintenance tasks and troubleshooting
 - [operations.md - Failure Recovery](operations.md#failure-recovery): incident response for failed healing attempts
+- [reliability-improvement-feedback.md](reliability-improvement-feedback.md): reliability feedback roadmap and prioritized hardening sequence
 - [contributing.md](contributing.md): development and review expectations
 - [e2e-smoke/](../e2e-smoke/): Multi-language test sandboxes for validating language strategies
 

@@ -2629,7 +2629,8 @@ def test_format_pr_description_uses_markdown_sections():
         test_summary={"failed_tests": 0, "mode": "local_only"},
     )
 
-    assert body.startswith("Automated Flow Healer proposal for issue #155.")
+    assert body.startswith("Flow Healer rolled in with an automated proposal for issue #155.")
     assert "### Verification" in body
     assert "### Test Summary" in body
     assert "- Test gates: `passed`" in body
+    assert "Built with a little hustle by Flow Healer" in body

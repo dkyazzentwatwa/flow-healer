@@ -135,6 +135,7 @@ class AutonomousHealerLoop:
             timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
             test_gate_mode=settings.healer_test_gate_mode,
             local_gate_policy=settings.healer_local_gate_policy,
+            completion_artifact_mode=settings.healer_completion_artifact_mode,
             language=settings.healer_language,
             docker_image=settings.healer_docker_image,
             test_command=settings.healer_test_command,
@@ -2396,14 +2397,46 @@ class AutonomousHealerLoop:
         *,
         outro: str | None = None,
     ) -> str:
-        lines = [f"### {title.strip()}", ""]
+        heading = AutonomousHealerLoop._status_heading(title)
+        signoff = AutonomousHealerLoop._status_signoff(title)
+        lines = [f"### {heading}", ""]
         if intro:
             lines.extend([intro.strip(), ""])
         lines.extend(f"- {item}" for item in bullets if item.strip())
         if outro:
             lines.extend(["", outro.strip()])
-        lines.extend(["", "-- Flow Healer"])
+        lines.extend(["", signoff])
         return "\n".join(lines)
+
+    @staticmethod
+    def _status_heading(title: str) -> str:
+        normalized = (title or "").strip()
+        heading_map = {
+            "Started automated fix attempt": "🛠️ Flow Healer is on it",
+            "Patch is ready for approval": "✨ Patch is ready for a human thumbs-up",
+            "Pull request opened or updated": "🚀 Fresh PR energy",
+            "Attempt failed": "😵‍💫 Hit a snag this round",
+            "Issue requeued automatically": "🔁 Automatic retry queued up",
+            "Issue requeued for another attempt": "🎯 Taking another swing",
+            "Repeated failure pattern detected; issue paused": "🧯 Same snag, smart pause",
+        }
+        flair = heading_map.get(normalized)
+        if flair:
+            return f"{flair} · {normalized}"
+        return f"🤖 {normalized}" if normalized else "🤖 Flow Healer update"
+
+    @staticmethod
+    def _status_signoff(title: str) -> str:
+        normalized = (title or "").strip()
+        if normalized == "Pull request opened or updated":
+            return "-- Flow Healer 🤖✨"
+        if normalized in {"Issue requeued automatically", "Issue requeued for another attempt"}:
+            return "-- Flow Healer, warming up another pass 🔁"
+        if normalized == "Attempt failed":
+            return "-- Flow Healer, regrouping for the next round 🧰"
+        if normalized == "Repeated failure pattern detected; issue paused":
+            return "-- Flow Healer, pausing here so we don't thrash 🧯"
+        return "-- Flow Healer 🤖"
 
     @staticmethod
     def _clean_comment_text(value: object, *, max_chars: int = 240) -> str:
@@ -2489,7 +2522,9 @@ class AutonomousHealerLoop:
     ) -> str:
         verifier_line = cls._clean_comment_text(verifier_summary or "passed", max_chars=260) or "passed"
         lines = [
-            f"Automated Flow Healer proposal for issue #{issue_id}.",
+            f"Flow Healer rolled in with an automated proposal for issue #{issue_id}.",
+            "",
+            "A quick heads-up before you review: this branch was assembled by the agent, then checked against the current validation gates.",
             "",
             "### Verification",
             f"- Verifier: `{verifier_line}`",
@@ -2497,6 +2532,7 @@ class AutonomousHealerLoop:
             "### Test Summary",
         ]
         lines.extend(f"- {item}" for item in cls._format_test_summary_bullets(test_summary))
+        lines.extend(["", "_Built with a little hustle by Flow Healer 🤖✨_"])
         return "\n".join(lines) + "\n"
 
     def _cleanup_workspace(self, *, issue_id: str, state: str, workspace_path: Path) -> None:

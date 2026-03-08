@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .protocols import ConnectorTurnResult
+
 
 class CodexCliConnector:
     """Small standalone connector that shells out to `codex exec`."""
@@ -108,13 +110,24 @@ class CodexCliConnector:
         return sender
 
     def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+        return self.run_turn_detailed(thread_id, prompt, timeout_seconds=timeout_seconds).output_text
+
+    def run_turn_detailed(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> ConnectorTurnResult:
         self.ensure_started()
         with self._lock:
             available = self._available
             resolved = self._resolved_command
             reason = self._availability_reason
         if not available or not resolved:
-            return f"ConnectorUnavailable: {reason or 'Codex CLI command is not available.'}"
+            return ConnectorTurnResult(
+                output_text=f"ConnectorUnavailable: {reason or 'Codex CLI command is not available.'}",
+            )
 
         cmd = [resolved, "exec", "--skip-git-repo-check", "--yolo"]
         if self.model:
@@ -150,7 +163,7 @@ class CodexCliConnector:
                 self._available = False
                 self._availability_reason = f"Codex CLI not found at '{resolved}'."
                 self._clear_runtime_error_details()
-            return f"ConnectorUnavailable: Codex CLI not found at '{resolved}'."
+            return ConnectorTurnResult(output_text=f"ConnectorUnavailable: Codex CLI not found at '{resolved}'.")
         except subprocess.TimeoutExpired:
             stdout = _normalize_process_output(getattr(proc, "stdout", None))
             stderr = _normalize_process_output(getattr(proc, "stderr", None))
@@ -170,7 +183,7 @@ class CodexCliConnector:
                     stdout_tail=stdout_tail,
                     stderr_tail=stderr_tail,
                 )
-            return timeout_msg
+            return ConnectorTurnResult(output_text=timeout_msg)
         finally:
             if proc is not None:
                 with self._lock:
@@ -191,10 +204,10 @@ class CodexCliConnector:
                     stdout_tail=stdout_tail,
                     stderr_tail=stderr_tail,
                 )
-            return f"ConnectorRuntimeError: {output}"
+            return ConnectorTurnResult(output_text=f"ConnectorRuntimeError: {output}")
         with self._lock:
             self._clear_runtime_error_details()
-        return (stdout or "").strip()
+        return ConnectorTurnResult(output_text=(stdout or "").strip())
 
     def health_snapshot(self) -> dict[str, str | bool]:
         with self._lock:

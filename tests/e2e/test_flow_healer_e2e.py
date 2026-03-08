@@ -620,8 +620,8 @@ def test_e2e_issue_ingestion_to_pr_open(tmp_path: Path, monkeypatch, portable_py
     assert len(state.pulls) == 1
     pr_number = next(iter(state.pulls))
     assert state.issue_comments[pr_number][-1]["body"] == "LGTM from reviewer agent."
-    assert any("Started automated fix attempt" in comment["body"] for comment in state.issue_comments[issue_number])
-    assert any("Pull request opened or updated" in comment["body"] for comment in state.issue_comments[issue_number])
+    assert any("Flow Healer is on it" in comment["body"] for comment in state.issue_comments[issue_number])
+    assert any("Fresh PR energy" in comment["body"] for comment in state.issue_comments[issue_number])
     assert not any("Test summary: `{" in comment["body"] for comment in state.issue_comments[issue_number])
     assert rows[0]["state_counts"]["pr_open"] == 1
     assert doctor[0]["github_token_present"] is True
@@ -960,7 +960,7 @@ def test_e2e_pending_approval_posts_issue_comment(tmp_path: Path, monkeypatch, f
     service.start("demo", once=True)
 
     comments = state.issue_comments[issue_number]
-    assert any("Started automated fix attempt" in comment["body"] for comment in comments)
+    assert any("Flow Healer is on it" in comment["body"] for comment in comments)
     assert any("Required label to continue: `healer:pr-approved`" in comment["body"] for comment in comments)
 
 

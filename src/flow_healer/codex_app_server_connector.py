@@ -12,6 +12,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .protocols import ConnectorTurnResult
+
 
 class CodexAppServerConnector:
     """Connector that talks to `codex app-server` over local stdio JSON-RPC."""
@@ -104,13 +106,25 @@ class CodexAppServerConnector:
             return thread_id
 
     def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+        return self.run_turn_detailed(thread_id, prompt, timeout_seconds=timeout_seconds).output_text
+
+    def run_turn_detailed(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> ConnectorTurnResult:
         self.ensure_started()
         effective_timeout = float(timeout_seconds) if timeout_seconds is not None else float(self.timeout)
         effective_timeout = max(30.0, effective_timeout)
         with self._lock:
             if not self._available or not self._resolved_command or self._proc is None or self._proc.poll() is not None:
                 reason = self._availability_reason or "Codex app-server is not available."
-                return f"ConnectorUnavailable: {reason}"
+                return ConnectorTurnResult(
+                    output_text=f"ConnectorUnavailable: {reason}",
+                    used_workspace_edit_mode=True,
+                )
             self._drain_notifications_locked()
             try:
                 response = self._rpc_request_locked(
@@ -137,7 +151,10 @@ class CodexAppServerConnector:
                 self._stop_server_locked()
                 self._available = False
                 self._availability_reason = "Codex app-server timed out and was restarted."
-                return f"ConnectorRuntimeError: {timeout_msg}"
+                return ConnectorTurnResult(
+                    output_text=f"ConnectorRuntimeError: {timeout_msg}",
+                    used_workspace_edit_mode=True,
+                )
             except Exception as exc:
                 message = str(exc).strip() or "Codex app-server turn failed."
                 self._last_health_error = message[:500]
@@ -149,9 +166,12 @@ class CodexAppServerConnector:
                 self._stop_server_locked()
                 self._available = False
                 self._availability_reason = "Codex app-server failed and was restarted."
-                return f"ConnectorRuntimeError: {message}"
+                return ConnectorTurnResult(
+                    output_text=f"ConnectorRuntimeError: {message}",
+                    used_workspace_edit_mode=True,
+                )
             self._clear_runtime_error_details()
-            return output.strip()
+            return output
 
     def health_snapshot(self) -> dict[str, str | bool]:
         with self._lock:
@@ -263,12 +283,20 @@ class CodexAppServerConnector:
             params["effort"] = self.reasoning_effort
         return params
 
-    def _await_turn_completion_locked(self, *, thread_id: str, turn_id: str, timeout: float) -> str:
+    def _await_turn_completion_locked(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        timeout: float,
+    ) -> ConnectorTurnResult:
         deadline = time.monotonic() + timeout
         delta_by_item: dict[str, list[str]] = {}
         text_by_item: dict[str, str] = {}
         phase_by_item: dict[str, str] = {}
         item_order: list[str] = []
+        commentary_parts: list[str] = []
+        raw_event_kinds: set[str] = set()
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -280,6 +308,8 @@ class CodexAppServerConnector:
             if message.get("__eof__"):
                 raise RuntimeError("Codex app-server exited unexpectedly.")
             method = str(message.get("method") or "").strip()
+            if method:
+                raw_event_kinds.add(method)
             params = message.get("params") if isinstance(message.get("params"), dict) else {}
             if method == "item/agentMessage/delta":
                 if params.get("threadId") != thread_id or params.get("turnId") != turn_id:
@@ -307,6 +337,10 @@ class CodexAppServerConnector:
                 phase = str(item.get("phase") or "").strip()
                 if phase:
                     phase_by_item[item_id] = phase
+                if phase == "commentary":
+                    commentary_text = str(item.get("text") or "").strip()
+                    if commentary_text:
+                        commentary_parts.append(commentary_text)
                 continue
             if method == "turn/completed":
                 if params.get("threadId") != thread_id:
@@ -314,7 +348,7 @@ class CodexAppServerConnector:
                 turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
                 if str(turn.get("id") or "").strip() != turn_id:
                     continue
-                output = _render_agent_output(
+                output_text, final_answer_present = _render_agent_output(
                     item_order=item_order,
                     text_by_item=text_by_item,
                     delta_by_item=delta_by_item,
@@ -322,12 +356,18 @@ class CodexAppServerConnector:
                 )
                 status = str(turn.get("status") or "").strip()
                 if status == "completed":
-                    return output
+                    return ConnectorTurnResult(
+                        output_text=output_text.strip(),
+                        final_answer_present=final_answer_present,
+                        commentary_tail=_tail_text("\n".join(commentary_parts)),
+                        used_workspace_edit_mode=True,
+                        raw_event_kinds=tuple(sorted(raw_event_kinds)),
+                    )
                 error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
                 message_text = str(error.get("message") or f"Codex app-server turn ended with status '{status}'.")
                 message_text = message_text.strip()
-                if output:
-                    message_text = f"{message_text} stdout tail: {_tail_text(output)}"
+                if output_text:
+                    message_text = f"{message_text} stdout tail: {_tail_text(output_text)}"
                 raise RuntimeError(message_text)
             if method == "error":
                 message_text = str(params.get("message") or "Codex app-server reported an error.").strip()
@@ -505,9 +545,9 @@ def _render_agent_output(
     text_by_item: dict[str, str],
     delta_by_item: dict[str, list[str]],
     phase_by_item: dict[str, str],
-) -> str:
+) -> tuple[str, bool]:
     if not item_order:
-        return ""
+        return "", False
     final_ids = [item_id for item_id in item_order if phase_by_item.get(item_id) == "final_answer"]
     candidate_ids = final_ids or [item_order[-1]]
     rendered: list[str] = []
@@ -518,7 +558,7 @@ def _render_agent_output(
         text = (text or "").strip()
         if text:
             rendered.append(text)
-    return "\n\n".join(rendered).strip()
+    return "\n\n".join(rendered).strip(), bool(final_ids)
 
 
 def _format_rpc_error(*, method: str, error: dict[str, Any]) -> str:

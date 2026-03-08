@@ -65,6 +65,10 @@ repos:
     # - force -> fail if local toolchain is unavailable
     # - skip  -> always skip local gate
     local_gate_policy: auto
+    # Completion artifact fallback behavior:
+    # - fallback_only -> only parse completion file bodies when direct edits are missing
+    # - always        -> also allow lenient parsing of named output-target file bodies
+    completion_artifact_mode: fallback_only
     # Language/runtime strategy:
     # Supported: python | node | swift
     # The issue parser can still recognize additional validation commands and
