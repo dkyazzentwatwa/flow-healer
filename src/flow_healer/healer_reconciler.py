@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
+from datetime import UTC, datetime
 
 from .healer_workspace import HealerWorkspaceManager
 from .store import SQLiteStore
@@ -28,6 +30,53 @@ class HealerReconciler:
             "recovered_leases": recovered_leases,
             "expired_locks": expired_locks,
             "removed_orphans": removed_orphans,
+        }
+
+    def resource_audit(self) -> dict[str, object]:
+        workspaces = self.workspace_manager.list_workspaces() if self.workspace_manager.worktrees_root.exists() else []
+        issues = self.store.list_healer_issues(limit=5000)
+        locks = self.store.list_healer_locks()
+
+        active_leases = 0
+        expired_leases = 0
+        for issue in issues:
+            lease_owner = str(issue.get("lease_owner") or "").strip()
+            lease_expires_at = str(issue.get("lease_expires_at") or "").strip()
+            if not lease_owner and not lease_expires_at:
+                continue
+            if lease_expires_at and _is_expired_timestamp(lease_expires_at):
+                expired_leases += 1
+            else:
+                active_leases += 1
+
+        lock_counts_by_issue: dict[str, int] = {}
+        for lock in locks:
+            issue_id = str(lock.get("issue_id") or "").strip()
+            if not issue_id:
+                continue
+            lock_counts_by_issue[issue_id] = lock_counts_by_issue.get(issue_id, 0) + 1
+
+        return {
+            "generated_at": datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "worktrees": {
+                "root": str(self.workspace_manager.worktrees_root),
+                "count": len(workspaces),
+            },
+            "leases": {
+                "active": active_leases,
+                "expired": expired_leases,
+                "total": active_leases + expired_leases,
+            },
+            "locks": {
+                "active": len(locks),
+                "by_issue": lock_counts_by_issue,
+            },
+            "docker": {
+                "available": shutil.which("docker") is not None,
+                "mode": "placeholder",
+                "prune_enabled": False,
+                "summary": "read_only_no_prune",
+            },
         }
 
     def _cleanup_inactive_issue_workspaces(self) -> int:
@@ -79,3 +128,16 @@ class HealerReconciler:
             except Exception as exc:
                 logger.warning("Failed to remove orphan workspace %s: %s", workspace, exc)
         return removed
+
+
+def _is_expired_timestamp(raw: str) -> bool:
+    normalized = str(raw or "").strip()
+    if not normalized:
+        return False
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            parsed = datetime.strptime(normalized, fmt).replace(tzinfo=UTC)
+            return parsed <= datetime.now(tz=UTC)
+        except ValueError:
+            continue
+    return False

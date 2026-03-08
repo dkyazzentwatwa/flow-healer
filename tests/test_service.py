@@ -4,6 +4,8 @@ from flow_healer.codex_app_server_connector import CodexAppServerConnector
 from flow_healer.codex_cli_connector import CodexCliConnector
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
 from flow_healer.healer_preflight import preflight_cache_key
+from flow_healer.healer_tracker import GitHubHealerTracker
+from flow_healer.local_healer_tracker import LocalHealerTracker
 from flow_healer.service import FlowHealerService
 
 
@@ -99,6 +101,11 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert app_server_metrics["app_server_attempts_with_material_diff"] == 0
     assert app_server_metrics["app_server_attempts_with_zero_diff"] == 0
     assert app_server_metrics["zero_diff_rate_by_task_kind"] == {}
+    resource_audit = rows[0]["resource_audit"]
+    assert resource_audit["worktrees"]["count"] == 0
+    assert resource_audit["leases"]["total"] == 0
+    assert resource_audit["locks"]["active"] == 0
+    assert resource_audit["docker"]["prune_enabled"] is False
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
@@ -221,4 +228,24 @@ def test_build_runtime_defaults_to_app_server_backend(tmp_path) -> None:
 
     runtime = service.build_runtime(repo)
     assert isinstance(runtime.connector, CodexAppServerConnector)
+    assert isinstance(runtime.tracker, GitHubHealerTracker)
+    service._close_runtime(runtime)
+
+
+def test_build_runtime_uses_local_tracker_backend(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root), tracker_backend="local_fs"),
+            repos=[repo],
+        )
+    )
+
+    runtime = service.build_runtime(repo)
+    assert isinstance(runtime.tracker, LocalHealerTracker)
+    assert runtime.tracker.enabled is True
     service._close_runtime(runtime)

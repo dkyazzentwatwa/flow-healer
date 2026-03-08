@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import hashlib
 import logging
 import os
 import re
@@ -1370,11 +1371,23 @@ def _run_tests_in_docker(
     del local_gate_policy
     if not strategy.supports_docker:
         return _unsupported_docker_gate_result(mode="docker_only")
+    container_name, docker_labels = _managed_docker_container_metadata(
+        workspace=workspace,
+        timeout_seconds=timeout_seconds,
+        role="test-gate",
+    )
     bash_script = _build_docker_test_script(command, strategy)
     docker_cmd = [
         "docker",
         "run",
         "--rm",
+        "--name",
+        container_name,
+    ]
+    for key, value in docker_labels.items():
+        docker_cmd.extend(["--label", f"{key}={value}"])
+    docker_cmd.extend(
+        [
         "-v",
         f"{workspace}:/workspace",
         "-w",
@@ -1383,7 +1396,8 @@ def _run_tests_in_docker(
         "sh",
         "-c",
         bash_script,
-    ]
+        ]
+    )
     try:
         proc = subprocess.run(
             docker_cmd,
@@ -1400,6 +1414,7 @@ def _run_tests_in_docker(
             "gate_reason": "tool_missing",
         }
     except subprocess.TimeoutExpired:
+        _cleanup_managed_docker_container(container_name)
         return {
             "exit_code": 124,
             "output_tail": "(docker gate unavailable: timed out while waiting for docker)",
@@ -1408,6 +1423,8 @@ def _run_tests_in_docker(
         }
     status = "passed" if int(proc.returncode) == 0 else "failed"
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if status == "failed":
+        _cleanup_managed_docker_container(container_name)
     gate_reason = ""
     if status == "failed" and _looks_like_docker_infra_failure(output):
         gate_reason = "infra_unavailable"
@@ -1417,6 +1434,40 @@ def _run_tests_in_docker(
         "gate_status": status,
         "gate_reason": gate_reason,
     }
+
+
+def _managed_docker_container_metadata(
+    *, workspace: Path, timeout_seconds: int, role: str
+) -> tuple[str, dict[str, str]]:
+    repo_name = _sanitize_docker_name_component(workspace.name or "repo")
+    repo_hash = hashlib.sha1(str(workspace.resolve()).encode("utf-8")).hexdigest()[:12]
+    labels = {
+        "io.flow_healer.managed": "true",
+        "io.flow_healer.repo_name": repo_name,
+        "io.flow_healer.repo_hash": repo_hash,
+        "io.flow_healer.role": role,
+        "io.flow_healer.timeout_seconds": str(max(1, int(timeout_seconds))),
+    }
+    container_name = f"flow-healer-{repo_name}-{role}-{repo_hash}"
+    return container_name[:128], labels
+
+
+def _sanitize_docker_name_component(value: str) -> str:
+    candidate = re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower()).strip("-.")
+    return candidate or "repo"
+
+
+def _cleanup_managed_docker_container(container_name: str) -> None:
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:
+        return
 
 
 def _build_retry_prompt(

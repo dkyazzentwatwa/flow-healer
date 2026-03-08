@@ -13,9 +13,11 @@ from .codex_cli_connector import CodexCliConnector
 from .config import AppConfig, RelaySettings
 from .healer_loop import AutonomousHealerLoop
 from .healer_preflight import list_cached_preflight_reports
+from .healer_reconciler import HealerReconciler
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker
 from .healer_triage import classify_issue_route
+from .local_healer_tracker import LocalHealerTracker
 from .skill_contracts import audit_skill_contracts
 from .store import SQLiteStore
 
@@ -25,7 +27,7 @@ class RepoRuntime:
     settings: RelaySettings
     store: SQLiteStore
     loop: AutonomousHealerLoop
-    tracker: GitHubHealerTracker
+    tracker: GitHubHealerTracker | LocalHealerTracker
     connector: object
 
 
@@ -39,17 +41,23 @@ class FlowHealerService:
             busy_timeout_ms=repo.healer_sqlite_busy_timeout_ms,
         )
         store.bootstrap()
-        tracker = GitHubHealerTracker(
-            repo_path=Path(repo.healer_repo_path),
-            token=os.getenv(self.config.service.github_token_env, "").strip(),
-            api_base_url=self.config.service.github_api_base_url,
-            mutation_min_interval_ms=repo.healer_github_mutation_min_interval_ms,
-            retry_respect_retry_after=repo.healer_retry_respect_retry_after,
-            retry_jitter_mode=repo.healer_retry_jitter_mode,
-            retry_max_backoff_seconds=repo.healer_retry_max_backoff_seconds,
-            poll_use_conditional_requests=repo.healer_poll_use_conditional_requests,
-            poll_etag_ttl_seconds=repo.healer_poll_etag_ttl_seconds,
-        )
+        if self.config.service.tracker_backend == "local_fs":
+            tracker = LocalHealerTracker(
+                repo_path=Path(repo.healer_repo_path),
+                state_root=self.config.state_root_path() / "repos" / repo.repo_name / "local_tracker",
+            )
+        else:
+            tracker = GitHubHealerTracker(
+                repo_path=Path(repo.healer_repo_path),
+                token=os.getenv(self.config.service.github_token_env, "").strip(),
+                api_base_url=self.config.service.github_api_base_url,
+                mutation_min_interval_ms=repo.healer_github_mutation_min_interval_ms,
+                retry_respect_retry_after=repo.healer_retry_respect_retry_after,
+                retry_jitter_mode=repo.healer_retry_jitter_mode,
+                retry_max_backoff_seconds=repo.healer_retry_max_backoff_seconds,
+                poll_use_conditional_requests=repo.healer_poll_use_conditional_requests,
+                poll_etag_ttl_seconds=repo.healer_poll_etag_ttl_seconds,
+            )
         if self.config.service.connector_backend == "app_server":
             connector = CodexAppServerConnector(
                 workspace=repo.healer_repo_path,
@@ -165,6 +173,10 @@ class FlowHealerService:
                             "last_failure_fingerprint_class": runtime.store.get_state("healer_last_failure_fingerprint_class") or "",
                             "last_contamination_paths": runtime.store.get_state("healer_last_contamination_paths") or "",
                         },
+                        "resource_audit": HealerReconciler(
+                            store=runtime.store,
+                            workspace_manager=runtime.loop.workspace_manager,
+                        ).resource_audit(),
                         "preflight": {
                             "gate_mode": repo.healer_test_gate_mode,
                             "reports": [

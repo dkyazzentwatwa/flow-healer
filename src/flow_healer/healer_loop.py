@@ -241,10 +241,10 @@ class AutonomousHealerLoop:
             await asyncio.sleep(max(5.0, self.settings.healer_poll_interval_seconds))
 
     def _tick_once(self) -> None:
-        if self.store.get_state("healer_paused") == "true":
-            logger.info("Autonomous healer paused via system command; skipping cycle.")
-            return
         self.reconciler.reconcile()
+        if self.store.get_state("healer_paused") == "true":
+            logger.info("Autonomous healer paused via system command; housekeeping complete, skipping cycle.")
+            return
         self._maybe_run_scan()
         self._ingest_ready_issues()
         self.preflight.refresh_all(force=False)
@@ -836,12 +836,16 @@ class AutonomousHealerLoop:
             resolved_execution = self.runner.resolve_execution(workspace=Path(workspace_path), task_spec=task_spec)
         except UnsupportedLanguageError:
             return False
+        hardened_execution_root = _sanitize_execution_root(
+            execution_root=resolved_execution.execution_root,
+            workspace=Path(workspace_path),
+        )
         targeted_tests = _collect_targeted_tests(
             issue_body=issue_body,
             output_targets=list(task_spec.output_targets),
             workspace=Path(workspace_path),
             language=resolved_execution.language_effective,
-            execution_root=resolved_execution.execution_root,
+            execution_root=hardened_execution_root,
         )
         pr_details = self.tracker.get_pr_details(pr_number=pr_number)
         if pr_details is None or not pr_details.head_ref:
@@ -1019,7 +1023,7 @@ class AutonomousHealerLoop:
             ),
         )
 
-    def _close_and_requeue_stuck_pr(self, *, issue_id: str, pr_number: int, mergeable_state: str, head_ref: str = "") -> None:
+    def _close_and_requeue_stuck_pr(self, *, issue_id: str, pr_number: int, mergeable_state: str, head_ref: str = "") -> bool:
         reason = f"PR #{pr_number} has been stuck in `{mergeable_state}` state past the timeout."
         close_body = self._format_flow_status_comment(
             "Closing stale pull request",
@@ -1032,10 +1036,17 @@ class AutonomousHealerLoop:
             outro="Flow Healer will queue a fresh attempt from the latest base branch.",
         )
         close_pr_key = self._mutation_key(action="close_pr", issue_id=issue_id, pr_number=pr_number, body=close_body)
-        self._run_idempotent_mutation(
+        closed_ok = self._run_idempotent_mutation(
             mutation_key=close_pr_key,
             action=lambda: self.tracker.close_pr(pr_number=pr_number, comment=close_body),
         )
+        if not closed_ok:
+            logger.warning(
+                "Failed to close stuck PR #%d for issue #%s; skipping requeue.",
+                pr_number,
+                issue_id,
+            )
+            return False
         self._cleanup_managed_remote_branch(branch=head_ref)
         self.store.set_healer_issue_state(
             issue_id=issue_id,
@@ -1057,6 +1068,7 @@ class AutonomousHealerLoop:
                 ],
             ),
         )
+        return True
 
     def _auto_approve_open_prs(self, active_prs: list[dict[str, object]] | None = None) -> int:
         if not getattr(self.settings, "healer_pr_auto_approve_clean", True):
@@ -1152,9 +1164,7 @@ class AutonomousHealerLoop:
 
     @staticmethod
     def _normalize_repo_path(value: str) -> str:
-        text = (value or "").strip().replace("\\", "/")
-        text = text.lstrip("./").strip("/")
-        return text.lower()
+        return _normalize_repo_relative_path(value)
 
     def _issue_scope_key(self, *, task_spec, prediction) -> str:
         execution_root = self._normalize_repo_path(str(getattr(task_spec, "execution_root", "") or ""))
@@ -1487,8 +1497,15 @@ class AutonomousHealerLoop:
                 )
                 return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
+            preflight_root_candidate = _sanitize_execution_root(
+                execution_root=(
+                    resolved_execution.execution_root
+                    or execution_root_for_language(detected_language)
+                ),
+                workspace=self.repo_path,
+            )
             preflight_execution_root = (
-                resolved_execution.execution_root
+                preflight_root_candidate
                 or execution_root_for_language(detected_language)
             )
             should_run_preflight = bool(preflight_execution_root) and (
@@ -1555,6 +1572,10 @@ class AutonomousHealerLoop:
                 )
                 return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
+            hardened_execution_root = _sanitize_execution_root(
+                execution_root=resolved_execution.execution_root,
+                workspace=workspace.path,
+            )
             lock_result = self.dispatcher.acquire_prediction_locks(issue_id=issue.issue_id, lock_keys=prediction.keys)
             if not lock_result.acquired:
                 failure_class = "lock_conflict"
@@ -1624,7 +1645,7 @@ class AutonomousHealerLoop:
                 output_targets=list(task_spec.output_targets),
                 workspace=workspace.path,
                 language=resolved_execution.language_effective,
-                execution_root=resolved_execution.execution_root,
+                execution_root=hardened_execution_root,
             )
             learned_context = self.memory.build_prompt_context(
                 issue_text=f"{issue.title}\n{issue.body}",
@@ -1752,6 +1773,8 @@ class AutonomousHealerLoop:
                 learned_context=learned_context,
                 language=detected_language,
                 workspace_status=run_result.workspace_status,
+                staged_diff_content=self._resolve_staged_diff_content(run_result=run_result, workspace=workspace.path),
+                staged_diff_metadata=self._resolve_staged_diff_metadata(run_result=run_result),
             )
             verifier_summary = {
                 "passed": verification.passed,
@@ -1775,6 +1798,12 @@ class AutonomousHealerLoop:
                     attempt_no=attempt_no,
                     failure_class="verifier_failed",
                     failure_reason=verification.summary,
+                    feedback_context_override=_format_verifier_retry_feedback(
+                        verdict=str(getattr(verification, "verdict", "")),
+                        hard_failure=bool(getattr(verification, "hard_failure", False)),
+                        parse_error=bool(getattr(verification, "parse_error", False)),
+                        summary=verification.summary,
+                    ),
                 )
                 return
 
@@ -2104,6 +2133,7 @@ class AutonomousHealerLoop:
         attempt_no: int,
         failure_class: str,
         failure_reason: str,
+        feedback_context_override: str = "",
     ) -> str:
         is_infra = failure_class in _INFRA_FAILURE_CLASSES
         counts_against_trust = _counts_against_issue_trust(failure_class=failure_class, failure_reason=failure_reason)
@@ -2186,6 +2216,10 @@ class AutonomousHealerLoop:
         multiplier = float(strategy.get("backoff_multiplier", 1.0))
         delay = max(15, int(delay * multiplier))
         feedback_hint = str(strategy.get("feedback_hint", "")).strip()
+        retry_feedback_context = _compose_retry_feedback_context(
+            feedback_hint=feedback_hint,
+            override=feedback_context_override,
+        )
         backoff_until = (datetime.now(UTC) + timedelta(seconds=delay)).strftime("%Y-%m-%d %H:%M:%S")
         self.store.set_healer_issue_state(
             issue_id=issue_id,
@@ -2193,7 +2227,7 @@ class AutonomousHealerLoop:
             backoff_until=backoff_until,
             last_failure_class=failure_class,
             last_failure_reason=failure_reason[:500],
-            feedback_context=feedback_hint if feedback_hint else None,
+            feedback_context=retry_feedback_context if retry_feedback_context else None,
             clear_lease=True,
         )
         logger.info(
@@ -2748,6 +2782,53 @@ class AutonomousHealerLoop:
         )
 
     @staticmethod
+    def _resolve_staged_diff_content(*, run_result: Any, workspace: Path) -> str:
+        content = str(getattr(run_result, "staged_diff_content", "") or "").strip()
+        if content:
+            return content
+        try:
+            diff = subprocess.run(
+                ["git", "-C", str(workspace), "diff", "--cached"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception:
+            return ""
+        if diff.returncode != 0:
+            return ""
+        return (diff.stdout or "").strip()
+
+    @staticmethod
+    def _resolve_staged_diff_metadata(*, run_result: Any) -> dict[str, object]:
+        raw = getattr(run_result, "staged_diff_metadata", None)
+        if isinstance(raw, dict):
+            return dict(raw)
+        metadata: dict[str, object] = {}
+        diff_files = getattr(run_result, "diff_files", None)
+        diff_lines = getattr(run_result, "diff_lines", None)
+        if diff_files is not None:
+            try:
+                metadata["diff_files"] = int(diff_files)
+            except (TypeError, ValueError):
+                pass
+        if diff_lines is not None:
+            try:
+                metadata["diff_lines"] = int(diff_lines)
+            except (TypeError, ValueError):
+                pass
+        workspace_status = getattr(run_result, "workspace_status", None)
+        if isinstance(workspace_status, dict):
+            staged_paths = workspace_status.get("staged_paths")
+            if isinstance(staged_paths, list):
+                metadata["staged_paths"] = [str(path) for path in staged_paths if str(path).strip()]
+            execution_root = str(workspace_status.get("execution_root") or "").strip()
+            if execution_root:
+                metadata["execution_root"] = execution_root
+        return metadata
+
+    @staticmethod
     def _commit_and_push(
         workspace: Path,
         *,
@@ -2824,6 +2905,73 @@ def _execution_mode_for_task(*, connector: ConnectorProtocol, task_spec: Any) ->
     if connector.__class__.__name__ == "CodexAppServerConnector":
         return "workspace_edit"
     return "serialized_patch"
+
+
+def _normalize_repo_relative_path(value: str) -> str:
+    text = (value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if text.startswith("/"):
+        return ""
+    while text.startswith("./"):
+        text = text[2:]
+    parts = []
+    for part in text.split("/"):
+        chunk = part.strip()
+        if not chunk or chunk == ".":
+            continue
+        if chunk == "..":
+            return ""
+        if ":" in chunk:
+            return ""
+        parts.append(chunk)
+    return "/".join(parts).strip("/").lower()
+
+
+def _sanitize_execution_root(*, execution_root: str, workspace: Path) -> str:
+    normalized = _normalize_repo_relative_path(execution_root)
+    if not normalized:
+        return ""
+    candidate = (workspace / normalized).resolve()
+    workspace_root = workspace.resolve()
+    if candidate == workspace_root:
+        return ""
+    try:
+        candidate.relative_to(workspace_root)
+    except ValueError:
+        return ""
+    return normalized
+
+
+def _compose_retry_feedback_context(*, feedback_hint: str, override: str) -> str:
+    parts = []
+    hint = str(feedback_hint or "").strip()
+    if hint:
+        parts.append(hint)
+    extra = str(override or "").strip()
+    if extra:
+        parts.append(extra)
+    return "\n".join(parts)[:500]
+
+
+def _format_verifier_retry_feedback(
+    *,
+    verdict: str,
+    hard_failure: bool,
+    parse_error: bool,
+    summary: str,
+) -> str:
+    summary_text = re.sub(r"\s+", " ", str(summary or "").strip())[:260]
+    verdict_text = str(verdict or "hard_fail").strip().lower() or "hard_fail"
+    lines = [
+        "[verifier_feedback]",
+        f"verdict={verdict_text}",
+        f"hard_failure={'true' if hard_failure else 'false'}",
+        f"parse_error={'true' if parse_error else 'false'}",
+        f"summary={summary_text}",
+        "[/verifier_feedback]",
+    ]
+    return "\n".join(lines)[:420]
 
 
 def _verifier_policy_for_settings(settings: RelaySettings) -> str:
@@ -2932,6 +3080,7 @@ def _collect_targeted_tests(
     language: str,
     execution_root: str = "",
 ) -> list[str]:
+    execution_root = _normalize_repo_relative_path(execution_root)
     explicit = {path.strip() for path in _TARGETED_TEST_RE.findall(issue_body or "") if path.strip()}
     candidates = {
         normalized
@@ -2960,6 +3109,7 @@ def _infer_targeted_tests_from_targets(
     normalized_language = (language or "").strip().lower()
     if normalized_language != "python":
         return set()
+    execution_root = _normalize_repo_relative_path(execution_root)
     execution_path = workspace / execution_root if execution_root else workspace
     inferred: set[str] = set()
     for raw_target in output_targets or ():
@@ -2988,6 +3138,7 @@ def _infer_targeted_tests_from_targets(
 
 
 def _normalize_targeted_test_path(*, path: str, workspace: Path, execution_root: str) -> str:
+    execution_root = _normalize_repo_relative_path(execution_root)
     cleaned = str(path or "").strip().lstrip("./")
     if not cleaned:
         return ""
@@ -3001,6 +3152,7 @@ def _normalize_targeted_test_path(*, path: str, workspace: Path, execution_root:
 
 
 def _strip_execution_root_prefix(*, target: str, execution_root: str) -> str:
+    execution_root = _normalize_repo_relative_path(execution_root)
     cleaned = str(target or "").strip().lstrip("./")
     if execution_root and cleaned.startswith(f"{execution_root}/"):
         return cleaned[len(execution_root) + 1 :]

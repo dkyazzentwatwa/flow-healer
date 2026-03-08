@@ -181,6 +181,9 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS healer_mutation_log (
                     mutation_key TEXT PRIMARY KEY,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    lease_owner TEXT DEFAULT NULL,
+                    lease_expires_at TEXT DEFAULT NULL,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     completed_at TEXT DEFAULT NULL
@@ -207,6 +210,7 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_attempts_started ON healer_attempts(started_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_issue_created ON healer_events(issue_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_control_commands_created ON control_commands(created_at DESC);
@@ -254,6 +258,17 @@ class SQLiteStore:
             for column, statement in attempt_migrations:
                 if column not in attempt_cols:
                     conn.execute(statement)
+            mutation_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(healer_mutation_log)").fetchall()
+            }
+            mutation_migrations = [
+                ("lease_owner", "ALTER TABLE healer_mutation_log ADD COLUMN lease_owner TEXT DEFAULT NULL"),
+                ("lease_expires_at", "ALTER TABLE healer_mutation_log ADD COLUMN lease_expires_at TEXT DEFAULT NULL"),
+                ("retry_count", "ALTER TABLE healer_mutation_log ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
+            ]
+            for column, statement in mutation_migrations:
+                if column not in mutation_cols:
+                    conn.execute(statement)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_scope_state ON healer_issues(scope_key, state, updated_at)"
             )
@@ -262,6 +277,9 @@ class SQLiteStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at)"
             )
             conn.commit()
 
@@ -564,6 +582,9 @@ class SQLiteStore:
         conflict_requeue_count: int | None = None,
         superseded_by_issue_id: str | None = None,
         clear_lease: bool = False,
+        expected_state: str | None = None,
+        expected_lease_owner: str | None = None,
+        expected_worker_id: str | None = None,
     ) -> bool:
         conn = self._connect()
         with self._lock:
@@ -632,8 +653,23 @@ class SQLiteStore:
             if clear_lease:
                 updates.append("lease_owner = NULL")
                 updates.append("lease_expires_at = NULL")
-            params.append(issue_id)
-            cursor = conn.execute(f"UPDATE healer_issues SET {', '.join(updates)} WHERE issue_id = ?", params)
+            where_parts = ["issue_id = ?"]
+            where_params: list[Any] = [issue_id]
+            if expected_state is not None:
+                where_parts.append("state = ?")
+                where_params.append(expected_state)
+            guard_owner = expected_lease_owner if expected_lease_owner is not None else expected_worker_id
+            if guard_owner is not None:
+                guard_owner = str(guard_owner)
+                if guard_owner == "":
+                    where_parts.append("COALESCE(lease_owner, '') = ''")
+                else:
+                    where_parts.append("lease_owner = ?")
+                    where_params.append(guard_owner)
+            cursor = conn.execute(
+                f"UPDATE healer_issues SET {', '.join(updates)} WHERE {' AND '.join(where_parts)}",
+                [*params, *where_params],
+            )
             conn.commit()
             return cursor.rowcount > 0
 
@@ -1023,6 +1059,32 @@ class SQLiteStore:
             conn.commit()
             return int(cursor.rowcount)
 
+    def release_healer_locks_for_owner(
+        self,
+        *,
+        issue_id: str,
+        lease_owner: str,
+        lock_keys: list[str] | None = None,
+    ) -> int:
+        owner = str(lease_owner or "").strip()
+        if not owner:
+            return 0
+        conn = self._connect()
+        with self._lock:
+            if lock_keys:
+                placeholders = ",".join("?" for _ in lock_keys)
+                cursor = conn.execute(
+                    f"DELETE FROM healer_locks WHERE issue_id = ? AND lease_owner = ? AND lock_key IN ({placeholders})",
+                    [issue_id, owner, *lock_keys],
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM healer_locks WHERE issue_id = ? AND lease_owner = ?",
+                    (issue_id, owner),
+                )
+            conn.commit()
+            return int(cursor.rowcount)
+
     def list_healer_locks(self, *, issue_id: str | None = None) -> list[dict[str, Any]]:
         conn = self._connect()
         with self._lock:
@@ -1204,14 +1266,22 @@ class SQLiteStore:
             row = conn.execute("SELECT * FROM healer_runtime WHERE singleton = 1").fetchone()
         return self._row_to_dict(row)
 
-    def claim_healer_mutation(self, *, mutation_key: str) -> str:
+    def claim_healer_mutation(
+        self,
+        *,
+        mutation_key: str,
+        lease_owner: str | None = None,
+        lease_seconds: int = 300,
+    ) -> str:
         key = str(mutation_key or "").strip()
         if not key:
             return "failed"
+        owner = str(lease_owner or "").strip()
+        lease_expr = f"+{int(max(1, lease_seconds))} seconds"
         conn = self._connect()
         with self._lock:
             row = conn.execute(
-                "SELECT status FROM healer_mutation_log WHERE mutation_key = ?",
+                "SELECT status, lease_owner, lease_expires_at FROM healer_mutation_log WHERE mutation_key = ?",
                 (key,),
             ).fetchone()
             if row is not None:
@@ -1219,19 +1289,41 @@ class SQLiteStore:
                 if status == "success":
                     return "already_success"
                 if status == "pending":
-                    return "inflight"
+                    current_owner = str(row["lease_owner"] or "").strip()
+                    lease_expires_at = row["lease_expires_at"]
+                    lease_active = False
+                    if lease_expires_at:
+                        active_row = conn.execute(
+                            "SELECT datetime(?) > CURRENT_TIMESTAMP AS active",
+                            (str(lease_expires_at),),
+                        ).fetchone()
+                        lease_active = bool(int(active_row["active"])) if active_row is not None else False
+                    same_owner = bool(owner and owner == current_owner)
+                    if lease_active or same_owner:
+                        return "inflight"
                 conn.execute(
-                    "UPDATE healer_mutation_log SET status='pending', updated_at=CURRENT_TIMESTAMP, completed_at=NULL WHERE mutation_key = ?",
-                    (key,),
+                    """
+                    UPDATE healer_mutation_log
+                    SET status='pending',
+                        lease_owner = NULLIF(?, ''),
+                        lease_expires_at = datetime('now', ?),
+                        retry_count = retry_count + 1,
+                        updated_at=CURRENT_TIMESTAMP,
+                        completed_at=NULL
+                    WHERE mutation_key = ?
+                    """,
+                    (owner, lease_expr, key),
                 )
                 conn.commit()
                 return "claimed"
             conn.execute(
                 """
-                INSERT INTO healer_mutation_log(mutation_key, status, completed_at)
-                VALUES(?, 'pending', NULL)
+                INSERT INTO healer_mutation_log(
+                    mutation_key, status, lease_owner, lease_expires_at, retry_count, completed_at
+                )
+                VALUES(?, 'pending', NULLIF(?, ''), datetime('now', ?), 0, NULL)
                 """,
-                (key,),
+                (key, owner, lease_expr),
             )
             conn.commit()
             return "claimed"
@@ -1246,7 +1338,11 @@ class SQLiteStore:
                 conn.execute(
                     """
                     UPDATE healer_mutation_log
-                    SET status='success', updated_at=CURRENT_TIMESTAMP, completed_at=CURRENT_TIMESTAMP
+                    SET status='success',
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        updated_at=CURRENT_TIMESTAMP,
+                        completed_at=CURRENT_TIMESTAMP
                     WHERE mutation_key = ?
                     """,
                     (key,),

@@ -8,6 +8,7 @@ from flow_healer.healer_loop import (
     AutonomousHealerLoop,
     _FAILURE_CLASS_STRATEGY,
     _collect_targeted_tests,
+    _sanitize_execution_root,
     _push_issue_branch,
 )
 from flow_healer.healer_preflight import PreflightReport
@@ -746,6 +747,64 @@ def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_p
     loop._commit_and_push.assert_called_once()
 
 
+def test_process_claimed_issue_passes_staged_diff_payload_to_verifier(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50441",
+        repo="owner/repo",
+        title="Issue 50441",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-50441"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50441", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50441")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        diff_files=1,
+        diff_lines=12,
+        staged_diff_content="diff --git a/src/flow_healer/service.py b/src/flow_healer/service.py\n+fix",
+        staged_diff_metadata={"staged_paths": ["src/flow_healer/service.py"], "diff_files": 1},
+        test_summary={"failed_tests": 0},
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={"staged_paths": ["src/flow_healer/service.py"]},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="ok",
+        verdict="pass",
+        hard_failure=False,
+        parse_error=False,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.tracker.open_or_update_pr.return_value = PullRequestResult(
+        number=244,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/244",
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    verify_kwargs = loop.verifier.verify.call_args.kwargs
+    assert verify_kwargs["staged_diff_content"].startswith("diff --git")
+    assert verify_kwargs["staged_diff_metadata"]["diff_files"] == 1
+    assert verify_kwargs["staged_diff_metadata"]["staged_paths"] == ["src/flow_healer/service.py"]
+
+
 def test_process_claimed_issue_blocks_when_required_verifier_soft_fails(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -794,6 +853,9 @@ def test_process_claimed_issue_blocks_when_required_verifier_soft_fails(tmp_path
     assert issue is not None
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "verifier_failed"
+    assert "[verifier_feedback]" in str(issue["feedback_context"] or "")
+    assert "verdict=soft_fail" in str(issue["feedback_context"] or "")
+    assert "Need stronger semantic verification." in str(issue["feedback_context"] or "")
     assert attempts[-1]["state"] == "failed"
     loop._commit_and_push.assert_not_called()
 
@@ -1493,6 +1555,42 @@ def test_reconcile_pr_outcomes_closes_and_requeues_stuck_pr_after_timeout(tmp_pa
     loop.tracker.add_issue_comment.assert_called_once()
 
 
+def test_reconcile_pr_outcomes_does_not_requeue_stuck_pr_when_close_fails(tmp_path):
+    import datetime as dt
+
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="70031",
+        repo="owner/repo",
+        title="Issue 70031",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="70031", state="pr_open", pr_number=302, pr_state="open")
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = store._connect()
+    conn.execute("UPDATE healer_issues SET stuck_since = ? WHERE issue_id = '70031'", (past,))
+    conn.commit()
+
+    loop = _make_loop(store, healer_stuck_pr_timeout_minutes=60)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=302, state="open", html_url="", mergeable_state="behind", author="bot"
+    )
+    loop.tracker.close_pr.return_value = False
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("70031")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 302
+    assert str(issue["feedback_context"] or "") == ""
+    loop.tracker.add_issue_comment.assert_not_called()
+
+
 def test_maybe_run_scan_respects_interval(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -2093,6 +2191,21 @@ def test_tick_once_skips_claim_when_connector_unavailable(tmp_path):
     assert store.get_state("healer_connector_available") == "false"
 
 
+def test_tick_once_runs_reconciler_before_paused_return(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.set_state("healer_paused", "true")
+
+    loop = _make_loop(store)
+    loop._maybe_run_scan = MagicMock()
+
+    loop._tick_once()
+
+    loop.reconciler.reconcile.assert_called_once()
+    loop._maybe_run_scan.assert_not_called()
+    loop.dispatcher.claim_next_issue.assert_not_called()
+
+
 def test_tick_once_stops_claiming_when_connector_becomes_unavailable_mid_cycle(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -2356,6 +2469,15 @@ def test_post_issue_status_retries_once(tmp_path, monkeypatch):
 
     assert loop.tracker.add_issue_comment.call_count == 2
     assert sleep_calls == [2]
+
+
+def test_sanitize_execution_root_rejects_escape_and_keeps_nested_path(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "src" / "pkg").mkdir(parents=True)
+
+    assert _sanitize_execution_root(execution_root="../outside", workspace=workspace) == ""
+    assert _sanitize_execution_root(execution_root="src/pkg", workspace=workspace) == "src/pkg"
 
 
 # --- Change 1: Failure-class-aware retry strategy ---

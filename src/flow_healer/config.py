@@ -22,6 +22,7 @@ class ServiceSettings:
     connector_model: str = "gpt-5.4"
     connector_reasoning_effort: str = "medium"
     connector_timeout_seconds: int = 300
+    tracker_backend: str = "github"
 
 
 @dataclass(slots=True)
@@ -156,6 +157,7 @@ class AppConfig:
             connector_model=str(service_raw.get("connector_model") or "gpt-5.4"),
             connector_reasoning_effort=str(service_raw.get("connector_reasoning_effort") or "medium"),
             connector_timeout_seconds=int(service_raw.get("connector_timeout_seconds") or 300),
+            tracker_backend=_normalize_tracker_backend(service_raw.get("tracker_backend")),
         )
 
         repos: list[RelaySettings] = []
@@ -313,6 +315,15 @@ def _normalize_verifier_policy(value: Any) -> str:
     if raw in {"advisory", "required"}:
         return raw
     return "advisory"
+
+
+def _normalize_tracker_backend(value: Any) -> str:
+    raw = str(value or "github").strip().lower().replace("-", "_")
+    if raw in {"github", "local_fs"}:
+        return raw
+    if raw in {"local", "localfs"}:
+        return "local_fs"
+    return "github"
 
 
 def _resolve_env_file(config_path: Path, value: Any) -> Path | None:

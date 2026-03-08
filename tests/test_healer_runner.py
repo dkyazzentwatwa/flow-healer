@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import hashlib
 from pathlib import Path
 
 from flow_healer.healer_runner import (
@@ -131,17 +132,24 @@ def test_run_tests_in_docker_uses_posix_shell(monkeypatch, tmp_path):
         local_gate_policy="auto",
     )
 
-    assert seen["cmd"][0:8] == [
+    expected_hash = hashlib.sha1(str(tmp_path.resolve()).encode("utf-8")).hexdigest()[:12]
+    expected_name = f"flow-healer-{tmp_path.name.lower()}-test-gate-{expected_hash}"
+    cmd = seen["cmd"]
+    assert cmd[0:4] == [
         "docker",
         "run",
         "--rm",
-        "-v",
-        f"{tmp_path}:/workspace",
-        "-w",
-        "/workspace",
-        "node:20-slim",
+        "--name",
     ]
-    assert seen["cmd"][8:10] == ["sh", "-c"]
+    assert cmd[4] == expected_name
+    assert "--label" in cmd
+    assert "io.flow_healer.managed=true" in cmd
+    assert f"io.flow_healer.repo_name={tmp_path.name.lower()}" in cmd
+    assert f"io.flow_healer.repo_hash={expected_hash}" in cmd
+    assert "io.flow_healer.role=test-gate" in cmd
+    assert "io.flow_healer.timeout_seconds=30" in cmd
+    assert cmd[-3:] == ["node:20-slim", "sh", "-c"] or cmd[-4:-1] == ["node:20-slim", "sh", "-c"]
+    assert cmd[-2:] == ["-c", cmd[-1]]
     assert summary["gate_status"] == "passed"
 
 
@@ -162,6 +170,61 @@ def test_run_tests_in_docker_reports_missing_docker(monkeypatch, tmp_path):
     assert summary["gate_status"] == "failed"
     assert summary["gate_reason"] == "tool_missing"
     assert summary["exit_code"] == 127
+
+
+def test_run_tests_in_docker_timeout_attempts_cleanup(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_in_docker(
+        tmp_path,
+        ["npm", "test"],
+        30,
+        strategy=get_strategy("node"),
+        local_gate_policy="auto",
+    )
+
+    assert summary["gate_status"] == "failed"
+    assert summary["gate_reason"] == "infra_unavailable"
+    cleanup_calls = [cmd for cmd in calls if cmd[0:3] == ["docker", "rm", "-f"]]
+    assert cleanup_calls
+    assert cleanup_calls[0][3].startswith(f"flow-healer-{tmp_path.name.lower()}-test-gate-")
+
+
+def test_run_tests_in_docker_error_attempts_cleanup(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr="Cannot connect to the Docker daemon",
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_in_docker(
+        tmp_path,
+        ["npm", "test"],
+        30,
+        strategy=get_strategy("node"),
+        local_gate_policy="auto",
+    )
+
+    assert summary["gate_status"] == "failed"
+    cleanup_calls = [cmd for cmd in calls if cmd[0:3] == ["docker", "rm", "-f"]]
+    assert cleanup_calls
 
 
 def test_validate_artifact_outputs_passes_valid_relative_links(tmp_path):
