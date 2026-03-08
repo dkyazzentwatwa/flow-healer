@@ -1874,3 +1874,67 @@ def test_run_attempt_app_server_code_task_rejects_diff_only_output(tmp_path):
     assert result.success is False
     assert result.failure_class == "no_workspace_change"
     assert result.failure_fingerprint == "execution_contract|workspace_edit|no_workspace_change"
+
+
+def test_build_proposer_prompt_prefers_workspace_edits_for_app_server_docs_tasks(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    prompt = _build_proposer_prompt(
+        issue_id="912",
+        issue_title="Write runtime note",
+        issue_body="Create docs/runtime-reset-smoke.md",
+        task_spec=HealerTaskSpec(
+            task_kind="docs",
+            output_mode="patch",
+            output_targets=("docs/runtime-reset-smoke.md",),
+            tool_policy="repo_only",
+            validation_profile="artifact_only",
+        ),
+        workspace=workspace,
+        learned_context="",
+        feedback_context="",
+        language_hint="",
+        prefer_workspace_edits=True,
+    )
+
+    lowered = prompt.lower()
+    assert "edit files in place" in lowered
+    assert "end with a brief operator summary" in lowered
+
+
+def test_run_attempt_app_server_artifact_task_materializes_output_without_diff(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "# Runtime Reset Smoke\n\nThis file verifies the Flow Healer issue-to-PR path after a runtime reset.\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    result = runner.run_attempt(
+        issue_id="913",
+        issue_title="Write runtime note",
+        issue_body="Create docs/runtime-reset-smoke.md",
+        task_spec=HealerTaskSpec(
+            task_kind="docs",
+            output_mode="patch",
+            output_targets=("docs/runtime-reset-smoke.md",),
+            tool_policy="repo_only",
+            validation_profile="artifact_only",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert "docs/runtime-reset-smoke.md" in result.diff_paths
+    created = (workspace / "docs" / "runtime-reset-smoke.md").read_text(encoding="utf-8")
+    assert "issue-to-pr path" in created.lower()

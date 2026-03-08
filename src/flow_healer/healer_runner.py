@@ -168,6 +168,20 @@ class HealerRunner:
             ):
                 break
             if workspace_edit_mode:
+                if _allows_artifact_synthesis(task_spec) and _materialize_artifact_from_output(
+                    task_spec=task_spec,
+                    proposer_output=proposer_output,
+                    workspace=workspace,
+                ) and _stage_workspace_changes(
+                    workspace,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    task_spec=task_spec,
+                    language=resolved_execution.language_effective,
+                ):
+                    failure_class = ""
+                    failure_reason = ""
+                    break
                 failure_class, failure_reason = _classify_non_patch_failure(proposer_output)
                 failure_reason = _augment_failure_reason_with_connector_health(
                     connector=self.connector,
@@ -1326,8 +1340,6 @@ def _is_issue_scoped_sandbox(task_spec: HealerTaskSpec | None) -> bool:
 
 
 def _prefers_workspace_edits(*, connector: ConnectorProtocol, task_spec: HealerTaskSpec) -> bool:
-    if task_spec.validation_profile == "artifact_only":
-        return False
     return connector.__class__.__name__ == "CodexAppServerConnector"
 
 
