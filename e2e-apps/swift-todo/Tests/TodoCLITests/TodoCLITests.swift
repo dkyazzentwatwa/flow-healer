@@ -37,6 +37,20 @@ final class TodoCLITests: XCTestCase {
         )
     }
 
+    func testRenderStableCompletionSummaryMatchesCLIContract() {
+        let item = TodoItem(
+            id: "9",
+            title: "  Ship \n canary  ",
+            completed: true,
+            completedAt: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(
+            renderStableCompletionSummary(item),
+            "Todo completed: 9 - Ship canary"
+        )
+    }
+
     func testRunTodoCLIPrintsStableCompletedSummary() {
         let service = TodoService()
         var output: [String] = []

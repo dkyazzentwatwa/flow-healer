@@ -15,13 +15,7 @@ func normalizeTodoTitle(_ title: String) -> String {
 }
 
 func renderStableCompletionSummary(_ item: TodoItem) -> String {
-    let summaryItem = TodoItem(
-        id: item.id,
-        title: normalizeTodoTitle(item.title),
-        completed: item.completed,
-        completedAt: item.completedAt
-    )
-    return renderCompletionMessage(summaryItem)
+    "Todo completed: \(item.id) - \(normalizeTodoTitle(item.title))"
 }
 
 func runTodoCLI(
