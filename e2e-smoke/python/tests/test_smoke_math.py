@@ -215,6 +215,41 @@ def test_add_canonicalizes_zero_when_signed_inputs_cancel(
 
 
 @pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    (
+        pytest.param(
+            10**80,
+            -(10**80) + 1,
+            1,
+            id="large_positive_and_negative_operands_keep_positive_edge",
+        ),
+        pytest.param(
+            -(10**80),
+            (10**80) - 1,
+            -1,
+            id="large_negative_and_positive_operands_keep_negative_edge",
+        ),
+        pytest.param(
+            f"+{10**80}",
+            str(-(10**80)),
+            0,
+            id="large_string_operands_cancel_to_canonical_zero",
+        ),
+    ),
+)
+def test_add_matches_python_int_arithmetic_for_large_mixed_sign_operands(
+    left: object,
+    right: object,
+    expected: int,
+) -> None:
+    """Mixed-sign edge cases should keep Python int arithmetic semantics."""
+    result = _call_add(left, right)
+    assert result == expected
+    assert result == _normalize_operand(left) + _normalize_operand(right)
+    assert type(result) is int
+
+
+@pytest.mark.parametrize(
     ("left", "right"),
     (
         pytest.param(-23, 23, id="ints_cancel_directly"),

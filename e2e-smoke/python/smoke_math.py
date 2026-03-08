@@ -96,19 +96,12 @@ def _is_additive_identity(value: int) -> bool:
     return value == 0
 
 
-def _operands_cancel_to_zero(left: int, right: int) -> bool:
-    """Return whether opposite-signed operands collapse onto additive identity."""
-    return left == -right
-
-
 def _add_normalized_operands(left: int, right: int) -> int:
     """Add normalized ints while preserving zero identity and sign semantics."""
     if _is_additive_identity(left):
         return _canonicalize_zero(right)
     if _is_additive_identity(right):
         return _canonicalize_zero(left)
-    if _operands_cancel_to_zero(left, right):
-        return 0
     return _canonicalize_zero(left + right)
 
 
