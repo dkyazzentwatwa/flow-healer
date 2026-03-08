@@ -1,5 +1,6 @@
 """Focused addition helper exercised by the Python smoke tests."""
 
+import operator
 import re
 import sys
 from numbers import Integral
@@ -47,9 +48,9 @@ def _normalize_string_operand(value: str) -> int:
 
 
 def _normalize_integral_operand(value: Integral) -> int:
-    """Coerce supported integral operands while keeping TypeErrors stable."""
+    """Coerce exact integer operands without consulting lossy __int__ hooks."""
     try:
-        return int(value)
+        return operator.index(value)
     except (TypeError, ValueError, OverflowError) as exc:
         raise _operand_type_error(cause=exc)
 
