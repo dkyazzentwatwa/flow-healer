@@ -3,6 +3,20 @@ import XCTest
 import TodoCore
 
 final class TodoCLITests: XCTestCase {
+    func testNormalizeTodoTitleCollapsesInnerWhitespace() {
+        XCTAssertEqual(
+            normalizeTodoTitle(" Ship\ncanary \t ready "),
+            "Ship canary ready"
+        )
+    }
+
+    func testNormalizeTodoTitleLeavesStableTitleUnchanged() {
+        XCTAssertEqual(
+            normalizeTodoTitle("Ship canary"),
+            "Ship canary"
+        )
+    }
+
     func testRenderCompletionMessageUsesStableFormat() {
         let item = TodoItem(id: "7", title: "Ship canary", completed: true, completedAt: nil)
 

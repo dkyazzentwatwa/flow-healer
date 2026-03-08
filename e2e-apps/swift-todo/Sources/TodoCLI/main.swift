@@ -6,14 +6,18 @@ private func writeLine(_ message: String) {
     print(message)
 }
 
-func renderStableCompletionSummary(_ item: TodoItem) -> String {
-    let normalizedTitle = item.title
+func normalizeTodoTitle(_ title: String) -> String {
+    title
+        .trimmingCharacters(in: .whitespacesAndNewlines)
         .components(separatedBy: .whitespacesAndNewlines)
         .filter { !$0.isEmpty }
         .joined(separator: " ")
+}
+
+func renderStableCompletionSummary(_ item: TodoItem) -> String {
     let summaryItem = TodoItem(
         id: item.id,
-        title: normalizedTitle,
+        title: normalizeTodoTitle(item.title),
         completed: item.completed,
         completedAt: item.completedAt
     )
