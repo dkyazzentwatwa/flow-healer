@@ -1,0 +1,66 @@
+name: 02 Run Agent
+
+on:
+  issues:
+    types:
+      - labeled
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: write
+
+jobs:
+  run:
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'agent:ready') ||
+      (github.event_name == 'issue_comment' && github.event.action == 'created' &&
+       (contains(github.event.comment.body, '/codex fix') || contains(github.event.comment.body, '/agent retry')) &&
+       github.event.issue.pull_request == null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: agent-issue-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Install GitHub CLI and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+
+      - name: Ensure labels exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ensure_agent_labels.sh
+
+      - name: Run single-shot worker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          worker="codex"
+          if echo "${ISSUE_LABELS_JSON}" | jq -e '.[] | select(.name=="agent:claude")' >/dev/null; then
+            worker="claude"
+          fi
+          bash scripts/run_agent_once.sh "${ISSUE_NUMBER}" "${worker}"

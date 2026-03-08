@@ -85,6 +85,7 @@ def _install_fake_processes(monkeypatch, processes: list[_FakeAppServerProcess])
             proc.close(-sig.value)
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("flow_healer.codex_app_server_connector.shutil.which", lambda _cmd: "/usr/bin/codex")
     monkeypatch.setattr("flow_healer.codex_app_server_connector.os.killpg", fake_killpg)
     monkeypatch.setattr("flow_healer.codex_app_server_connector.time.sleep", lambda _seconds: None)
     return killed

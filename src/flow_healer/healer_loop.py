@@ -48,6 +48,9 @@ _FLOW_COMMENT_PERSONA = (
 _INFRA_FAILURE_CLASSES = {
     "connector_unavailable",
     "connector_runtime_error",
+    "github_api_error",
+    "github_auth_missing",
+    "github_network_error",
     "github_rate_limited",
     "lease_expired",
     "preflight_failed",
@@ -82,6 +85,9 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "push_failed":           {"backoff_multiplier": 2.0, "feedback_hint": "Push failed on last attempt, likely transient."},
     "push_non_fast_forward": {"backoff_multiplier": 1.0, "feedback_hint": "The managed issue branch diverged remotely. Refresh the branch state and retry from the latest managed base."},
     "pr_open_failed":        {"backoff_multiplier": 2.0, "feedback_hint": "Could not open PR last time."},
+    "github_auth_missing":   {"backoff_multiplier": 2.0, "feedback_hint": "GitHub token was missing or invalid while opening the PR."},
+    "github_network_error":  {"backoff_multiplier": 1.5, "feedback_hint": "GitHub network call failed while opening the PR."},
+    "github_api_error":      {"backoff_multiplier": 1.5, "feedback_hint": "GitHub API rejected the PR open request."},
     "lock_upgrade_conflict": {"backoff_multiplier": 1.0, "feedback_hint": "Previous fix expanded beyond predicted scope. Keep changes narrow."},
     "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
     "generated_artifact_contamination": {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt left generated artifacts in the worktree. Clean workspace noise before retrying."},
@@ -104,6 +110,18 @@ _FAILURE_USER_HINTS: dict[str, str] = {
     "connector_unavailable": (
         "The AI connector is unavailable. "
         "Ensure `codex` is installed and `GITHUB_TOKEN` is set."
+    ),
+    "github_auth_missing": (
+        "GitHub token is missing or invalid for this run. "
+        "Set `GITHUB_TOKEN` via `service.env_file` or environment variables."
+    ),
+    "github_api_error": (
+        "GitHub rejected a mutation request (for example PR creation). "
+        "Check token scope, branch state, and repository permissions."
+    ),
+    "github_network_error": (
+        "GitHub could not be reached over the network. "
+        "Retry once connectivity is restored."
     ),
     "tests_failed": (
         "The proposed fix did not pass tests. See test output above for details."
@@ -156,10 +174,28 @@ class AutonomousHealerLoop:
         store: SQLiteStore,
         connector: ConnectorProtocol,
         tracker: GitHubHealerTracker | None = None,
+        connectors_by_backend: dict[str, ConnectorProtocol] | None = None,
+        connector_routing_mode: str = "single_backend",
+        code_connector_backend: str = "exec",
+        non_code_connector_backend: str = "app_server",
     ) -> None:
         self.settings = settings
         self.store = store
         self.connector = connector
+        self.connector_routing_mode = str(connector_routing_mode or "single_backend")
+        self.code_connector_backend = str(code_connector_backend or "exec")
+        self.non_code_connector_backend = str(non_code_connector_backend or "app_server")
+        self.connectors_by_backend: dict[str, ConnectorProtocol] = dict(connectors_by_backend or {})
+        if not self.connectors_by_backend:
+            default_backend = (
+                "app_server" if connector.__class__.__name__ == "CodexAppServerConnector" else "exec"
+            )
+            self.connectors_by_backend[default_backend] = connector
+        elif all(existing is not connector for existing in self.connectors_by_backend.values()):
+            default_backend = (
+                "app_server" if connector.__class__.__name__ == "CodexAppServerConnector" else "exec"
+            )
+            self.connectors_by_backend.setdefault(default_backend, connector)
         self.repo_path = Path(settings.healer_repo_path).expanduser().resolve()
         self.worker_id = f"healer_{uuid4().hex[:8]}"
 
@@ -174,20 +210,35 @@ class AutonomousHealerLoop:
             max_active_issues=max(1, int(settings.healer_max_concurrent_issues)),
             overlap_scope_queue_enabled=bool(getattr(settings, "healer_overlap_scope_queue_enabled", True)),
         )
-        self.runner = HealerRunner(
-            connector=connector,
-            timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
-            test_gate_mode=settings.healer_test_gate_mode,
-            local_gate_policy=settings.healer_local_gate_policy,
-            completion_artifact_mode=settings.healer_completion_artifact_mode,
-            language=settings.healer_language,
-            docker_image=settings.healer_docker_image,
-            test_command=settings.healer_test_command,
-            install_command=settings.healer_install_command,
-            auto_clean_generated_artifacts=settings.healer_auto_clean_generated_artifacts,
-        )
-        self.verifier = HealerVerifier(connector=connector, timeout_seconds=300)
-        self.reviewer = HealerReviewer(connector=connector)
+        self.runners_by_backend: dict[str, HealerRunner] = {}
+        self.verifiers_by_backend: dict[str, HealerVerifier] = {}
+        self.reviewers_by_backend: dict[str, HealerReviewer] = {}
+        self.preflight_by_backend: dict[str, HealerPreflight] = {}
+        for backend, backend_connector in self.connectors_by_backend.items():
+            runner = HealerRunner(
+                connector=backend_connector,
+                timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
+                test_gate_mode=settings.healer_test_gate_mode,
+                local_gate_policy=settings.healer_local_gate_policy,
+                completion_artifact_mode=settings.healer_completion_artifact_mode,
+                language=settings.healer_language,
+                docker_image=settings.healer_docker_image,
+                test_command=settings.healer_test_command,
+                install_command=settings.healer_install_command,
+                auto_clean_generated_artifacts=settings.healer_auto_clean_generated_artifacts,
+            )
+            self.runners_by_backend[backend] = runner
+            self.verifiers_by_backend[backend] = HealerVerifier(connector=backend_connector, timeout_seconds=300)
+            self.reviewers_by_backend[backend] = HealerReviewer(connector=backend_connector)
+            self.preflight_by_backend[backend] = HealerPreflight(
+                store=store,
+                runner=runner,
+                repo_path=self.repo_path,
+            )
+        primary_backend = self._primary_backend()
+        self.runner = self.runners_by_backend[primary_backend]
+        self.verifier = self.verifiers_by_backend[primary_backend]
+        self.reviewer = self.reviewers_by_backend[primary_backend]
         self.scanner = FlowHealerScanner(
             repo_path=self.repo_path,
             store=store,
@@ -206,11 +257,35 @@ class AutonomousHealerLoop:
             store=store,
             enabled=settings.healer_learning_enabled,
         )
-        self.preflight = HealerPreflight(
-            store=store,
-            runner=self.runner,
-            repo_path=self.repo_path,
-        )
+        self.preflight = self.preflight_by_backend[primary_backend]
+
+    def _primary_backend(self) -> str:
+        if self.connector_routing_mode == "exec_for_code":
+            return self.code_connector_backend
+        app_server_connector = self.connectors_by_backend.get("app_server")
+        if app_server_connector is self.connector:
+            return "app_server"
+        return "exec"
+
+    def _select_backend_for_task(self, task_spec: HealerTaskSpec) -> str:
+        if self.connector_routing_mode != "exec_for_code":
+            return self._primary_backend()
+        normalized_task_kind = str(task_spec.task_kind or "").strip().lower()
+        if normalized_task_kind in {"docs", "research", "artifact", "artifact_only"}:
+            return self.non_code_connector_backend
+        return self.code_connector_backend
+
+    def _pipeline_for_task(
+        self,
+        task_spec: HealerTaskSpec,
+    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerPreflight]:
+        backend = self._select_backend_for_task(task_spec)
+        connector = self.connectors_by_backend.get(backend, self.connector)
+        runner = self.runners_by_backend.get(backend, self.runner)
+        verifier = self.verifiers_by_backend.get(backend, self.verifier)
+        reviewer = self.reviewers_by_backend.get(backend, self.reviewer)
+        preflight = self.preflight_by_backend.get(backend, self.preflight)
+        return backend, connector, runner, verifier, reviewer, preflight
 
     @property
     def enabled(self) -> bool:
@@ -245,6 +320,14 @@ class AutonomousHealerLoop:
         if self.store.get_state("healer_paused") == "true":
             logger.info("Autonomous healer paused via system command; housekeeping complete, skipping cycle.")
             return
+        if not bool(getattr(self.tracker, "enabled", False)):
+            failure_class = "github_auth_missing"
+            failure_reason = "GitHub tracker is disabled (missing token or repo slug); skipping cycle."
+            self.store.set_state("healer_tracker_available", "false")
+            self._record_tracker_error(failure_class=failure_class, failure_reason=failure_reason)
+            logger.warning("Autonomous healer tracker unavailable; skipping cycle. %s", failure_reason)
+            return
+        self.store.set_state("healer_tracker_available", "true")
         self._maybe_run_scan()
         self._ingest_ready_issues()
         self.preflight.refresh_all(force=False)
@@ -1474,26 +1557,31 @@ class AutonomousHealerLoop:
             )
             return True
 
-        def _fail_without_attempt(*, failure_class_value: str, failure_reason_value: str) -> None:
-            nonlocal failure_class, failure_reason, issue_state
-            failure_class = failure_class_value
-            failure_reason = failure_reason_value
-            issue_state = "failed"
-            self.store.set_healer_issue_state(
-                issue_id=issue.issue_id,
-                state="failed",
-                last_failure_class=failure_class_value,
-                last_failure_reason=failure_reason_value[:500],
-                clear_lease=True,
-            )
-
         try:
+            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_preflight = (
+                self._pipeline_for_task(task_spec)
+            )
+            if not bool(getattr(self.tracker, "enabled", False)):
+                failure_class = "github_auth_missing"
+                failure_reason = "GitHub tracker is disabled (missing token or repo slug); cannot process claimed issue."
+                self._record_tracker_error(failure_class=failure_class, failure_reason=failure_reason)
+                issue_state = self._backoff_or_fail(
+                    issue_id=issue.issue_id,
+                    attempt_no=_attempt_label(),
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
+                return
             try:
-                resolved_execution = self.runner.resolve_execution(workspace=self.repo_path, task_spec=task_spec)
+                resolved_execution = selected_runner.resolve_execution(workspace=self.repo_path, task_spec=task_spec)
             except UnsupportedLanguageError as exc:
-                _fail_without_attempt(
-                    failure_class_value="unsupported_language",
-                    failure_reason_value=str(exc),
+                failure_class = "unsupported_language"
+                failure_reason = str(exc)
+                issue_state = "archived"
+                attempt_state = "archived"
+                self._archive_unsupported_language_issue(
+                    issue_id=issue.issue_id,
+                    reason=failure_reason,
                 )
                 return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
@@ -1512,7 +1600,7 @@ class AutonomousHealerLoop:
                 self.repo_path / preflight_execution_root
             ).is_dir()
             if detected_language and should_run_preflight:
-                report = self.preflight.ensure_language_ready(
+                report = selected_preflight.ensure_language_ready(
                     language=detected_language,
                     execution_root=preflight_execution_root,
                 )
@@ -1564,11 +1652,15 @@ class AutonomousHealerLoop:
             if _abort_for_lost_lease():
                 return
             try:
-                resolved_execution = self.runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
+                resolved_execution = selected_runner.resolve_execution(workspace=workspace.path, task_spec=task_spec)
             except UnsupportedLanguageError as exc:
-                _fail_without_attempt(
-                    failure_class_value="unsupported_language",
-                    failure_reason_value=str(exc),
+                failure_class = "unsupported_language"
+                failure_reason = str(exc)
+                issue_state = "archived"
+                attempt_state = "archived"
+                self._archive_unsupported_language_issue(
+                    issue_id=issue.issue_id,
+                    reason=failure_reason,
                 )
                 return
             detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
@@ -1634,9 +1726,10 @@ class AutonomousHealerLoop:
                         f"Attempt: `{attempt_no}`",
                         f"Branch: `{workspace.branch}`",
                         f"Task kind: `{task_spec.task_kind}`",
-                        f"Execution mode: `{_execution_mode_for_task(connector=self.connector, task_spec=task_spec)}`",
+                        f"Execution mode: `{_execution_mode_for_task(connector=selected_connector, task_spec=task_spec)}`",
                         f"Targets: `{self._clean_comment_text(', '.join(task_spec.output_targets) if task_spec.output_targets else 'inferred in code', max_chars=220)}`",
-                        f"Test gate mode: `{self.runner.test_gate_mode}`",
+                        f"Connector backend: `{selected_backend}`",
+                        f"Test gate mode: `{selected_runner.test_gate_mode}`",
                     ],
                 ),
             )
@@ -1658,7 +1751,7 @@ class AutonomousHealerLoop:
             )
             feedback_context = str(row.get("feedback_context") or "").strip()
             # Probe connector availability before burning turn timeout on a broken connector.
-            connector_ok, connector_fail_reason = self.preflight.probe_connector(self.connector)
+            connector_ok, connector_fail_reason = selected_preflight.probe_connector(selected_connector)
             if not connector_ok:
                 logger.warning(
                     "Connector probe failed for issue #%s: %s", issue.issue_id, connector_fail_reason
@@ -1682,7 +1775,7 @@ class AutonomousHealerLoop:
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                 )
-            run_result = self.runner.run_attempt(
+            run_result = selected_runner.run_attempt(
                 issue_id=issue.issue_id,
                 issue_title=issue.title,
                 issue_body=issue.body,
@@ -1698,8 +1791,13 @@ class AutonomousHealerLoop:
             actual_diff = run_result.diff_paths
             test_summary = dict(run_result.test_summary or {})
             self._record_app_server_attempt_metrics(
+                connector=selected_connector,
                 task_kind=task_spec.task_kind,
                 had_material_diff=bool(actual_diff),
+            )
+            self._record_app_server_recovery_metrics(
+                connector=selected_connector,
+                workspace_status=run_result.workspace_status,
             )
             proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
             if not run_result.success:
@@ -1762,7 +1860,7 @@ class AutonomousHealerLoop:
                 )
                 return
 
-            verification = self.verifier.verify(
+            verification = selected_verifier.verify(
                 issue_id=issue.issue_id,
                 issue_title=issue.title,
                 issue_body=issue.body,
@@ -1885,15 +1983,21 @@ class AutonomousHealerLoop:
                 ),
                 base=self.settings.healer_default_branch,
             )
-            if pr is None:
-                failure_class = "pr_open_failed"
-                failure_reason = "Failed to create/update pull request."
+            pr_number = int(getattr(pr, "number", 0) or 0) if pr is not None else 0
+            if pr is None or pr_number <= 0:
+                tracker_error_class, tracker_error_reason = self._tracker_last_error()
+                failure_class = self._classify_tracker_failure(tracker_error_class)
+                failure_reason = (
+                    tracker_error_reason.strip()
+                    or "Failed to create/update pull request."
+                )
+                self._record_tracker_error(failure_class=failure_class, failure_reason=failure_reason)
                 logger.info("Issue #%s attempt %s could not open PR", issue.issue_id, attempt_no)
                 issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
-                    failure_class="pr_open_failed",
-                    failure_reason="Failed to create/update pull request.",
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
                 )
                 return
 
@@ -1911,7 +2015,8 @@ class AutonomousHealerLoop:
                     "I opened or updated the pull request for this issue.",
                     [
                         f"PR: [#{pr.number}]({pr.html_url})",
-                        f"Execution mode: `{_execution_mode_for_task(connector=self.connector, task_spec=task_spec)}`",
+                        f"Execution mode: `{_execution_mode_for_task(connector=selected_connector, task_spec=task_spec)}`",
+                        f"Connector backend: `{selected_backend}`",
                         f"Verifier mode: `{_verifier_mode_label(self.settings, verification)}`",
                         f"Verifier verdict: `{getattr(verification, 'verdict', 'pass' if verification.passed else 'hard_fail')}`",
                         *self._format_test_summary_bullets(run_result.test_summary),
@@ -1925,7 +2030,7 @@ class AutonomousHealerLoop:
             logger.info("Issue #%s opened/updated PR #%s", issue.issue_id, pr.number)
             if self.settings.healer_enable_review:
                 try:
-                    review = self.reviewer.review(
+                    review = selected_reviewer.review(
                         issue_id=issue.issue_id,
                         issue_title=issue.title,
                         issue_body=issue.body,
@@ -1984,6 +2089,41 @@ class AutonomousHealerLoop:
                         outro="Failure details were saved so the next pass can reuse the context.",
                         ),
                 )
+
+    def _archive_unsupported_language_issue(self, *, issue_id: str, reason: str) -> None:
+        reason_text = str(reason or "").strip() or "Unsupported language for this automation lane."
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Unsupported language for this lane",
+                "This Flow Healer lane currently focuses on Python and Node.js.",
+                [
+                    "Status: `archived`",
+                    "Lane focus: `python`, `node`",
+                    f"Reason: {self._clean_comment_text(reason_text, max_chars=260)}",
+                    "Action: migrate this issue to the matching language lane/queue.",
+                ],
+                outro=(
+                    "After migration, re-run the issue in the language-specific lane so it can be processed "
+                    "with the right toolchain."
+                ),
+            ),
+        )
+        close_issue_key = self._mutation_key(action="close_issue_unsupported_language", issue_id=issue_id)
+        close_ok = self._run_idempotent_mutation(
+            mutation_key=close_issue_key,
+            action=lambda: self.tracker.close_issue(issue_id=issue_id),
+        )
+        if not close_ok:
+            logger.warning("Unsupported-language issue #%s could not be closed on GitHub.", issue_id)
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="archived",
+            pr_state="closed",
+            last_failure_class="unsupported_language",
+            last_failure_reason=reason_text[:500],
+            clear_lease=True,
+        )
 
     def _claim_is_actionable(self, issue: HealerIssue) -> bool:
         if not issue.issue_id:
@@ -2255,9 +2395,10 @@ class AutonomousHealerLoop:
         )
         return "queued"
 
-    def _connector_health_snapshot(self) -> dict[str, str | bool]:
+    def _connector_health_snapshot(self, connector: ConnectorProtocol | None = None) -> dict[str, str | bool]:
+        target = connector or self.connector
         try:
-            self.connector.ensure_started()
+            target.ensure_started()
         except Exception as exc:
             return {
                 "available": False,
@@ -2266,9 +2407,9 @@ class AutonomousHealerLoop:
                 "availability_reason": f"connector ensure_started failed: {exc}",
                 "last_health_error": str(exc),
             }
-        if hasattr(self.connector, "health_snapshot"):
+        if hasattr(target, "health_snapshot"):
             try:
-                health = self.connector.health_snapshot()  # type: ignore[attr-defined]
+                health = target.health_snapshot()  # type: ignore[attr-defined]
                 return {
                     "available": bool(health.get("available")),
                     "configured_command": str(health.get("configured_command") or ""),
@@ -2292,14 +2433,10 @@ class AutonomousHealerLoop:
             "last_health_error": "",
         }
 
-    def _tracker_health_snapshot(self) -> dict[str, str | bool]:
-        last_error_class, last_error_reason = self._tracker_last_error()
+    def _connector_health_by_backend(self) -> dict[str, dict[str, str | bool]]:
         return {
-            "backend": self.tracker.__class__.__name__,
-            "enabled": bool(getattr(self.tracker, "enabled", False)),
-            "repo_slug": str(getattr(self.tracker, "repo_slug", "") or ""),
-            "last_error_class": last_error_class,
-            "last_error_reason": last_error_reason,
+            backend: self._connector_health_snapshot(connector=backend_connector)
+            for backend, backend_connector in self.connectors_by_backend.items()
         }
 
     def _record_connector_health(self, health: dict[str, str | bool]) -> None:
@@ -2318,8 +2455,14 @@ class AutonomousHealerLoop:
             current = 0
         self.store.set_state(key, str(max(0, current + int(amount))))
 
-    def _record_app_server_attempt_metrics(self, *, task_kind: str, had_material_diff: bool) -> None:
-        if self.connector.__class__.__name__ != "CodexAppServerConnector":
+    def _record_app_server_attempt_metrics(
+        self,
+        *,
+        connector: ConnectorProtocol,
+        task_kind: str,
+        had_material_diff: bool,
+    ) -> None:
+        if connector.__class__.__name__ != "CodexAppServerConnector":
             return
         normalized_task_kind = str(task_kind or "").strip().lower() or "unknown"
         self._increment_state_counter("app_server_attempts")
@@ -2329,6 +2472,24 @@ class AutonomousHealerLoop:
             return
         self._increment_state_counter("app_server_attempts_with_zero_diff")
         self._increment_state_counter(f"app_server_attempts_with_zero_diff_task_kind_{normalized_task_kind}")
+
+    def _record_app_server_recovery_metrics(
+        self,
+        *,
+        connector: ConnectorProtocol,
+        workspace_status: dict[str, object] | None,
+    ) -> None:
+        if connector.__class__.__name__ != "CodexAppServerConnector":
+            return
+        status = workspace_status or {}
+        if bool(status.get("app_server_forced_serialized_recovery_attempted")):
+            self._increment_state_counter("app_server_forced_serialized_recovery_attempts")
+        if bool(status.get("app_server_forced_serialized_recovery_succeeded")):
+            self._increment_state_counter("app_server_forced_serialized_recovery_success")
+        if bool(status.get("app_server_exec_failover_attempted")):
+            self._increment_state_counter("app_server_exec_failover_attempts")
+        if bool(status.get("app_server_exec_failover_succeeded")):
+            self._increment_state_counter("app_server_exec_failover_success")
 
     def _record_failure_fingerprint(
         self,
@@ -2527,6 +2688,25 @@ class AutonomousHealerLoop:
             return self.tracker.get_last_error()
         except Exception:
             return "", ""
+
+    def _record_tracker_error(self, *, failure_class: str, failure_reason: str) -> None:
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_state("healer_tracker_last_error_class", str(failure_class or "")[:120])
+        self.store.set_state("healer_tracker_last_error_reason", str(failure_reason or "")[:500])
+        self.store.set_state("healer_tracker_last_error_at", now_str)
+
+    @staticmethod
+    def _classify_tracker_failure(error_class: str) -> str:
+        normalized = str(error_class or "").strip().lower()
+        if normalized in {"github_auth_missing", "github_repo_unconfigured"}:
+            return "github_auth_missing"
+        if normalized == "github_network_error":
+            return "github_network_error"
+        if normalized == "github_rate_limited":
+            return "github_rate_limited"
+        if normalized == "github_api_error":
+            return "github_api_error"
+        return "pr_open_failed"
 
     def _note_infra_failure(self, *, failure_class: str, failure_reason: str) -> None:
         if failure_class not in _INFRA_FAILURE_CLASSES:

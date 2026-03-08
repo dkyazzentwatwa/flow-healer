@@ -57,7 +57,7 @@ def test_ensure_supported_language_rejects_removed_languages() -> None:
     try:
         ensure_supported_language("ruby", source="test fixture")
     except UnsupportedLanguageError as exc:
-        assert "supports only python, node, and swift" in str(exc)
+        assert "supports only python and node" in str(exc)
     else:
         raise AssertionError("expected removed languages to be rejected")
 
@@ -74,10 +74,10 @@ def test_get_strategy_custom_test_command_enables_pytest_targeting() -> None:
     assert strategy.supports_targeted_paths is True
 
 
-def test_get_strategy_swift_is_local_first() -> None:
-    strategy = get_strategy("swift")
-
-    assert strategy.local_test_cmd == ["swift", "test"]
-    assert strategy.docker_test_cmd == ["swift", "test"]
-    assert strategy.supports_targeted_paths is False
-    assert strategy.supports_docker is False
+def test_ensure_supported_language_rejects_swift() -> None:
+    try:
+        ensure_supported_language("swift", source="test fixture")
+    except UnsupportedLanguageError as exc:
+        assert "supports only python and node" in str(exc)
+    else:
+        raise AssertionError("expected swift to be rejected")

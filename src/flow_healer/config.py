@@ -18,6 +18,9 @@ class ServiceSettings:
     poll_interval_seconds: float = 30.0
     state_root: str = "~/.flow-healer"
     connector_backend: str = "app_server"
+    connector_routing_mode: str = "single_backend"
+    code_connector_backend: str = "exec"
+    non_code_connector_backend: str = "app_server"
     connector_command: str = "codex"
     connector_model: str = "gpt-5.4"
     connector_reasoning_effort: str = "medium"
@@ -153,12 +156,20 @@ class AppConfig:
             poll_interval_seconds=float(service_raw.get("poll_interval_seconds") or 30.0),
             state_root=str(service_raw.get("state_root") or "~/.flow-healer"),
             connector_backend=_normalize_connector_backend(service_raw.get("connector_backend")),
+            connector_routing_mode=_normalize_connector_routing_mode(service_raw.get("connector_routing_mode")),
+            code_connector_backend=_normalize_connector_backend(
+                service_raw.get("code_connector_backend") or "exec"
+            ),
+            non_code_connector_backend=_normalize_connector_backend(
+                service_raw.get("non_code_connector_backend") or "app_server"
+            ),
             connector_command=str(service_raw.get("connector_command") or "codex"),
             connector_model=str(service_raw.get("connector_model") or "gpt-5.4"),
             connector_reasoning_effort=str(service_raw.get("connector_reasoning_effort") or "medium"),
             connector_timeout_seconds=int(service_raw.get("connector_timeout_seconds") or 300),
             tracker_backend=_normalize_tracker_backend(service_raw.get("tracker_backend")),
         )
+        service = _apply_connector_routing_defaults(service)
 
         repos: list[RelaySettings] = []
         for index, item in enumerate(raw.get("repos") or []):
@@ -308,6 +319,27 @@ def _normalize_connector_backend(value: Any) -> str:
     if raw == "appserver":
         return "app_server"
     return "app_server"
+
+
+def _normalize_connector_routing_mode(value: Any) -> str:
+    raw = str(value or "single_backend").strip().lower().replace("-", "_")
+    if raw in {"single_backend", "exec_for_code"}:
+        return raw
+    return "single_backend"
+
+
+def _apply_connector_routing_defaults(service: ServiceSettings) -> ServiceSettings:
+    # Keep legacy single-backend behavior unless explicit routing mode is enabled.
+    if service.connector_routing_mode == "single_backend":
+        service.code_connector_backend = service.connector_backend
+        service.non_code_connector_backend = service.connector_backend
+        return service
+
+    if service.code_connector_backend not in {"exec", "app_server"}:
+        service.code_connector_backend = "exec"
+    if service.non_code_connector_backend not in {"exec", "app_server"}:
+        service.non_code_connector_backend = "app_server"
+    return service
 
 
 def _normalize_verifier_policy(value: Any) -> str:

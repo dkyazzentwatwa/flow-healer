@@ -37,6 +37,9 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert config.service.github_token_env == "GITHUB_TOKEN"
     assert config.service.poll_interval_seconds == 30.0
     assert config.service.connector_backend == "app_server"
+    assert config.service.connector_routing_mode == "single_backend"
+    assert config.service.code_connector_backend == "app_server"
+    assert config.service.non_code_connector_backend == "app_server"
     assert config.service.connector_model == "gpt-5.4"
     assert config.service.connector_reasoning_effort == "medium"
     assert config.control.web.enabled is True
@@ -104,7 +107,7 @@ def test_load_rejects_removed_language_override(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="supports only python, node, and swift"):
+    with pytest.raises(ValueError, match="supports only python and node"):
         AppConfig.load(config_path)
 
 
@@ -148,6 +151,55 @@ def test_load_normalizes_invalid_connector_backend_to_app_server(tmp_path) -> No
     config = AppConfig.load(config_path)
 
     assert config.service.connector_backend == "app_server"
+
+
+def test_load_supports_exec_for_code_routing_mode(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "service:",
+                "  connector_routing_mode: exec_for_code",
+                "  code_connector_backend: exec",
+                "  non_code_connector_backend: app-server",
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    assert config.service.connector_routing_mode == "exec_for_code"
+    assert config.service.code_connector_backend == "exec"
+    assert config.service.non_code_connector_backend == "app_server"
+
+
+def test_load_invalid_connector_routing_mode_defaults_to_single_backend(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "service:",
+                "  connector_backend: exec",
+                "  connector_routing_mode: strange",
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    assert config.service.connector_routing_mode == "single_backend"
+    assert config.service.code_connector_backend == "exec"
+    assert config.service.non_code_connector_backend == "exec"
 
 
 def test_load_normalizes_verifier_policy(tmp_path) -> None:

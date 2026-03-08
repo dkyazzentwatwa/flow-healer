@@ -1,19 +1,6 @@
-/// Adds two integers and returns their total.
+/// Adds two integers using Swift's standard integer addition semantics.
+@inlinable
 public func add(_ leftOperand: Int, _ rightOperand: Int) -> Int {
-    let leftOperandIsZero = leftOperand == 0
-    let rightOperandIsZero = rightOperand == 0
-
-    if leftOperandIsZero, rightOperandIsZero {
-        return 0
-    }
-
-    if leftOperandIsZero {
-        return rightOperand
-    }
-
-    if rightOperandIsZero {
-        return leftOperand
-    }
-
-    return leftOperand + rightOperand
+    let total = leftOperand + rightOperand
+    return total
 }

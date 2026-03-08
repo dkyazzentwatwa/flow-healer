@@ -26,7 +26,6 @@ def test_preflight_refresh_all_caches_reports_for_supported_languages(tmp_path) 
     for relative in (
         "e2e-smoke/python",
         "e2e-smoke/node",
-        "e2e-smoke/swift",
     ):
         (tmp_path / relative).mkdir(parents=True)
 
@@ -37,15 +36,14 @@ def test_preflight_refresh_all_caches_reports_for_supported_languages(tmp_path) 
 
     reports = preflight.refresh_all(force=True)
 
-    assert len(reports) == 3
+    assert len(reports) == 2
     assert all(report.status == "ready" for report in reports)
     cached = list_cached_preflight_reports(store=store, gate_mode=runner.test_gate_mode)
     assert [report.language for report in cached] == [
         "python",
         "node",
-        "swift",
     ]
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == 2
 
 
 def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
@@ -73,23 +71,24 @@ def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
     assert runner.calls == []
 
 
-def test_preflight_reports_unsupported_docker_only_mode_for_swift(tmp_path) -> None:
-    (tmp_path / "e2e-smoke" / "swift").mkdir(parents=True)
+def test_preflight_requires_docker_for_node_docker_only_mode(tmp_path, monkeypatch) -> None:
+    (tmp_path / "e2e-smoke" / "node").mkdir(parents=True)
     store = SQLiteStore(tmp_path / "state.db")
     store.bootstrap()
     runner = _FakeRunner()
     runner.test_gate_mode = "docker_only"
     preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
+    monkeypatch.setattr("flow_healer.healer_preflight.shutil.which", lambda _name: None)
 
-    report = preflight.ensure_language_ready(language="swift", execution_root="e2e-smoke/swift", force=True)
+    report = preflight.ensure_language_ready(language="node", execution_root="e2e-smoke/node", force=True)
 
     assert report.status == "failed"
-    assert report.failure_class == "unsupported_gate_mode"
+    assert report.failure_class == "docker_unavailable"
     assert runner.calls == []
 
 
 def test_preflight_treats_baseline_test_failures_as_ready(tmp_path) -> None:
-    (tmp_path / "e2e-smoke" / "swift").mkdir(parents=True)
+    (tmp_path / "e2e-smoke" / "node").mkdir(parents=True)
     store = SQLiteStore(tmp_path / "state.db")
     store.bootstrap()
     runner = _FakeRunner()
@@ -101,7 +100,7 @@ def test_preflight_treats_baseline_test_failures_as_ready(tmp_path) -> None:
     }
     preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
 
-    report = preflight.ensure_language_ready(language="swift", execution_root="e2e-smoke/swift", force=True)
+    report = preflight.ensure_language_ready(language="node", execution_root="e2e-smoke/node", force=True)
 
     assert report.status == "ready"
     assert report.failure_class == ""
@@ -109,7 +108,7 @@ def test_preflight_treats_baseline_test_failures_as_ready(tmp_path) -> None:
 
 
 def test_preflight_still_blocks_environment_gate_failures(tmp_path) -> None:
-    (tmp_path / "e2e-smoke" / "swift").mkdir(parents=True)
+    (tmp_path / "e2e-smoke" / "node").mkdir(parents=True)
     store = SQLiteStore(tmp_path / "state.db")
     store.bootstrap()
     runner = _FakeRunner()
@@ -118,11 +117,11 @@ def test_preflight_still_blocks_environment_gate_failures(tmp_path) -> None:
         "failed_tests": 1,
         "local_full_status": "failed",
         "local_full_reason": "tool_missing",
-        "local_full_output_tail": "swift toolchain missing",
+        "local_full_output_tail": "npm missing",
     }
     preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
 
-    report = preflight.ensure_language_ready(language="swift", execution_root="e2e-smoke/swift", force=True)
+    report = preflight.ensure_language_ready(language="node", execution_root="e2e-smoke/node", force=True)
 
     assert report.status == "failed"
     assert report.failure_class == "validation_failed"

@@ -146,6 +146,18 @@ class HealerRunner:
             mode=completion_parser_mode,
             confidence=completion_parser_confidence,
         )
+        app_server_forced_serialized_recovery_attempted = False
+        app_server_forced_serialized_recovery_succeeded = False
+        app_server_exec_failover_attempted = False
+        app_server_exec_failover_succeeded = False
+
+        def _annotate_app_server_recovery_status(status: dict[str, Any]) -> None:
+            status["app_server_forced_serialized_recovery_attempted"] = app_server_forced_serialized_recovery_attempted
+            status["app_server_forced_serialized_recovery_succeeded"] = app_server_forced_serialized_recovery_succeeded
+            status["app_server_exec_failover_attempted"] = app_server_exec_failover_attempted
+            status["app_server_exec_failover_succeeded"] = app_server_exec_failover_succeeded
+
+        _annotate_app_server_recovery_status(workspace_status)
         cleanup_cycles_used = 0
         sender = f"healer:{issue_id}"
         workspace_edit_mode = _prefers_workspace_edits(connector=self.connector, task_spec=task_spec)
@@ -370,6 +382,95 @@ class HealerRunner:
                         task_spec=task_spec,
                     )
                     if no_workspace_change_retries_used >= 1:
+                        recovery_prompt = _build_retry_prompt(
+                            base_prompt=prompt,
+                            failure_class=failure_class,
+                            failure_reason=failure_reason,
+                            task_spec=task_spec,
+                            prefer_workspace_edits=False,
+                            allow_exact_target_file_fallback=(
+                                _allows_named_code_target_fallback(task_spec) or self.completion_artifact_mode == "always"
+                            ),
+                            allow_artifact_body_fallback=_allows_artifact_synthesis(task_spec),
+                            continue_same_thread=False,
+                            attempt_number=proposer_attempt,
+                            issue_id=issue_id,
+                        )
+                        app_server_forced_serialized_recovery_attempted = True
+                        _annotate_app_server_recovery_status(workspace_status)
+                        thread_id = self.connector.reset_thread(sender)
+                        recovery_turn = _run_connector_turn(
+                            self.connector,
+                            thread_id,
+                            recovery_prompt,
+                            timeout_seconds=turn_timeout_seconds,
+                        )
+                        proposer_output = recovery_turn.output_text
+                        if _attempt_serialized_output_materialization(
+                            workspace=workspace,
+                            issue_title=issue_title,
+                            issue_body=issue_body,
+                            task_spec=task_spec,
+                            language=resolved_execution.language_effective,
+                            timeout_seconds=self.timeout_seconds,
+                            proposer_output=proposer_output,
+                        ):
+                            app_server_forced_serialized_recovery_succeeded = True
+                            _annotate_app_server_recovery_status(workspace_status)
+                            failure_class = ""
+                            failure_reason = ""
+                            break
+                        app_server_exec_failover_attempted = True
+                        _annotate_app_server_recovery_status(workspace_status)
+                        failover_thread_id = self.connector.reset_thread(sender)
+                        failover_turn = _run_connector_exec_failover_turn(
+                            self.connector,
+                            failover_thread_id,
+                            recovery_prompt,
+                            timeout_seconds=turn_timeout_seconds,
+                        )
+                        if failover_turn is None:
+                            failure_class = "no_workspace_change:forced_serialized_recovery_failed"
+                            failure_reason = (
+                                "Forced serialized-output recovery produced no staged workspace changes, "
+                                "and exec failover is not available on this connector."
+                            )
+                            return HealerRunResult(
+                                success=False,
+                                failure_class=failure_class,
+                                failure_reason=failure_reason,
+                                failure_fingerprint=_execution_contract_failure_fingerprint(
+                                    failure_class=failure_class,
+                                    connector=self.connector,
+                                    task_spec=task_spec,
+                                ),
+                                proposer_output=proposer_output,
+                                diff_paths=[],
+                                diff_files=0,
+                                diff_lines=0,
+                                test_summary={},
+                                workspace_status=workspace_status,
+                            )
+                        proposer_output = failover_turn.output_text
+                        if _attempt_serialized_output_materialization(
+                            workspace=workspace,
+                            issue_title=issue_title,
+                            issue_body=issue_body,
+                            task_spec=task_spec,
+                            language=resolved_execution.language_effective,
+                            timeout_seconds=self.timeout_seconds,
+                            proposer_output=proposer_output,
+                        ):
+                            app_server_exec_failover_succeeded = True
+                            _annotate_app_server_recovery_status(workspace_status)
+                            failure_class = ""
+                            failure_reason = ""
+                            break
+                        failure_class = "no_workspace_change:exec_failover_failed"
+                        failure_reason = (
+                            "Strict workspace-edit retry, forced serialized-output recovery, and exec failover "
+                            "did not produce staged workspace changes."
+                        )
                         return HealerRunResult(
                             success=False,
                             failure_class=failure_class,
@@ -611,6 +712,7 @@ class HealerRunner:
             source=completion_parser_source,
             reason=completion_parser_reason,
         )
+        _annotate_app_server_recovery_status(workspace_status)
         if cleaned_paths:
             cleanup_cycles_used += 1
         workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
@@ -743,6 +845,7 @@ class HealerRunner:
                 source=completion_parser_source,
                 reason=completion_parser_reason,
             )
+            _annotate_app_server_recovery_status(workspace_status)
             if cleaned_paths:
                 cleanup_cycles_used += 1
             workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
@@ -856,6 +959,7 @@ class HealerRunner:
                     source=completion_parser_source,
                     reason=completion_parser_reason,
                 )
+                _annotate_app_server_recovery_status(final_workspace_status)
                 fingerprint = _generated_artifact_failure_fingerprint(
                     final_workspace_status["contamination_paths"],
                     execution_root=resolved_execution.execution_root,
@@ -892,6 +996,7 @@ class HealerRunner:
             source=completion_parser_source,
             reason=completion_parser_reason,
         )
+        _annotate_app_server_recovery_status(workspace_status)
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
             return HealerRunResult(
@@ -943,7 +1048,7 @@ class HealerRunner:
         if is_removed_language(effective_language):
             raise UnsupportedLanguageError(
                 f"Unsupported language '{effective_language}'. "
-                "Flow Healer supports only python, node, and swift."
+                "Flow Healer supports only python and node."
             )
         if effective_language == "unknown":
             effective_language = ""
@@ -1788,6 +1893,77 @@ def _run_connector_turn(
         except TypeError:
             pass
     return ConnectorTurnResult(output_text=connector.run_turn(thread_id, prompt, timeout_seconds=timeout_seconds))
+
+
+def _run_connector_exec_failover_turn(
+    connector: ConnectorProtocol,
+    thread_id: str,
+    prompt: str,
+    *,
+    timeout_seconds: int,
+) -> ConnectorTurnResult | None:
+    if not hasattr(connector, "run_turn_exec_failover"):
+        return None
+    failover = getattr(connector, "run_turn_exec_failover")
+    try:
+        result = failover(thread_id, prompt, timeout_seconds=timeout_seconds)
+    except TypeError:
+        result = failover(thread_id, prompt)
+    if isinstance(result, ConnectorTurnResult):
+        return result
+    return ConnectorTurnResult(output_text=str(result or "").strip())
+
+
+def _attempt_serialized_output_materialization(
+    *,
+    workspace: Path,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec,
+    language: str,
+    timeout_seconds: int,
+    proposer_output: str,
+) -> bool:
+    patch = _extract_diff_block(proposer_output)
+    if patch.strip() and _looks_like_unified_diff(patch):
+        patch_applied, _ = _apply_unified_diff_patch(
+            workspace=workspace,
+            patch=patch,
+            timeout_seconds=timeout_seconds,
+        )
+        if patch_applied and _stage_workspace_changes(
+            workspace,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=language,
+        ):
+            return True
+    if _materialize_explicit_path_fenced_files(
+        task_spec=task_spec,
+        proposer_output=proposer_output,
+        workspace=workspace,
+    ) and _stage_workspace_changes(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+    ):
+        return True
+    if _materialize_artifact_from_output(
+        task_spec=task_spec,
+        proposer_output=proposer_output,
+        workspace=workspace,
+    ) and _stage_workspace_changes(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+    ):
+        return True
+    return False
 
 
 def _allows_named_code_target_fallback(task_spec: HealerTaskSpec) -> bool:

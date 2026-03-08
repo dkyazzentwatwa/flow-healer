@@ -17,10 +17,12 @@ from flow_healer.healer_runner import (
     _run_test_gates,
     _run_tests_in_docker,
     _run_tests_locally,
+    _run_connector_turn,
     _stage_workspace_changes,
     _task_execution_instructions,
     )
-from flow_healer.language_strategies import UnsupportedLanguageError, get_strategy
+from flow_healer.protocols import ConnectorTurnResult
+from flow_healer.language_strategies import LanguageStrategy, UnsupportedLanguageError, get_strategy
 from flow_healer.healer_task_spec import HealerTaskSpec, compile_task_spec
 
 
@@ -303,8 +305,8 @@ def test_run_test_gates_runs_from_resolved_execution_root(monkeypatch, tmp_path)
     assert summary["execution_root_source"] == "issue"
 
 
-def test_run_test_gates_skips_docker_for_local_first_swift(monkeypatch, tmp_path):
-    sandbox = tmp_path / "e2e-smoke" / "swift"
+def test_run_test_gates_skips_docker_for_language_without_docker_support(monkeypatch, tmp_path):
+    sandbox = tmp_path / "e2e-smoke" / "custom"
     sandbox.mkdir(parents=True)
     calls: list[tuple[str, Path, list[str]]] = []
 
@@ -325,25 +327,32 @@ def test_run_test_gates_skips_docker_for_local_first_swift(monkeypatch, tmp_path
         timeout_seconds=30,
         mode="local_then_docker",
         resolved_execution=ResolvedExecution(
-            language_detected="swift",
-            language_effective="swift",
-            execution_root="e2e-smoke/swift",
+            language_detected="custom",
+            language_effective="custom",
+            execution_root="e2e-smoke/custom",
             execution_root_source="issue",
             execution_path=sandbox,
-            strategy=get_strategy("swift"),
+            strategy=LanguageStrategy(
+                docker_image="",
+                docker_install_cmd="",
+                docker_test_cmd=["custom-test"],
+                local_test_cmd=["custom-test"],
+                supports_targeted_paths=False,
+                supports_docker=False,
+            ),
         ),
         local_gate_policy="auto",
     )
 
-    assert calls == [("local", sandbox, ["swift", "test"])]
+    assert calls == [("local", sandbox, ["custom-test"])]
     assert summary["local_full_status"] == "passed"
     assert summary["docker_full_status"] == "skipped"
     assert summary["docker_full_reason"] == "docker_unsupported_for_language"
     assert summary["failed_tests"] == 0
 
 
-def test_run_test_gates_fails_docker_only_for_local_first_swift(monkeypatch, tmp_path):
-    sandbox = tmp_path / "e2e-smoke" / "swift"
+def test_run_test_gates_fails_docker_only_for_language_without_docker_support(monkeypatch, tmp_path):
+    sandbox = tmp_path / "e2e-smoke" / "custom"
     sandbox.mkdir(parents=True)
     calls: list[tuple[str, Path, list[str]]] = []
 
@@ -359,12 +368,19 @@ def test_run_test_gates_fails_docker_only_for_local_first_swift(monkeypatch, tmp
         timeout_seconds=30,
         mode="docker_only",
         resolved_execution=ResolvedExecution(
-            language_detected="swift",
-            language_effective="swift",
-            execution_root="e2e-smoke/swift",
+            language_detected="custom",
+            language_effective="custom",
+            execution_root="e2e-smoke/custom",
             execution_root_source="issue",
             execution_path=sandbox,
-            strategy=get_strategy("swift"),
+            strategy=LanguageStrategy(
+                docker_image="",
+                docker_install_cmd="",
+                docker_test_cmd=["custom-test"],
+                local_test_cmd=["custom-test"],
+                supports_targeted_paths=False,
+                supports_docker=False,
+            ),
         ),
         local_gate_policy="auto",
     )
@@ -685,11 +701,30 @@ def test_run_test_gates_fails_local_only_when_gate_is_skipped():
     assert summary["failed_tests"] == 1
 
 
+def test_run_connector_turn_uses_detailed_result_when_supported():
+    class _DetailedConnector(_RetryConnector):
+        def run_turn_detailed(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> ConnectorTurnResult:
+            self.turns.append((thread_id, prompt))
+            return ConnectorTurnResult(
+                output_text="final answer",
+                final_answer_present=True,
+                commentary_tail="streaming commentary",
+            )
+
+    connector = _DetailedConnector(outputs=[])
+    result = _run_connector_turn(connector, "thread-1", "prompt", timeout_seconds=60)
+    assert result.output_text == "final answer"
+    assert result.final_answer_present is True
+    assert result.commentary_tail == "streaming commentary"
+
+
 class _RetryConnector:
     def __init__(self, outputs):
         self.outputs = list(outputs)
+        self.exec_failover_outputs: list[str] = []
         self.reset_calls: list[str] = []
         self.turns: list[tuple[str, str]] = []
+        self.exec_failover_turns: list[tuple[str, str]] = []
         self.timeouts: list[int | None] = []
         self.snapshot: dict[str, object] = {}
 
@@ -704,6 +739,13 @@ class _RetryConnector:
         self.turns.append((thread_id, prompt))
         self.timeouts.append(timeout_seconds)
         return self.outputs.pop(0)
+
+    def run_turn_exec_failover(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+        self.exec_failover_turns.append((thread_id, prompt))
+        self.timeouts.append(timeout_seconds)
+        if not self.exec_failover_outputs:
+            return ""
+        return self.exec_failover_outputs.pop(0)
 
     def ensure_started(self) -> None:
         pass
@@ -1665,35 +1707,35 @@ def test_run_attempt_retries_malformed_diff_before_git_apply(tmp_path):
     assert "invalid patch syntax" in connector.turns[1][1]
 
 
-def test_run_attempt_includes_language_in_prompt(tmp_path):
+def test_run_attempt_rejects_unsupported_issue_language(tmp_path):
     connector = _RetryConnector(["not a patch"] * 5)
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
     workspace = tmp_path / "repo"
     workspace.mkdir()
 
-    result = runner.run_attempt(
-        issue_id="200",
-        issue_title="Fix handler",
-        issue_body="Fix the handler in Add.swift",
-        task_spec=HealerTaskSpec(
-            task_kind="fix",
-            output_mode="patch",
-            output_targets=(),
-            tool_policy="repo_only",
-            validation_profile="code_change",
-            language="swift",
-        ),
-        workspace=workspace,
-        max_diff_files=5,
-        max_diff_lines=20,
-        max_failed_tests_allowed=0,
-        targeted_tests=[],
-    )
-
-    assert result.success is False
-    prompt = connector.turns[0][1]
-    assert "This repository uses swift." in prompt
-    assert "Follow swift conventions" in prompt
+    try:
+        runner.run_attempt(
+            issue_id="200",
+            issue_title="Fix handler",
+            issue_body="Fix the handler in Add.swift",
+            task_spec=HealerTaskSpec(
+                task_kind="fix",
+                output_mode="patch",
+                output_targets=(),
+                tool_policy="repo_only",
+                validation_profile="code_change",
+                language="swift",
+            ),
+            workspace=workspace,
+            max_diff_files=5,
+            max_diff_lines=20,
+            max_failed_tests_allowed=0,
+            targeted_tests=[],
+        )
+    except UnsupportedLanguageError as exc:
+        assert "supports only python and node" in str(exc)
+    else:
+        raise AssertionError("expected swift issue language to be rejected")
 
 
 def test_resolve_execution_rejects_removed_language(tmp_path):
@@ -1711,7 +1753,7 @@ def test_resolve_execution_rejects_removed_language(tmp_path):
             ),
         )
     except UnsupportedLanguageError as exc:
-        assert "supports only python, node, and swift" in str(exc)
+        assert "supports only python and node" in str(exc)
     else:
         raise AssertionError("expected removed language override to be rejected")
 
@@ -2240,7 +2282,7 @@ def test_run_attempt_app_server_code_task_marks_staging_filtered_all_when_only_r
     assert ".pytest_cache" in result.failure_reason
 
 
-def test_run_attempt_app_server_no_workspace_change_allows_only_one_same_thread_retry(tmp_path):
+def test_run_attempt_app_server_no_workspace_change_runs_bounded_recovery_and_failover(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
     _init_git_repo(workspace)
@@ -2256,6 +2298,7 @@ def test_run_attempt_app_server_no_workspace_change_allows_only_one_same_thread_
             "Updated [demo.py](/tmp/demo.py) and this should work now.",
         ]
     )
+    connector.exec_failover_outputs = ["Updated [demo.py](/tmp/demo.py) and this should work now."]
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
 
     result = runner.run_attempt(
@@ -2277,10 +2320,148 @@ def test_run_attempt_app_server_no_workspace_change_allows_only_one_same_thread_
     )
 
     assert result.success is False
-    assert result.failure_class.startswith("no_workspace_change:")
+    assert result.failure_class == "no_workspace_change:exec_failover_failed"
     assert result.failure_fingerprint.startswith("execution_contract|workspace_edit|no_workspace_change:")
-    assert len(connector.turns) == 2
+    assert len(connector.turns) == 3
+    assert len(connector.exec_failover_turns) == 1
     assert "this retry is strict" in connector.turns[1][1].lower()
+    assert result.workspace_status["app_server_forced_serialized_recovery_attempted"] is True
+    assert result.workspace_status["app_server_forced_serialized_recovery_succeeded"] is False
+    assert result.workspace_status["app_server_exec_failover_attempted"] is True
+    assert result.workspace_status["app_server_exec_failover_succeeded"] is False
+
+
+def test_run_attempt_app_server_no_workspace_change_recovers_with_forced_serialized_pass(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+            patch,
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="915c-recovery",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert len(connector.turns) == 3
+    assert len(connector.exec_failover_turns) == 0
+    assert result.workspace_status["app_server_forced_serialized_recovery_attempted"] is True
+    assert result.workspace_status["app_server_forced_serialized_recovery_succeeded"] is True
+    assert result.workspace_status["app_server_exec_failover_attempted"] is False
+    assert result.workspace_status["app_server_exec_failover_succeeded"] is False
+
+
+def test_run_attempt_app_server_no_workspace_change_recovers_with_exec_failover(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+        ]
+    )
+    connector.exec_failover_outputs = [patch]
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="915c-failover",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert len(connector.turns) == 3
+    assert len(connector.exec_failover_turns) == 1
+    assert result.workspace_status["app_server_forced_serialized_recovery_attempted"] is True
+    assert result.workspace_status["app_server_forced_serialized_recovery_succeeded"] is False
+    assert result.workspace_status["app_server_exec_failover_attempted"] is True
+    assert result.workspace_status["app_server_exec_failover_succeeded"] is True
 
 
 def test_run_attempt_app_server_always_mode_accepts_lenient_named_target_fallback(monkeypatch, tmp_path):

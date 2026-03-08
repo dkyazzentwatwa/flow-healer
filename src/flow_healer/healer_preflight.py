@@ -22,7 +22,6 @@ _CONNECTOR_PROBE_TTL_SECONDS = 300
 _SUPPORTED_SANDBOXES: tuple[tuple[str, str], ...] = (
     ("python", "e2e-smoke/python"),
     ("node", "e2e-smoke/node"),
-    ("swift", "e2e-smoke/swift"),
 )
 
 

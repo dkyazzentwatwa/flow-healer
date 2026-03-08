@@ -708,20 +708,6 @@ def test_e2e_node_issue_to_pr_open(tmp_path: Path, monkeypatch, fake_github) -> 
             "e2e-smoke/node",
             ["npm", "test", "--", "--passWithNoTests"],
         ),
-        (
-            "Swift sandbox regression",
-            "Required code outputs:\n"
-            "- e2e-smoke/swift/Sources/FlowHealerAdd/Add.swift\n"
-            "- e2e-smoke/swift/Tests/FlowHealerAddTests/AddTests.swift\n\n"
-            "Validation:\n"
-            "- cd e2e-smoke/swift && swift test\n",
-            "e2e-smoke/swift/Sources/FlowHealerAdd/Add.swift",
-            "public func add(_ a: Int, _ b: Int) -> Int {\n    a - b\n}\n",
-            "public func add(_ a: Int, _ b: Int) -> Int {\n    a + b\n}\n",
-            "swift",
-            "e2e-smoke/swift",
-            ["swift", "test"],
-        ),
     ],
 )
 def test_e2e_mixed_repo_sandbox_issue_uses_issue_scoped_language_and_root(

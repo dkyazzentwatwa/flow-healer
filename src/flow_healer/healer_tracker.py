@@ -92,6 +92,10 @@ class GitHubHealerTracker:
     def get_last_error(self) -> tuple[str, str]:
         return self._last_error_class, self._last_error_reason
 
+    def _set_last_error(self, *, error_class: str, reason: str) -> None:
+        self._last_error_class = str(error_class or "").strip()
+        self._last_error_reason = str(reason or "").strip()[:500]
+
     def list_ready_issues(
         self,
         *,
@@ -296,7 +300,17 @@ class GitHubHealerTracker:
         body: str,
         base: str = "main",
     ) -> PullRequestResult | None:
-        if not self.enabled:
+        if not self.token:
+            self._set_last_error(
+                error_class="github_auth_missing",
+                reason="GITHUB_TOKEN is missing; cannot create or update pull requests.",
+            )
+            return None
+        if not self.repo_slug:
+            self._set_last_error(
+                error_class="github_repo_unconfigured",
+                reason="Repository slug is missing; cannot create or update pull requests.",
+            )
             return None
 
         existing = self._request_json(
@@ -304,8 +318,15 @@ class GitHubHealerTracker:
         )
         if isinstance(existing, list) and existing:
             pr = existing[0] if isinstance(existing[0], dict) else {}
+            pr_number = int(pr.get("number") or 0)
+            if pr_number <= 0:
+                self._set_last_error(
+                    error_class="github_api_error",
+                    reason="GitHub returned an open-PR payload without a valid PR number.",
+                )
+                return None
             return PullRequestResult(
-                number=int(pr.get("number") or 0),
+                number=pr_number,
                 state=str(pr.get("state") or "open"),
                 html_url=str(pr.get("html_url") or ""),
             )
@@ -321,9 +342,21 @@ class GitHubHealerTracker:
             },
         )
         if not isinstance(payload, dict):
+            self._set_last_error(
+                error_class=self._last_error_class or "github_api_error",
+                reason=self._last_error_reason or "GitHub returned an unexpected response while opening a PR.",
+            )
+            return None
+        pr_number = int(payload.get("number") or 0)
+        if pr_number <= 0:
+            message = str(payload.get("message") or "").strip()
+            self._set_last_error(
+                error_class="github_api_error",
+                reason=message or "GitHub did not return a valid PR number while opening a PR.",
+            )
             return None
         return PullRequestResult(
-            number=int(payload.get("number") or 0),
+            number=pr_number,
             state=str(payload.get("state") or "open"),
             html_url=str(payload.get("html_url") or ""),
         )

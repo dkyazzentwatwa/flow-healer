@@ -1,18 +1,9 @@
-function canPromoteToBigInt(value) {
-  return typeof value === 'bigint' || Number.isSafeInteger(value);
+function isIntegerNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
 }
 
-function isUnsafeIntegerNumber(value) {
-  return typeof value === 'number'
-    && Number.isInteger(value)
-    && !Number.isSafeInteger(value);
-}
-
-function hasMixedBigIntUnsafeNumberBoundary(a, b) {
-  const hasBigIntOperand = typeof a === 'bigint' || typeof b === 'bigint';
-
-  return hasBigIntOperand
-    && (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b));
+function canConvertToBigInt(value) {
+  return typeof value === 'bigint' || isIntegerNumber(value);
 }
 
 function toBigInt(value) {
@@ -25,26 +16,32 @@ function normalizeZero(sum) {
     : (sum === 0 ? 0 : sum);
 }
 
+function hasBigIntOperand(a, b) {
+  return typeof a === 'bigint' || typeof b === 'bigint';
+}
+
+function getInitialAccumulatedSum(operands) {
+  return normalizeZero(operands[0] ?? 0);
+}
+
+function shouldPromoteSafeIntegerSum(a, b, numericSum) {
+  return Number.isSafeInteger(a)
+    && Number.isSafeInteger(b)
+    && !Number.isSafeInteger(numericSum);
+}
+
 function addPair(a, b) {
-  const hasBigIntOperand = typeof a === 'bigint' || typeof b === 'bigint';
-
-  if (hasMixedBigIntUnsafeNumberBoundary(a, b)) {
-    throw new RangeError(
-      'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-    );
-  }
-
   const canPromoteOperandsToBigInt =
-    canPromoteToBigInt(a) && canPromoteToBigInt(b);
+    canConvertToBigInt(a) && canConvertToBigInt(b);
 
   if (canPromoteOperandsToBigInt) {
-    if (hasBigIntOperand) {
+    if (hasBigIntOperand(a, b)) {
       return normalizeZero(toBigInt(a) + toBigInt(b));
     }
 
     const numericSum = a + b;
 
-    if (!Number.isSafeInteger(numericSum)) {
+    if (shouldPromoteSafeIntegerSum(a, b, numericSum)) {
       return normalizeZero(toBigInt(a) + toBigInt(b));
     }
   }
@@ -53,7 +50,9 @@ function addPair(a, b) {
 }
 
 function sumOperands(operands) {
-  let accumulatedSum = normalizeZero(operands[0]);
+  // Start from the original first operand so oversized numbers keep plain-number
+  // semantics until a later bigint operand intentionally promotes the result.
+  let accumulatedSum = getInitialAccumulatedSum(operands);
 
   for (let index = 1; index < operands.length; index += 1) {
     accumulatedSum = addPair(accumulatedSum, operands[index]);
@@ -70,7 +69,7 @@ export function add(...operands) {
   }
 
   if (operandCount === 1) {
-    return normalizeZero(operands[0]);
+    return getInitialAccumulatedSum(operands);
   }
 
   if (operandCount === 2) {

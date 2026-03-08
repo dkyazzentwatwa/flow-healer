@@ -1,4 +1,5 @@
 from flow_healer.healer_task_spec import compile_task_spec, task_spec_to_prompt_block, _is_code_path
+from flow_healer.language_strategies import UnsupportedLanguageError, ensure_supported_language
 
 
 def test_compile_task_spec_defaults_research_issue_to_docs_artifact() -> None:
@@ -289,6 +290,21 @@ def test_compile_task_spec_infers_swift_execution_root_and_validation_command() 
     assert spec.language_source == "issue"
     assert spec.execution_root == "e2e-smoke/swift"
     assert spec.validation_commands == ("cd e2e-smoke/swift && swift test",)
+
+
+def test_compile_task_spec_swift_inference_routes_to_unsupported_language_path() -> None:
+    spec = compile_task_spec(
+        issue_title="Swift sandbox regression",
+        issue_body="Validation: cd e2e-smoke/swift && swift test",
+    )
+
+    assert spec.language == "swift"
+    try:
+        ensure_supported_language(spec.language, source="issue instructions")
+    except UnsupportedLanguageError as exc:
+        assert "supports only python and node" in str(exc)
+    else:
+        raise AssertionError("expected swift issue language to be rejected")
 
 
 def test_task_spec_prompt_block_includes_execution_root_and_validation_commands() -> None:

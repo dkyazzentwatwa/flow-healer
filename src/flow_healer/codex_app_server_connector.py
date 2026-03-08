@@ -12,6 +12,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .protocols import ConnectorTurnResult
+
 
 class CodexAppServerConnector:
     """Connector that talks to `codex app-server` over local stdio JSON-RPC."""
@@ -49,6 +51,7 @@ class CodexAppServerConnector:
         self._server_workspace = ""
         self._stderr_tail: deque[str] = deque(maxlen=20)
         self._stdout_noise_tail: deque[str] = deque(maxlen=20)
+        self._exec_failover_connector: Any | None = None
         self._resolve_command()
 
     def ensure_started(self) -> None:
@@ -104,13 +107,22 @@ class CodexAppServerConnector:
             return thread_id
 
     def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+        return self.run_turn_detailed(thread_id, prompt, timeout_seconds=timeout_seconds).output_text
+
+    def run_turn_detailed(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> ConnectorTurnResult:
         self.ensure_started()
         effective_timeout = float(timeout_seconds) if timeout_seconds is not None else float(self.timeout)
         effective_timeout = max(30.0, effective_timeout)
         with self._lock:
             if not self._available or not self._resolved_command or self._proc is None or self._proc.poll() is not None:
                 reason = self._availability_reason or "Codex app-server is not available."
-                return f"ConnectorUnavailable: {reason}"
+                return ConnectorTurnResult(output_text=f"ConnectorUnavailable: {reason}")
             self._drain_notifications_locked()
             try:
                 response = self._rpc_request_locked(
@@ -137,7 +149,7 @@ class CodexAppServerConnector:
                 self._stop_server_locked()
                 self._available = False
                 self._availability_reason = "Codex app-server timed out and was restarted."
-                return f"ConnectorRuntimeError: {timeout_msg}"
+                return ConnectorTurnResult(output_text=f"ConnectorRuntimeError: {timeout_msg}")
             except Exception as exc:
                 message = str(exc).strip() or "Codex app-server turn failed."
                 self._last_health_error = message[:500]
@@ -149,9 +161,35 @@ class CodexAppServerConnector:
                 self._stop_server_locked()
                 self._available = False
                 self._availability_reason = "Codex app-server failed and was restarted."
-                return f"ConnectorRuntimeError: {message}"
+                return ConnectorTurnResult(output_text=f"ConnectorRuntimeError: {message}")
             self._clear_runtime_error_details()
-            return output.strip()
+            return output
+
+    def run_turn_exec_failover(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> ConnectorTurnResult:
+        del thread_id
+        with self._lock:
+            failover = self._exec_failover_connector
+            if failover is None:
+                from .codex_cli_connector import CodexCliConnector
+
+                failover = CodexCliConnector(
+                    workspace=self.workspace,
+                    codex_command=self.codex_command,
+                    timeout=self.timeout,
+                    model=self.model,
+                    reasoning_effort=self.reasoning_effort,
+                )
+                self._exec_failover_connector = failover
+            else:
+                failover.workspace = self.workspace
+        output_text = failover.run_turn("healer:exec-failover", prompt, timeout_seconds=timeout_seconds)
+        return ConnectorTurnResult(output_text=(output_text or "").strip(), final_answer_present=bool((output_text or "").strip()))
 
     def health_snapshot(self) -> dict[str, str | bool]:
         with self._lock:
@@ -263,7 +301,7 @@ class CodexAppServerConnector:
             params["effort"] = self.reasoning_effort
         return params
 
-    def _await_turn_completion_locked(self, *, thread_id: str, turn_id: str, timeout: float) -> str:
+    def _await_turn_completion_locked(self, *, thread_id: str, turn_id: str, timeout: float) -> ConnectorTurnResult:
         deadline = time.monotonic() + timeout
         delta_by_item: dict[str, list[str]] = {}
         text_by_item: dict[str, str] = {}
@@ -505,10 +543,11 @@ def _render_agent_output(
     text_by_item: dict[str, str],
     delta_by_item: dict[str, list[str]],
     phase_by_item: dict[str, str],
-) -> str:
+) -> ConnectorTurnResult:
     if not item_order:
-        return ""
+        return ConnectorTurnResult(output_text="")
     final_ids = [item_id for item_id in item_order if phase_by_item.get(item_id) == "final_answer"]
+    commentary_ids = [item_id for item_id in item_order if phase_by_item.get(item_id) != "final_answer"]
     candidate_ids = final_ids or [item_order[-1]]
     rendered: list[str] = []
     for item_id in candidate_ids:
@@ -518,7 +557,20 @@ def _render_agent_output(
         text = (text or "").strip()
         if text:
             rendered.append(text)
-    return "\n\n".join(rendered).strip()
+    commentary_tail = ""
+    for item_id in reversed(commentary_ids):
+        text = text_by_item.get(item_id)
+        if text is None:
+            text = "".join(delta_by_item.get(item_id) or [])
+        text = (text or "").strip()
+        if text:
+            commentary_tail = text
+            break
+    return ConnectorTurnResult(
+        output_text="\n\n".join(rendered).strip(),
+        final_answer_present=bool(final_ids),
+        commentary_tail=commentary_tail,
+    )
 
 
 def _format_rpc_error(*, method: str, error: dict[str, Any]) -> str:

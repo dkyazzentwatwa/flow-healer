@@ -1,6 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from types import SimpleNamespace
+import sys
 from types import ModuleType
 
 import pytest
@@ -11,6 +11,13 @@ SMOKE_MATH_PATH = Path(__file__).resolve().parents[1] / "smoke_math.py"
 
 class FancyInt(int):
     """Simple int subclass used to exercise operand normalization."""
+
+
+class IntLikeButNotIntegral:
+    """Mimic numeric coercion hooks without opting into Integral semantics."""
+
+    def __int__(self) -> int:
+        return 9
 
 
 def _load_smoke_math_module() -> ModuleType:
@@ -53,6 +60,18 @@ def _call_add(left: object, right: object) -> int:
     return SMOKE_MATH_MODULE.add(left, right)
 
 
+def _normalize_operand(value: object) -> int:
+    return SMOKE_MATH_MODULE._normalize_operand(value)
+
+
+def _coerce_operands(left: object, right: object) -> tuple[int, int]:
+    return SMOKE_MATH_MODULE._coerce_operands(left, right)
+
+
+def _add_normalized_operands(left: int, right: int) -> int:
+    return SMOKE_MATH_MODULE._add_normalized_operands(left, right)
+
+
 @pytest.mark.parametrize(("left", "right", "expected"), ADD_SUCCESS_CASES)
 def test_add_success_cases_return_expected_sum(
     left: object,
@@ -78,6 +97,162 @@ def test_add_type_error_cases_raise_type_error(
 
 
 @pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        pytest.param("1.0", 1, id="rejects_decimal_string_operand"),
+        pytest.param("1_000", 1, id="rejects_underscored_integer_string_operand"),
+        pytest.param(b"2", 1, id="rejects_bytes_operand"),
+        pytest.param(object(), 1, id="rejects_object_operand"),
+        pytest.param(
+            IntLikeButNotIntegral(),
+            1,
+            id="rejects_int_like_non_integral_operand",
+        ),
+        pytest.param("1\x00", 1, id="rejects_embedded_nul_in_string_operand"),
+    ),
+)
+def test_add_invalid_operands_keep_stable_type_error_message(
+    left: object,
+    right: object,
+) -> None:
+    """Invalid operands should preserve the public exception contract."""
+    with pytest.raises(TypeError) as exc_info:
+        _call_add(left, right)
+
+    assert str(exc_info.value) == SMOKE_MATH_MODULE.ERROR_MESSAGE
+
+
+def test_add_oversized_integer_string_raises_type_error_with_stable_message() -> None:
+    """Digit-limit failures should stay mapped onto the public TypeError."""
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
+        pytest.skip("digit limit disabled in this interpreter")
+
+    oversized_operand = "9" * (limit + 1)
+
+    with pytest.raises(TypeError) as exc_info:
+        _call_add(oversized_operand, 1)
+
+    assert str(exc_info.value) == SMOKE_MATH_MODULE.ERROR_MESSAGE
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        pytest.param(0, 5, id="zero_left_identity_for_positive_int"),
+        pytest.param(-7, 0, id="zero_right_identity_for_negative_int"),
+        pytest.param("0", "12", id="zero_string_identity_for_positive_string"),
+        pytest.param(" -9 ", " 0 ", id="zero_string_identity_for_negative_string"),
+        pytest.param(" +0 ", FancyInt(-4), id="signed_zero_left_identity"),
+        pytest.param(True, "-0", id="signed_zero_right_identity"),
+    ),
+)
+def test_add_preserves_additive_identity(left: object, right: object) -> None:
+    """Adding zero should preserve the other operand's normalized value."""
+    left_value = _normalize_operand(left)
+    right_value = _normalize_operand(right)
+    result = _call_add(left, right)
+
+    if left_value == 0:
+        assert result == right_value
+    else:
+        assert result == left_value
+    assert type(result) is int
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        pytest.param(-4, 4, id="int_operands_cancel_across_signs"),
+        pytest.param(4, -4, id="int_operands_cancel_across_signs_reversed"),
+        pytest.param(" +15 ", "-15", id="string_operands_cancel_across_signs"),
+        pytest.param("-15", " +15 ", id="string_operands_cancel_across_signs_reversed"),
+        pytest.param(FancyInt(-2), True, id="normalized_operands_keep_sign"),
+    ),
+)
+def test_add_preserves_sign_when_operands_cross_zero(
+    left: object,
+    right: object,
+) -> None:
+    """Opposite signed inputs should keep the true arithmetic result."""
+    expected = _normalize_operand(left) + _normalize_operand(right)
+    assert _call_add(left, right) == expected
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        pytest.param("-0", "-0", id="negative_zero_strings_cancel_to_zero"),
+        pytest.param(" +0 ", "-0", id="mixed_signed_zero_strings_cancel_to_zero"),
+        pytest.param("-5", "5", id="signed_strings_cancel_to_additive_identity"),
+        pytest.param(FancyInt(-11), "11", id="integral_and_string_cancel_to_zero"),
+    ),
+)
+def test_add_canonicalizes_zero_when_signed_inputs_cancel(
+    left: object,
+    right: object,
+) -> None:
+    """Cancellation should always land on the plain additive identity."""
+    result = _call_add(left, right)
+    assert result == 0
+    assert type(result) is int
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        pytest.param(-23, 23, id="ints_cancel_directly"),
+        pytest.param(23, -23, id="ints_cancel_directly_reversed"),
+        pytest.param(-1, 1, id="unit_values_cancel_directly"),
+    ),
+)
+def test_add_normalized_operands_short_circuits_cancelled_pairs(
+    left: int,
+    right: int,
+) -> None:
+    """Already-normalized opposite values should resolve to canonical zero."""
+    result = _add_normalized_operands(left, right)
+    assert result == 0
+    assert type(result) is int
+
+
+def test_coerce_operands_normalizes_string_and_numeric_inputs_together() -> None:
+    """Shared operand coercion should return plain ints before addition."""
+    assert _coerce_operands(" +8 ", FancyInt(-3)) == (8, -3)
+
+
+def test_coerce_operands_normalizes_bool_before_integral_fallback() -> None:
+    """Bool operands should stay explicitly supported through shared coercion."""
+    assert _coerce_operands(True, " 2 ") == (1, 2)
+
+
+def test_add3_preserves_identity_across_signed_inputs() -> None:
+    """Composed additions should keep the same identity guarantees."""
+    assert SMOKE_MATH_MODULE.add3(" +0 ", FancyInt(-6), " 0 ") == -6
+
+
+def test_add3_keeps_cancellation_and_identity_stable() -> None:
+    """Composed additions should preserve zero after opposite signed sums cancel."""
+    result = SMOKE_MATH_MODULE.add3("-8", "8", "-0")
+    assert result == 0
+    assert type(result) is int
+
+
+def test_add3_keeps_signed_identity_for_non_zero_result() -> None:
+    """Composed additions should preserve sign when only the final term is zero."""
+    result = SMOKE_MATH_MODULE.add3("-5", "2", "0")
+    assert result == -3
+    assert type(result) is int
+
+
+def test_add3_preserves_additive_identity_after_signed_zero_cancellation() -> None:
+    """A signed-zero partial sum should remain a true identity for the final term."""
+    result = SMOKE_MATH_MODULE.add3("-0", " +0 ", FancyInt(9))
+    assert result == 9
+    assert type(result) is int
+
+
+@pytest.mark.parametrize(
     ("cases", "expected_size"),
     (
         pytest.param(
@@ -98,13 +273,3 @@ def test_add_case_groups_keep_expected_coverage_shape(
 ) -> None:
     """Keep each smoke coverage group intentionally compact."""
     assert len(cases) == expected_size
-
-
-def test_missing_digit_guardrail_api_falls_back_to_unlimited_strings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Treat runtimes without the digit-limit API as having no guardrail."""
-    monkeypatch.setattr(SMOKE_MATH_MODULE, "sys", SimpleNamespace())
-
-    assert SMOKE_MATH_MODULE._get_max_integer_string_digits() == 0
-    assert SMOKE_MATH_MODULE._has_supported_digit_count("9" * 5000) is True

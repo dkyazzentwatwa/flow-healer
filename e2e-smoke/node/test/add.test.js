@@ -160,41 +160,14 @@ test('add keeps unsafe integer number inputs on normal number semantics', () => 
   assert.equal(add(oversizedNumber, 1), oversizedNumber + 1);
 });
 
-test('add rejects mixed bigint and unsafe integer number inputs with a clear boundary error', () => {
-  assert.throws(
-    () => add(1n, Number.MAX_SAFE_INTEGER + 1),
-    {
-      name: 'RangeError',
-      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-    },
-  );
-  assert.throws(
-    () => add(Number.MIN_SAFE_INTEGER - 1, 1n),
-    {
-      name: 'RangeError',
-      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-    },
-  );
-});
+test('add supports bigint mixed with integer numbers beyond safe precision', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+  const oversizedNegativeNumber = Number.MIN_SAFE_INTEGER - 2;
 
-test('add keeps bigint-promoted variadic sums guarded from later unsafe integer number inputs', () => {
-  assert.throws(
-    () => add(0, Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER + 1),
-    {
-      name: 'RangeError',
-      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-    },
-  );
-});
-
-test('add rejects the first unsafe number past the bigint promotion boundary', () => {
-  assert.throws(
-    () => add(0, Number.MAX_SAFE_INTEGER, 1, 1n, Number.MAX_SAFE_INTEGER + 1),
-    {
-      name: 'RangeError',
-      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-    },
-  );
+  assert.equal(add(oversizedNumber, 1n), 9007199254740993n);
+  assert.equal(add(1n, oversizedNumber), 9007199254740993n);
+  assert.equal(add(oversizedNegativeNumber, 1n), BigInt(oversizedNegativeNumber) + 1n);
+  assert.equal(add(1n, oversizedNegativeNumber), 1n + BigInt(oversizedNegativeNumber));
 });
 
 test('add keeps existing single-value and empty-call behavior', () => {
@@ -209,17 +182,11 @@ test('add keeps existing single-value and empty-call behavior', () => {
 test('add supports variadic invocation helpers without changing promotion rules', () => {
   const overflowingInputs = [0, Number.MAX_SAFE_INTEGER, 2];
   const mixedInputs = [1n, 2, 3, 4];
-  const singleNumberInput = [-0];
-  const singleBigIntInput = [0n];
 
   assert.equal(add.apply(null, []), 0);
-  assert.equal(add.apply(null, singleNumberInput), 0);
-  assert.equal(add.apply(null, singleBigIntInput), 0n);
   assert.equal(add.apply(null, overflowingInputs), 9007199254740993n);
   assert.equal(add.apply(null, mixedInputs), 10n);
   assert.equal(add.call(null), 0);
-  assert.equal(add.call(null, ...singleNumberInput), 0);
-  assert.equal(add.call(null, ...singleBigIntInput), 0n);
   assert.equal(add.call(null, ...overflowingInputs), 9007199254740993n);
   assert.equal(add.call(null, ...mixedInputs), 10n);
 });
@@ -240,4 +207,42 @@ test('add handles large bigint inputs', () => {
 test('add handles negative bigint combinations', () => {
   assert.equal(add(-9_007_199_254_740_991n, 1n), -9_007_199_254_740_990n);
   assert.equal(add(-4n, 4n), 0n);
+});
+
+test('add keeps bigint accumulation stable after integer number rounding inputs', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+
+  assert.equal(add(oversizedNumber, 1n, -1n), 9007199254740992n);
+});
+
+test('add preserves bigint promotion after a zero-prefixed safe integer boundary', () => {
+  assert.equal(add(0, Number.MAX_SAFE_INTEGER - 1, 1, 1), 9007199254740992n);
+});
+
+test('add preserves bigint semantics when an oversized number starts the list', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+
+  assert.equal(add(0n, oversizedNumber, -1n), 9007199254740991n);
+});
+
+test('add promotes an oversized leading number once a later bigint appears', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+
+  assert.equal(add(oversizedNumber, 1n, 1), 9007199254740994n);
+});
+
+test('add keeps a leading negative zero normalized before bigint promotion', () => {
+  assert.equal(add(-0, 1n, -1), 0n);
+});
+
+test('add preserves an oversized integer until a later bigint promotes the sum', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+
+  assert.equal(add(oversizedNumber, 0, 1n), 9007199254740993n);
+});
+
+test('add preserves an oversized integer through negative zero before bigint promotion', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+
+  assert.equal(add(oversizedNumber, -0, 1n), 9007199254740993n);
 });

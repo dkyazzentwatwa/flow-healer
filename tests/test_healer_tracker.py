@@ -386,3 +386,47 @@ def test_viewer_login_uses_authenticated_user(monkeypatch):
     monkeypatch.setattr(tracker, "_request_json", fake_request)
     assert tracker.viewer_login() == "healer-service"
     assert tracker.viewer_login() == "healer-service"
+
+
+def test_open_or_update_pr_sets_auth_error_when_token_missing():
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="")
+    tracker.repo_slug = "owner/repo"
+
+    pr = tracker.open_or_update_pr(
+        issue_id="123",
+        branch="healer/issue-123",
+        title="healer: fix issue #123",
+        body="body",
+        base="main",
+    )
+
+    assert pr is None
+    error_class, error_reason = tracker.get_last_error()
+    assert error_class == "github_auth_missing"
+    assert "GITHUB_TOKEN" in error_reason
+
+
+def test_open_or_update_pr_rejects_payload_without_number(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        if method == "GET":
+            return []
+        assert method == "POST"
+        return {"message": "Validation Failed"}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    pr = tracker.open_or_update_pr(
+        issue_id="123",
+        branch="healer/issue-123",
+        title="healer: fix issue #123",
+        body="body",
+        base="main",
+    )
+
+    assert pr is None
+    error_class, error_reason = tracker.get_last_error()
+    assert error_class == "github_api_error"
+    assert "Validation Failed" in error_reason

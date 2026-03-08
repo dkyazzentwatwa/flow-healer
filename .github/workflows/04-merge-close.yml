@@ -1,0 +1,80 @@
+name: 04 Merge and Close
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to merge
+        required: true
+        type: string
+      issue_number:
+        description: Optional issue number to close after merge
+        required: false
+        type: string
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  merge_close:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && github.event.action == 'created' &&
+       contains(github.event.comment.body, '/agent merge-close') &&
+       github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install GitHub CLI and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+
+      - name: Resolve target numbers
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ github.event.inputs.pr_number }}
+          INPUT_ISSUE: ${{ github.event.inputs.issue_number }}
+          COMMENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "pr_number=${INPUT_PR}" >> "$GITHUB_OUTPUT"
+            echo "issue_number=${INPUT_ISSUE}" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr_number=${COMMENT_ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+            issue_no="$(echo "${COMMENT_BODY}" | sed -nE 's|.*close[[:space:]]+#([0-9]+).*|\1|p' | head -n1)"
+            echo "issue_number=${issue_no}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure checks passed, then merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+        run: |
+          checks_state="$(gh pr view "${PR_NUMBER}" --json statusCheckRollup -q '
+            if (.statusCheckRollup | length) == 0 then "pending"
+            elif any(.statusCheckRollup[]; (.conclusion == "FAILURE") or (.conclusion == "CANCELLED") or (.conclusion == "TIMED_OUT") or (.conclusion == "ACTION_REQUIRED") or (.state == "FAILURE") or (.state == "ERROR") or (.state == "PENDING")) then "not_green"
+            else "green" end
+          ')"
+          if [[ "${checks_state}" != "green" ]]; then
+            echo "Refusing merge: status checks are not fully green (${checks_state})."
+            exit 1
+          fi
+          gh pr merge "${PR_NUMBER}" --squash --auto=false --delete-branch
+
+      - name: Close linked issue (optional)
+        if: steps.target.outputs.issue_number != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.target.outputs.issue_number }}
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --body "Closed after merging #${PR_NUMBER}."
+          gh issue close "${ISSUE_NUMBER}"

@@ -18,6 +18,7 @@ from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker
 from .healer_triage import classify_issue_route
 from .local_healer_tracker import LocalHealerTracker
+from .protocols import ConnectorProtocol
 from .skill_contracts import audit_skill_contracts
 from .store import SQLiteStore
 
@@ -29,6 +30,7 @@ class RepoRuntime:
     loop: AutonomousHealerLoop
     tracker: GitHubHealerTracker | LocalHealerTracker
     connector: object
+    connectors_by_backend: dict[str, ConnectorProtocol]
 
 
 class FlowHealerService:
@@ -58,26 +60,57 @@ class FlowHealerService:
                 poll_use_conditional_requests=repo.healer_poll_use_conditional_requests,
                 poll_etag_ttl_seconds=repo.healer_poll_etag_ttl_seconds,
             )
-        if self.config.service.connector_backend == "app_server":
-            connector = CodexAppServerConnector(
+        def _build_connector(backend: str) -> ConnectorProtocol:
+            if backend == "app_server":
+                return CodexAppServerConnector(
+                    workspace=repo.healer_repo_path,
+                    codex_command=self.config.service.connector_command,
+                    timeout=self.config.service.connector_timeout_seconds,
+                    model=self.config.service.connector_model,
+                    reasoning_effort=self.config.service.connector_reasoning_effort,
+                )
+            return CodexCliConnector(
                 workspace=repo.healer_repo_path,
                 codex_command=self.config.service.connector_command,
                 timeout=self.config.service.connector_timeout_seconds,
                 model=self.config.service.connector_model,
                 reasoning_effort=self.config.service.connector_reasoning_effort,
             )
+
+        routing_mode = self.config.service.connector_routing_mode
+        if routing_mode == "exec_for_code":
+            code_backend = self.config.service.code_connector_backend
+            non_code_backend = self.config.service.non_code_connector_backend
+            connectors_by_backend: dict[str, ConnectorProtocol] = {}
+            for backend in {code_backend, non_code_backend}:
+                connectors_by_backend[backend] = _build_connector(backend)
+            connector = connectors_by_backend[code_backend]
         else:
-            connector = CodexCliConnector(
-                workspace=repo.healer_repo_path,
-                codex_command=self.config.service.connector_command,
-                timeout=self.config.service.connector_timeout_seconds,
-                model=self.config.service.connector_model,
-                reasoning_effort=self.config.service.connector_reasoning_effort,
-            )
-        loop = AutonomousHealerLoop(settings=repo, store=store, connector=connector, tracker=tracker)
+            code_backend = self.config.service.connector_backend
+            non_code_backend = self.config.service.connector_backend
+            connector = _build_connector(self.config.service.connector_backend)
+            connectors_by_backend = {self.config.service.connector_backend: connector}
+
+        loop = AutonomousHealerLoop(
+            settings=repo,
+            store=store,
+            connector=connector,
+            tracker=tracker,
+            connectors_by_backend=connectors_by_backend,
+            connector_routing_mode=routing_mode,
+            code_connector_backend=code_backend,
+            non_code_connector_backend=non_code_backend,
+        )
         if repo.healer_repo_slug and not loop.tracker.repo_slug:
             loop.tracker.repo_slug = repo.healer_repo_slug
-        return RepoRuntime(settings=repo, store=store, loop=loop, tracker=loop.tracker, connector=connector)
+        return RepoRuntime(
+            settings=repo,
+            store=store,
+            loop=loop,
+            tracker=loop.tracker,
+            connector=connector,
+            connectors_by_backend=connectors_by_backend,
+        )
 
     def start(self, repo_name: str | None = None, *, once: bool = False) -> None:
         repos = self.config.select_repos(repo_name)
@@ -108,7 +141,7 @@ class FlowHealerService:
             runtime = self.build_runtime(repo)
             try:
                 connector_health = runtime.loop._connector_health_snapshot()
-                tracker_health = runtime.loop._tracker_health_snapshot()
+                connector_health_by_backend = runtime.loop._connector_health_by_backend()
                 runtime.loop._record_connector_health(connector_health)
                 issues = runtime.store.list_healer_issues(limit=500)
                 issues_by_id = {str(issue.get("issue_id") or ""): issue for issue in issues}
@@ -157,6 +190,9 @@ class FlowHealerService:
                         },
                         "connector": {
                             "backend": self.config.service.connector_backend,
+                            "routing_mode": runtime.loop.connector_routing_mode,
+                            "code_backend": runtime.loop.code_connector_backend,
+                            "non_code_backend": runtime.loop.non_code_connector_backend,
                             "available": connector_health.get("available"),
                             "configured_command": connector_health.get("configured_command"),
                             "resolved_command": connector_health.get("resolved_command"),
@@ -173,13 +209,13 @@ class FlowHealerService:
                             "last_failure_fingerprint_issue_id": runtime.store.get_state("healer_last_failure_fingerprint_issue_id") or "",
                             "last_failure_fingerprint_class": runtime.store.get_state("healer_last_failure_fingerprint_class") or "",
                             "last_contamination_paths": runtime.store.get_state("healer_last_contamination_paths") or "",
+                            "backends": connector_health_by_backend,
                         },
                         "tracker": {
-                            "backend": tracker_health.get("backend"),
-                            "enabled": tracker_health.get("enabled"),
-                            "repo_slug": tracker_health.get("repo_slug"),
-                            "last_error_class": tracker_health.get("last_error_class"),
-                            "last_error_reason": tracker_health.get("last_error_reason"),
+                            "available": runtime.store.get_state("healer_tracker_available") != "false",
+                            "last_error_class": runtime.store.get_state("healer_tracker_last_error_class") or "",
+                            "last_error_reason": runtime.store.get_state("healer_tracker_last_error_reason") or "",
+                            "last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
                         },
                         "resource_audit": HealerReconciler(
                             store=runtime.store,
@@ -255,7 +291,7 @@ class FlowHealerService:
                     else list_cached_preflight_reports(store=runtime.store, gate_mode=repo.healer_test_gate_mode)
                 )
                 connector_health = runtime.loop._connector_health_snapshot()
-                tracker_health = runtime.loop._tracker_health_snapshot()
+                connector_health_by_backend = runtime.loop._connector_health_by_backend()
                 runtime.loop._record_connector_health(connector_health)
                 breaker = runtime.loop._circuit_breaker_status()
                 git_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"])
@@ -270,6 +306,9 @@ class FlowHealerService:
                         "docker": docker_present,
                         "codex": bool(connector_health.get("available")),
                         "connector_backend": self.config.service.connector_backend,
+                        "connector_routing_mode": runtime.loop.connector_routing_mode,
+                        "code_connector_backend": runtime.loop.code_connector_backend,
+                        "non_code_connector_backend": runtime.loop.non_code_connector_backend,
                         "connector_command": self.config.service.connector_command,
                         "connector_resolved_command": connector_health.get("resolved_command"),
                         "connector_availability_reason": connector_health.get("availability_reason"),
@@ -277,11 +316,7 @@ class FlowHealerService:
                         "connector_last_runtime_error_kind": connector_health.get("last_runtime_error_kind"),
                         "connector_last_runtime_stdout_tail": connector_health.get("last_runtime_stdout_tail"),
                         "connector_last_runtime_stderr_tail": connector_health.get("last_runtime_stderr_tail"),
-                        "tracker_backend": tracker_health.get("backend"),
-                        "tracker_enabled": tracker_health.get("enabled"),
-                        "tracker_repo_slug": tracker_health.get("repo_slug"),
-                        "tracker_last_error_class": tracker_health.get("last_error_class"),
-                        "tracker_last_error_reason": tracker_health.get("last_error_reason"),
+                        "connector_backends": connector_health_by_backend,
                         "last_failure_fingerprint": runtime.store.get_state("healer_last_failure_fingerprint") or "",
                         "last_failure_fingerprint_issue_id": runtime.store.get_state("healer_last_failure_fingerprint_issue_id") or "",
                         "last_failure_fingerprint_class": runtime.store.get_state("healer_last_failure_fingerprint_class") or "",
@@ -291,6 +326,10 @@ class FlowHealerService:
                         "launchd_path_connector": launchd_path_connector or "",
                         "github_token_env": token_name,
                         "github_token_present": token_present,
+                        "tracker_available": runtime.store.get_state("healer_tracker_available") != "false",
+                        "tracker_last_error_class": runtime.store.get_state("healer_tracker_last_error_class") or "",
+                        "tracker_last_error_reason": runtime.store.get_state("healer_tracker_last_error_reason") or "",
+                        "tracker_last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
                         "preflight_gate_mode": repo.healer_test_gate_mode,
                         "preflight_reports": [
                             {
@@ -330,10 +369,15 @@ class FlowHealerService:
 
     @staticmethod
     def _close_runtime(runtime: RepoRuntime) -> None:
-        try:
-            runtime.connector.shutdown()  # type: ignore[call-arg]
-        except Exception:
-            pass
+        closed: set[int] = set()
+        for connector in runtime.connectors_by_backend.values():
+            if id(connector) in closed:
+                continue
+            try:
+                connector.shutdown()  # type: ignore[call-arg]
+            except Exception:
+                pass
+            closed.add(id(connector))
         runtime.store.close()
 
 
@@ -354,6 +398,10 @@ def _app_server_metrics(store: SQLiteStore) -> dict[str, object]:
     attempts = _safe_state_int(store, "app_server_attempts")
     with_material_diff = _safe_state_int(store, "app_server_attempts_with_material_diff")
     with_zero_diff = _safe_state_int(store, "app_server_attempts_with_zero_diff")
+    forced_recovery_attempts = _safe_state_int(store, "app_server_forced_serialized_recovery_attempts")
+    forced_recovery_success = _safe_state_int(store, "app_server_forced_serialized_recovery_success")
+    exec_failover_attempts = _safe_state_int(store, "app_server_exec_failover_attempts")
+    exec_failover_success = _safe_state_int(store, "app_server_exec_failover_success")
     task_kinds = ("fix", "build", "docs", "research", "unknown")
     zero_diff_rate_by_task_kind: dict[str, float] = {}
     for task_kind in task_kinds:
@@ -366,6 +414,10 @@ def _app_server_metrics(store: SQLiteStore) -> dict[str, object]:
         "app_server_attempts": attempts,
         "app_server_attempts_with_material_diff": with_material_diff,
         "app_server_attempts_with_zero_diff": with_zero_diff,
+        "app_server_forced_serialized_recovery_attempts": forced_recovery_attempts,
+        "app_server_forced_serialized_recovery_success": forced_recovery_success,
+        "app_server_exec_failover_attempts": exec_failover_attempts,
+        "app_server_exec_failover_success": exec_failover_success,
         "zero_diff_rate_by_task_kind": zero_diff_rate_by_task_kind,
     }
 

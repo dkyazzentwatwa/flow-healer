@@ -14,6 +14,7 @@ from flow_healer.healer_loop import (
 from flow_healer.healer_preflight import PreflightReport
 from flow_healer.healer_task_spec import HealerTaskSpec
 from flow_healer.healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
+from flow_healer.language_strategies import UnsupportedLanguageError
 from flow_healer.store import SQLiteStore
 
 
@@ -122,6 +123,14 @@ def _make_loop(store, **overrides):
     )
     loop._last_scan_started_at = overrides.get("_last_scan_started_at", 0.0)
     loop.connector = overrides.get("connector", _HealthyConnector())
+    loop.connector_routing_mode = overrides.get("connector_routing_mode", "single_backend")
+    loop.code_connector_backend = overrides.get("code_connector_backend", "exec")
+    loop.non_code_connector_backend = overrides.get("non_code_connector_backend", "app_server")
+    loop.connectors_by_backend = overrides.get("connectors_by_backend", {"exec": loop.connector})
+    loop.runners_by_backend = overrides.get("runners_by_backend", {"exec": loop.runner})
+    loop.verifiers_by_backend = overrides.get("verifiers_by_backend", {"exec": loop.verifier})
+    loop.reviewers_by_backend = overrides.get("reviewers_by_backend", {"exec": loop.reviewer})
+    loop.preflight_by_backend = overrides.get("preflight_by_backend", {"exec": loop.preflight})
     return loop
 
 
@@ -688,6 +697,92 @@ def test_process_claimed_issue_lock_conflict_requeues_without_attempt_increment(
     loop.runner.run_attempt.assert_not_called()
 
 
+def test_process_claimed_issue_archives_and_closes_unsupported_language_before_workspace(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50431",
+        repo="owner/repo",
+        title="Go sandbox issue",
+        body="Validation: cd e2e-smoke/go && go test ./...",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {"issue_id": "50431", "state": "open", "labels": ["healer:ready"]}
+    loop.tracker.close_issue.return_value = True
+    loop.runner.resolve_execution.side_effect = UnsupportedLanguageError("Language 'go' is not supported.")
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50431")
+    attempts = store.list_healer_attempts(issue_id="50431")
+    assert issue is not None
+    assert issue["state"] == "archived"
+    assert issue["pr_state"] == "closed"
+    assert issue["attempt_count"] == 0
+    assert issue["last_failure_class"] == "unsupported_language"
+    assert "not supported" in str(issue["last_failure_reason"] or "")
+    assert attempts == []
+    loop.tracker.close_issue.assert_called_once_with(issue_id="50431")
+    loop.workspace_manager.ensure_workspace.assert_not_called()
+    loop.runner.run_attempt.assert_not_called()
+    comment_body = loop.tracker.add_issue_comment.call_args.kwargs["body"]
+    assert "python" in comment_body.lower()
+    assert "node" in comment_body.lower()
+    assert "migrate" in comment_body.lower()
+
+
+def test_process_claimed_issue_archives_and_closes_unsupported_language_after_workspace(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50432",
+        repo="owner/repo",
+        title="Ruby sandbox issue",
+        body="Validation: cd e2e-smoke/ruby && bundle exec rspec",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    workspace = tmp_path / "workspaces" / "issue-50432"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50432", "state": "open", "labels": ["healer:ready"]}
+    loop.tracker.close_issue.return_value = True
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50432")
+    loop.runner.resolve_execution.side_effect = [
+        SimpleNamespace(language_effective="python", language_detected="python", execution_root=""),
+        UnsupportedLanguageError("Language 'ruby' is not supported."),
+    ]
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50432")
+    attempts = store.list_healer_attempts(issue_id="50432")
+    assert issue is not None
+    assert issue["state"] == "archived"
+    assert issue["pr_state"] == "closed"
+    assert issue["attempt_count"] == 0
+    assert issue["last_failure_class"] == "unsupported_language"
+    assert "ruby" in str(issue["last_failure_reason"] or "").lower()
+    assert attempts == []
+    loop.dispatcher.acquire_prediction_locks.assert_not_called()
+    loop.tracker.close_issue.assert_called_once_with(issue_id="50432")
+    loop.runner.run_attempt.assert_not_called()
+    comment_body = loop.tracker.add_issue_comment.call_args.kwargs["body"]
+    assert "python" in comment_body.lower()
+    assert "node" in comment_body.lower()
+    assert "migrate" in comment_body.lower()
+
+
 def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -803,6 +898,62 @@ def test_process_claimed_issue_passes_staged_diff_payload_to_verifier(tmp_path):
     assert verify_kwargs["staged_diff_content"].startswith("diff --git")
     assert verify_kwargs["staged_diff_metadata"]["diff_files"] == 1
     assert verify_kwargs["staged_diff_metadata"]["staged_paths"] == ["src/flow_healer/service.py"]
+
+
+def test_process_claimed_issue_uses_tracker_error_details_when_pr_open_fails(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50442",
+        repo="owner/repo",
+        title="Issue 50442",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-50442"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50442", "state": "open", "labels": ["healer:ready"]}
+    loop.tracker.get_last_error.return_value = (
+        "github_auth_missing",
+        "GITHUB_TOKEN is missing; cannot create PR.",
+    )
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50442")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="ok",
+        verdict="pass",
+        hard_failure=False,
+        parse_error=False,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.tracker.open_or_update_pr.return_value = None
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50442")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "github_auth_missing"
+    assert "GITHUB_TOKEN is missing" in issue["last_failure_reason"]
+    assert store.get_state("healer_tracker_last_error_class") == "github_auth_missing"
 
 
 def test_process_claimed_issue_blocks_when_required_verifier_soft_fails(tmp_path):
@@ -2161,14 +2312,58 @@ def test_record_app_server_attempt_metrics_tracks_zero_diff_and_task_kind(tmp_pa
     app_server_cls = type("CodexAppServerConnector", (_HealthyConnector,), {})
     loop = _make_loop(store, connector=app_server_cls())
 
-    loop._record_app_server_attempt_metrics(task_kind="fix", had_material_diff=False)
-    loop._record_app_server_attempt_metrics(task_kind="fix", had_material_diff=True)
+    loop._record_app_server_attempt_metrics(connector=loop.connector, task_kind="fix", had_material_diff=False)
+    loop._record_app_server_attempt_metrics(connector=loop.connector, task_kind="fix", had_material_diff=True)
 
     assert store.get_state("app_server_attempts") == "2"
     assert store.get_state("app_server_attempts_with_material_diff") == "1"
     assert store.get_state("app_server_attempts_with_zero_diff") == "1"
     assert store.get_state("app_server_attempts_task_kind_fix") == "2"
     assert store.get_state("app_server_attempts_with_zero_diff_task_kind_fix") == "1"
+
+
+def test_select_backend_for_task_routes_code_to_exec_in_exec_for_code_mode(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        connector_routing_mode="exec_for_code",
+        code_connector_backend="exec",
+        non_code_connector_backend="app_server",
+    )
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/flow_healer/healer_loop.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    backend = loop._select_backend_for_task(task_spec)
+
+    assert backend == "exec"
+
+
+def test_select_backend_for_task_routes_docs_to_non_code_backend(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        connector_routing_mode="exec_for_code",
+        code_connector_backend="exec",
+        non_code_connector_backend="app_server",
+    )
+    task_spec = HealerTaskSpec(
+        task_kind="docs",
+        output_mode="artifact",
+        output_targets=("docs/plan.md",),
+        tool_policy="repo_only",
+        validation_profile="artifact_only",
+    )
+
+    backend = loop._select_backend_for_task(task_spec)
+
+    assert backend == "app_server"
 
 
 def test_tick_once_skips_claim_when_connector_unavailable(tmp_path):
@@ -2189,6 +2384,19 @@ def test_tick_once_skips_claim_when_connector_unavailable(tmp_path):
 
     loop.dispatcher.claim_next_issue.assert_not_called()
     assert store.get_state("healer_connector_available") == "false"
+
+
+def test_tick_once_skips_cycle_when_tracker_unavailable(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    loop.tracker.enabled = False
+
+    loop._tick_once()
+
+    loop.dispatcher.claim_next_issue.assert_not_called()
+    assert store.get_state("healer_tracker_available") == "false"
+    assert store.get_state("healer_tracker_last_error_class") == "github_auth_missing"
 
 
 def test_tick_once_runs_reconciler_before_paused_return(tmp_path):

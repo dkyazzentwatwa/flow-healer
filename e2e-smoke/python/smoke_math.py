@@ -8,73 +8,116 @@ from numbers import Integral
 ERROR_MESSAGE = "add() operands must be integers or integer strings"
 _INTEGER_STRING_PATTERN = re.compile(r"[+-]?[0-9]+")
 _ASCII_WHITESPACE = " \t\n\r\v\f"
-_DISALLOWED_STRING_CHARACTERS = ("\x00",)
 
 
-def _get_max_integer_string_digits() -> int:
-    """Return the active interpreter guardrail for integer-string parsing."""
-    get_max_digits = getattr(sys, "get_int_max_str_digits", None)
-    if get_max_digits is None:
-        return 0
+def _operand_type_error(*, cause: Exception | None = None) -> TypeError:
+    """Build the stable operand TypeError used by the smoke sandbox."""
+    error = TypeError(ERROR_MESSAGE)
+    if cause is not None:
+        error.__cause__ = cause
+    return error
 
-    return int(get_max_digits())
 
-
-def _has_supported_digit_count(value: str) -> bool:
-    """Return whether a normalized integer string fits Python's digit limit."""
-    unsigned_value = value.removeprefix("+").removeprefix("-")
-    max_integer_string_digits = _get_max_integer_string_digits()
-    if max_integer_string_digits == 0:
+def _fits_python_integer_string_limit(value: str) -> bool:
+    """Mirror the interpreter's integer-string digit guardrail."""
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
         return True
 
-    return len(unsigned_value) <= max_integer_string_digits
+    unsigned_value = value.removeprefix("+").removeprefix("-")
+    return len(unsigned_value) <= limit
 
 
-def _normalize_integer_string(value: str) -> int:
-    """Return an integer parsed from a supported string operand."""
-    stripped_value = str.__str__(value).strip(_ASCII_WHITESPACE)
-    if not stripped_value:
-        raise TypeError(ERROR_MESSAGE)
+def _normalize_string_operand(value: str) -> int:
+    """Parse a supported integer string operand into a plain int."""
+    normalized_value = _strip_ascii_whitespace(value)
+    if not normalized_value or "\x00" in normalized_value:
+        raise _operand_type_error()
 
-    if any(character in stripped_value for character in _DISALLOWED_STRING_CHARACTERS):
-        raise TypeError(ERROR_MESSAGE)
+    if not _INTEGER_STRING_PATTERN.fullmatch(normalized_value):
+        raise _operand_type_error()
 
-    if not _INTEGER_STRING_PATTERN.fullmatch(stripped_value):
-        raise TypeError(ERROR_MESSAGE)
-
-    if not _has_supported_digit_count(stripped_value):
-        raise TypeError(ERROR_MESSAGE)
+    if not _fits_python_integer_string_limit(normalized_value):
+        raise _operand_type_error()
 
     try:
-        return int(stripped_value)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(ERROR_MESSAGE) from exc
+        return int(normalized_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _operand_type_error(cause=exc)
 
 
 def _normalize_integral_operand(value: Integral) -> int:
-    """Return a plain integer for supported integral operands."""
+    """Coerce supported integral operands while keeping TypeErrors stable."""
     try:
         return int(value)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise TypeError(ERROR_MESSAGE) from exc
+        raise _operand_type_error(cause=exc)
+
+
+def _normalize_bool_operand(value: bool) -> int:
+    """Keep bool acceptance explicit even though bool is also an Integral."""
+    return int(value)
+
+
+def _strip_ascii_whitespace(value: str) -> str:
+    """Trim ASCII whitespace without altering non-string operand handling."""
+    return value.strip(_ASCII_WHITESPACE)
 
 
 def _normalize_operand(value: int | str) -> int:
-    """Return an integer for a supported operand."""
+    """Return a plain integer for supported smoke-test operands."""
     if isinstance(value, bool):
-        return int(value)
+        return _normalize_bool_operand(value)
 
     if isinstance(value, Integral):
         return _normalize_integral_operand(value)
 
     if isinstance(value, str):
-        return _normalize_integer_string(value)
+        return _normalize_string_operand(value)
 
-    raise TypeError(ERROR_MESSAGE)
+    raise _operand_type_error()
+
+
+def _coerce_operands(left: int | str, right: int | str) -> tuple[int, int]:
+    """Normalize both operands before addition so coercion stays explicit."""
+    return _normalize_operand(left), _normalize_operand(right)
+
+
+def _canonicalize_zero(value: int) -> int:
+    """Collapse any computed zero onto the additive identity singleton."""
+    if value == 0:
+        return 0
+    return int(value)
+
+
+def _is_additive_identity(value: int) -> bool:
+    """Return whether a normalized operand is the additive identity."""
+    return value == 0
+
+
+def _operands_cancel_to_zero(left: int, right: int) -> bool:
+    """Return whether opposite-signed operands collapse onto additive identity."""
+    return left == -right
+
+
+def _add_normalized_operands(left: int, right: int) -> int:
+    """Add normalized ints while preserving zero identity and sign semantics."""
+    if _is_additive_identity(left):
+        return _canonicalize_zero(right)
+    if _is_additive_identity(right):
+        return _canonicalize_zero(left)
+    if _operands_cancel_to_zero(left, right):
+        return 0
+    return _canonicalize_zero(left + right)
 
 
 def add(left: int | str, right: int | str) -> int:
     """Return the sum of two supported operands as an integer."""
-    normalized_left = _normalize_operand(left)
-    normalized_right = _normalize_operand(right)
-    return normalized_left + normalized_right
+    normalized_left, normalized_right = _coerce_operands(left, right)
+    return _add_normalized_operands(normalized_left, normalized_right)
+
+
+def add3(first: int | str, second: int | str, third: int | str) -> int:
+    """Compose two additions so identity and sign handling stay consistent."""
+    partial_sum = add(first, second)
+    return add(partial_sum, third)

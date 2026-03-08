@@ -1,0 +1,48 @@
+name: Agent Job
+description: Request a one-shot agent run for a repository task.
+title: "Agent job: "
+labels:
+  - agent:ready
+  - agent:codex
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to describe a task for the agent worker.
+
+        Commands:
+        - `/codex fix` or `/agent retry` in a comment will re-run the worker.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Task summary
+      description: What should be fixed or changed?
+      placeholder: Describe the bug or requested update.
+    validations:
+      required: true
+  - type: textarea
+    id: required_outputs
+    attributes:
+      label: Required code outputs
+      description: Optional list of output files expected from the run.
+      placeholder: |
+        - src/example.py
+        - tests/test_example.py
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation commands
+      description: Optional commands the agent should satisfy.
+      placeholder: |
+        - pytest -q
+    validations:
+      required: false
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checks
+      options:
+        - label: I confirmed this issue is in scope for automated changes.
+          required: true
