@@ -280,6 +280,15 @@ test('add preserves negative-zero normalization before rejecting bigint promotio
   });
 });
 
+test('add rejects a later bigint even if earlier unsafe integer rounding returns to safety', () => {
+  const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
+
+  assert.throws(() => add(oversizedNumber, -1, 1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
+});
+
 test('add rejects unsafe integers after a variadic overflow boundary promoted the sum', () => {
   assert.throws(
     () => add(0, Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER + 1),
