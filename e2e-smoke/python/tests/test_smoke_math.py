@@ -20,10 +20,10 @@ smoke_math = _load_smoke_math()
 @pytest.mark.parametrize(
     ("left", "right", "expected"),
     [
-        (2, 3, 5),
-        (-2, 3, 1),
-        (2, -3, -1),
-        (-2, -3, -5),
+        pytest.param(2, 3, 5, id="adds_two_positive_numbers"),
+        pytest.param(-2, 3, 1, id="adds_negative_and_positive_numbers"),
+        pytest.param(2, -3, -1, id="adds_positive_and_negative_numbers"),
+        pytest.param(-2, -3, -5, id="adds_two_negative_numbers"),
     ],
 )
 def test_add_returns_sum(left: int, right: int, expected: int) -> None:
