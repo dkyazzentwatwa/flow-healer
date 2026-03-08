@@ -107,6 +107,12 @@ def _add_normalized_operands(left: int, right: int) -> int:
     return _canonicalize_zero(left + right)
 
 
+def _add_three_normalized_operands(first: int, second: int, third: int) -> int:
+    """Compose normalized addition so three-term arithmetic keeps the same rules."""
+    partial_sum = _add_normalized_operands(first, second)
+    return _add_normalized_operands(partial_sum, third)
+
+
 def add(left: int | str, right: int | str) -> int:
     """Return the sum of two supported operands as an integer."""
     normalized_left, normalized_right = _coerce_operands(left, right)
@@ -115,5 +121,11 @@ def add(left: int | str, right: int | str) -> int:
 
 def add3(first: int | str, second: int | str, third: int | str) -> int:
     """Compose two additions so identity and sign handling stay consistent."""
-    partial_sum = add(first, second)
-    return add(partial_sum, third)
+    normalized_first = _normalize_operand(first)
+    normalized_second = _normalize_operand(second)
+    normalized_third = _normalize_operand(third)
+    return _add_three_normalized_operands(
+        normalized_first,
+        normalized_second,
+        normalized_third,
+    )
