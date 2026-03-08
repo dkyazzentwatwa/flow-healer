@@ -160,14 +160,26 @@ test('add keeps unsafe integer number inputs on normal number semantics', () => 
   assert.equal(add(oversizedNumber, 1), oversizedNumber + 1);
 });
 
-test('add supports bigint mixed with integer numbers beyond safe precision', () => {
+test('add rejects bigint mixed with integer numbers beyond safe precision', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
   const oversizedNegativeNumber = Number.MIN_SAFE_INTEGER - 2;
 
-  assert.equal(add(oversizedNumber, 1n), 9007199254740993n);
-  assert.equal(add(1n, oversizedNumber), 9007199254740993n);
-  assert.equal(add(oversizedNegativeNumber, 1n), BigInt(oversizedNegativeNumber) + 1n);
-  assert.equal(add(1n, oversizedNegativeNumber), 1n + BigInt(oversizedNegativeNumber));
+  assert.throws(() => add(oversizedNumber, 1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
+  assert.throws(() => add(1n, oversizedNumber), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
+  assert.throws(() => add(oversizedNegativeNumber, 1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
+  assert.throws(() => add(1n, oversizedNegativeNumber), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
 });
 
 test('add keeps existing single-value and empty-call behavior', () => {
@@ -209,42 +221,57 @@ test('add handles negative bigint combinations', () => {
   assert.equal(add(-4n, 4n), 0n);
 });
 
-test('add keeps bigint accumulation stable after integer number rounding inputs', () => {
+test('add rejects bigint accumulation after integer number rounding inputs', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
 
-  assert.equal(add(oversizedNumber, 1n, -1n), 9007199254740992n);
+  assert.throws(() => add(oversizedNumber, 1n, -1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
 });
 
 test('add preserves bigint promotion after a zero-prefixed safe integer boundary', () => {
   assert.equal(add(0, Number.MAX_SAFE_INTEGER - 1, 1, 1), 9007199254740992n);
 });
 
-test('add preserves bigint semantics when an oversized number starts the list', () => {
+test('add rejects bigint semantics when an oversized number starts the list', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
 
-  assert.equal(add(0n, oversizedNumber, -1n), 9007199254740991n);
+  assert.throws(() => add(0n, oversizedNumber, -1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
 });
 
-test('add promotes an oversized leading number once a later bigint appears', () => {
+test('add rejects an oversized leading number once a later bigint appears', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
 
-  assert.equal(add(oversizedNumber, 1n, 1), 9007199254740994n);
+  assert.throws(() => add(oversizedNumber, 1n, 1), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
 });
 
 test('add keeps a leading negative zero normalized before bigint promotion', () => {
   assert.equal(add(-0, 1n, -1), 0n);
 });
 
-test('add preserves an oversized integer until a later bigint promotes the sum', () => {
+test('add rejects an oversized integer when a later bigint would promote the sum', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
 
-  assert.equal(add(oversizedNumber, 0, 1n), 9007199254740993n);
+  assert.throws(() => add(oversizedNumber, 0, 1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
 });
 
-test('add preserves an oversized integer through negative zero before bigint promotion', () => {
+test('add preserves negative-zero normalization before rejecting bigint promotion', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
 
-  assert.equal(add(oversizedNumber, -0, 1n), 9007199254740993n);
+  assert.throws(() => add(oversizedNumber, -0, 1n), {
+    name: 'RangeError',
+    message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+  });
 });
 
 test('add rejects unsafe integers after a variadic overflow boundary promoted the sum', () => {

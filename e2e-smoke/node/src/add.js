@@ -40,6 +40,12 @@ function addPair(a, b) {
 
   if (canPromoteOperandsToBigInt) {
     if (hasBigIntOperand(a, b)) {
+      if (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b)) {
+        throw new RangeError(
+          'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+        );
+      }
+
       return normalizeZero(toBigInt(a) + toBigInt(b));
     }
 
