@@ -8,6 +8,13 @@ function isUnsafeIntegerNumber(value) {
     && !Number.isSafeInteger(value);
 }
 
+function hasMixedBigIntUnsafeNumberBoundary(a, b) {
+  const hasBigIntOperand = typeof a === 'bigint' || typeof b === 'bigint';
+
+  return hasBigIntOperand
+    && (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b));
+}
+
 function toBigInt(value) {
   return typeof value === 'bigint' ? value : BigInt(value);
 }
@@ -21,7 +28,7 @@ function normalizeZero(sum) {
 function addPair(a, b) {
   const hasBigIntOperand = typeof a === 'bigint' || typeof b === 'bigint';
 
-  if (hasBigIntOperand && (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b))) {
+  if (hasMixedBigIntUnsafeNumberBoundary(a, b)) {
     throw new RangeError(
       'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
     );
