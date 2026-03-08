@@ -39,6 +39,17 @@ test("completeTodo fills in a missing completion timestamp once", () => {
   assert.deepEqual(second, first);
 });
 
+test("completeTodo repairs an undefined completion timestamp once", () => {
+  resetTodosForTests([{ id: "a", title: "One", completed: true }]);
+
+  const first = completeTodo("a");
+  const second = completeTodo("a");
+
+  assert.equal(first?.completed, true);
+  assert.equal(typeof first?.completedAt, "string");
+  assert.deepEqual(second, first);
+});
+
 test("completeTodo keeps stored completion state stable across repeated calls", () => {
   resetTodosForTests([
     {
@@ -78,4 +89,23 @@ test("complete todo route stays stable on repeated calls", async () => {
   assert.equal(firstResponse.status, 200);
   assert.equal(secondResponse.status, 200);
   assert.deepEqual(await secondResponse.json(), await firstResponse.json());
+});
+
+test("complete todo route repairs incomplete completion metadata only once", async () => {
+  resetTodosForTests([{ id: "a", title: "One", completed: true }]);
+
+  const firstResponse = await completeTodoRoute(new Request("http://localhost"), {
+    params: { id: "a" },
+  });
+  const secondResponse = await completeTodoRoute(new Request("http://localhost"), {
+    params: { id: "a" },
+  });
+
+  const firstBody = await firstResponse.json();
+  const secondBody = await secondResponse.json();
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.equal(typeof firstBody.todo.completedAt, "string");
+  assert.deepEqual(secondBody, firstBody);
 });

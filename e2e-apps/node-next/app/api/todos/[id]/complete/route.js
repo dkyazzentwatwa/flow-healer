@@ -15,11 +15,11 @@ async function resolveParams(params) {
 
 export async function POST(_request, { params }) {
   const { id } = await resolveParams(params);
-  const todo = completeTodo(id);
+  const completedTodo = completeTodo(id);
 
-  if (!todo) {
+  if (!completedTodo) {
     return json({ error: "Todo not found" }, { status: 404 });
   }
 
-  return json({ todo }, { status: 200 });
+  return json({ todo: completedTodo }, { status: 200 });
 }

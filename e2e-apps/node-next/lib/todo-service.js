@@ -19,16 +19,22 @@ function cloneTodo(todo) {
   return { ...todo };
 }
 
+function hasCompletionTimestamp(todo) {
+  return typeof todo.completedAt === "string" && todo.completedAt.length > 0;
+}
+
 function buildCompletedTodo(todo) {
   return {
     ...todo,
     completed: true,
-    completedAt: todo.completedAt ?? new Date().toISOString(),
+    completedAt: hasCompletionTimestamp(todo)
+      ? todo.completedAt
+      : new Date().toISOString(),
   };
 }
 
 function hasStableCompletionState(todo) {
-  return todo.completed && todo.completedAt !== null;
+  return todo.completed && hasCompletionTimestamp(todo);
 }
 
 export function listTodos() {
