@@ -88,6 +88,10 @@ def _add_normalized_operands(left: int, right: int) -> int:
     return SMOKE_MATH_MODULE._add_normalized_operands(left, right)
 
 
+def _add_three_normalized_operands(first: int, second: int, third: int) -> int:
+    return SMOKE_MATH_MODULE._add_three_normalized_operands(first, second, third)
+
+
 @pytest.mark.parametrize(("left", "right", "expected"), ADD_SUCCESS_CASES)
 def test_add_success_cases_return_expected_sum(
     left: object,
@@ -317,6 +321,56 @@ def test_add_normalized_operands_promotes_exact_int_subclass_without_int_hook() 
     """Zero fast paths should preserve exact integer coercion semantics."""
     result = _add_normalized_operands(0, OverflowingInt(9))
     assert result == 9
+    assert type(result) is int
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "third", "expected"),
+    (
+        pytest.param(
+            10**80,
+            -(10**80),
+            1,
+            1,
+            id="large_opposites_cancel_before_positive_edge_term",
+        ),
+        pytest.param(
+            -(10**80),
+            10**80,
+            -1,
+            -1,
+            id="large_opposites_cancel_before_negative_edge_term",
+        ),
+        pytest.param(
+            f"+{10**80}",
+            str(-(10**80) + 1),
+            "-1",
+            0,
+            id="large_string_operands_cross_zero_then_canonicalize",
+        ),
+    ),
+)
+def test_add3_matches_python_int_arithmetic_for_large_mixed_sign_operands(
+    first: object,
+    second: object,
+    third: object,
+    expected: int,
+) -> None:
+    """Three-term mixed-sign arithmetic should stay aligned with Python ints."""
+    result = SMOKE_MATH_MODULE.add3(first, second, third)
+    assert result == expected
+    assert result == (
+        _normalize_operand(first)
+        + _normalize_operand(second)
+        + _normalize_operand(third)
+    )
+    assert type(result) is int
+
+
+def test_add_three_normalized_operands_canonicalizes_zero_after_partial_cancellation() -> None:
+    """A zero-valued partial sum should remain a true identity for the final term."""
+    result = _add_three_normalized_operands(-(10**80), 10**80, 7)
+    assert result == 7
     assert type(result) is int
 
 
