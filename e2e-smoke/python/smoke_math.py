@@ -88,7 +88,9 @@ def _canonicalize_zero(value: int) -> int:
     """Collapse any computed zero onto the additive identity singleton."""
     if value == 0:
         return 0
-    return int(value)
+    if type(value) is int:
+        return value
+    return operator.index(value)
 
 
 def _is_additive_identity(value: int) -> bool:

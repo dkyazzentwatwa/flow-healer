@@ -313,6 +313,13 @@ def test_add3_preserves_additive_identity_after_signed_zero_cancellation() -> No
     assert type(result) is int
 
 
+def test_add_normalized_operands_promotes_exact_int_subclass_without_int_hook() -> None:
+    """Zero fast paths should preserve exact integer coercion semantics."""
+    result = _add_normalized_operands(0, OverflowingInt(9))
+    assert result == 9
+    assert type(result) is int
+
+
 @pytest.mark.parametrize(
     ("cases", "expected_size"),
     (
