@@ -48,6 +48,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gh jq
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+
       - name: Ensure labels exist
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,6 +64,8 @@ jobs:
       - name: Run single-shot worker
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
         run: |
