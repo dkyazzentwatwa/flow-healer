@@ -160,6 +160,33 @@ test('add keeps unsafe integer number inputs on normal number semantics', () => 
   assert.equal(add(oversizedNumber, 1), oversizedNumber + 1);
 });
 
+test('add rejects mixed bigint and unsafe integer number inputs with a clear boundary error', () => {
+  assert.throws(
+    () => add(1n, Number.MAX_SAFE_INTEGER + 1),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+  assert.throws(
+    () => add(Number.MIN_SAFE_INTEGER - 1, 1n),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
+
+test('add keeps bigint-promoted variadic sums guarded from later unsafe integer number inputs', () => {
+  assert.throws(
+    () => add(0, Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER + 1),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
+
 test('add keeps existing single-value and empty-call behavior', () => {
   assert.equal(add(), 0);
   assert.equal(add(-0), 0);

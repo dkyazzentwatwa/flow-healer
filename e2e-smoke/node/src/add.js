@@ -2,6 +2,12 @@ function canPromoteToBigInt(value) {
   return typeof value === 'bigint' || Number.isSafeInteger(value);
 }
 
+function isUnsafeIntegerNumber(value) {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && !Number.isSafeInteger(value);
+}
+
 function toBigInt(value) {
   return typeof value === 'bigint' ? value : BigInt(value);
 }
@@ -13,12 +19,18 @@ function normalizeZero(sum) {
 }
 
 function addPair(a, b) {
+  const hasBigIntOperand = typeof a === 'bigint' || typeof b === 'bigint';
+
+  if (hasBigIntOperand && (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b))) {
+    throw new RangeError(
+      'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+    );
+  }
+
   const canPromoteOperandsToBigInt =
     canPromoteToBigInt(a) && canPromoteToBigInt(b);
 
   if (canPromoteOperandsToBigInt) {
-    const hasBigIntOperand = typeof a === 'bigint' || typeof b === 'bigint';
-
     if (hasBigIntOperand) {
       return normalizeZero(toBigInt(a) + toBigInt(b));
     }
