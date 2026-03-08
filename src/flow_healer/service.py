@@ -108,6 +108,7 @@ class FlowHealerService:
             runtime = self.build_runtime(repo)
             try:
                 connector_health = runtime.loop._connector_health_snapshot()
+                tracker_health = runtime.loop._tracker_health_snapshot()
                 runtime.loop._record_connector_health(connector_health)
                 issues = runtime.store.list_healer_issues(limit=500)
                 issues_by_id = {str(issue.get("issue_id") or ""): issue for issue in issues}
@@ -172,6 +173,13 @@ class FlowHealerService:
                             "last_failure_fingerprint_issue_id": runtime.store.get_state("healer_last_failure_fingerprint_issue_id") or "",
                             "last_failure_fingerprint_class": runtime.store.get_state("healer_last_failure_fingerprint_class") or "",
                             "last_contamination_paths": runtime.store.get_state("healer_last_contamination_paths") or "",
+                        },
+                        "tracker": {
+                            "backend": tracker_health.get("backend"),
+                            "enabled": tracker_health.get("enabled"),
+                            "repo_slug": tracker_health.get("repo_slug"),
+                            "last_error_class": tracker_health.get("last_error_class"),
+                            "last_error_reason": tracker_health.get("last_error_reason"),
                         },
                         "resource_audit": HealerReconciler(
                             store=runtime.store,
@@ -247,6 +255,7 @@ class FlowHealerService:
                     else list_cached_preflight_reports(store=runtime.store, gate_mode=repo.healer_test_gate_mode)
                 )
                 connector_health = runtime.loop._connector_health_snapshot()
+                tracker_health = runtime.loop._tracker_health_snapshot()
                 runtime.loop._record_connector_health(connector_health)
                 breaker = runtime.loop._circuit_breaker_status()
                 git_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"])
@@ -268,6 +277,11 @@ class FlowHealerService:
                         "connector_last_runtime_error_kind": connector_health.get("last_runtime_error_kind"),
                         "connector_last_runtime_stdout_tail": connector_health.get("last_runtime_stdout_tail"),
                         "connector_last_runtime_stderr_tail": connector_health.get("last_runtime_stderr_tail"),
+                        "tracker_backend": tracker_health.get("backend"),
+                        "tracker_enabled": tracker_health.get("enabled"),
+                        "tracker_repo_slug": tracker_health.get("repo_slug"),
+                        "tracker_last_error_class": tracker_health.get("last_error_class"),
+                        "tracker_last_error_reason": tracker_health.get("last_error_reason"),
                         "last_failure_fingerprint": runtime.store.get_state("healer_last_failure_fingerprint") or "",
                         "last_failure_fingerprint_issue_id": runtime.store.get_state("healer_last_failure_fingerprint_issue_id") or "",
                         "last_failure_fingerprint_class": runtime.store.get_state("healer_last_failure_fingerprint_class") or "",

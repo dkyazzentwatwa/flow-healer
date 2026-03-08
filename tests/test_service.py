@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from flow_healer.codex_app_server_connector import CodexAppServerConnector
 from flow_healer.codex_cli_connector import CodexCliConnector
@@ -56,9 +57,17 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
             failure_class="tests_failed" if state == "failed" else "",
             failure_reason="Targeted sandbox validation failed." if state == "failed" else "",
         )
-    runtime.store.close()
-
-    rows = service.status_rows("demo")
+    runtime.tracker._last_error_class = "github_rate_limited"
+    runtime.tracker._last_error_reason = "GitHub API rate limit exceeded while posting status."
+    runtime.tracker.token = ""
+    original_close_runtime = service._close_runtime
+    service._close_runtime = lambda runtime: None
+    try:
+        with patch.object(service, "build_runtime", return_value=runtime):
+            rows = service.status_rows("demo")
+    finally:
+        service._close_runtime = original_close_runtime
+        runtime.store.close()
 
     breaker = rows[0]["circuit_breaker"]
     assert breaker["open"] is True
@@ -76,6 +85,12 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "last_runtime_error_kind" in connector
     assert "last_runtime_stdout_tail" in connector
     assert "last_runtime_stderr_tail" in connector
+    tracker = rows[0]["tracker"]
+    assert tracker["backend"] == "GitHubHealerTracker"
+    assert tracker["enabled"] is False
+    assert tracker["repo_slug"] == "owner/repo"
+    assert tracker["last_error_class"] == "github_rate_limited"
+    assert tracker["last_error_reason"] == "GitHub API rate limit exceeded while posting status."
     recent_attempt = rows[0]["recent_attempts"][0]
     assert recent_attempt["diagnosis"] == "product_bug"
     assert recent_attempt["failure_family"] == "product"
@@ -153,8 +168,18 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
             repos=[RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")],
         )
     )
-
-    rows = service.doctor_rows("demo")
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.tracker._last_error_class = "github_network_error"
+    runtime.tracker._last_error_reason = "Temporary DNS failure"
+    runtime.tracker.token = ""
+    original_close_runtime = service._close_runtime
+    service._close_runtime = lambda runtime: None
+    try:
+        with patch.object(service, "build_runtime", return_value=runtime):
+            rows = service.doctor_rows("demo")
+    finally:
+        service._close_runtime = original_close_runtime
+        runtime.store.close()
 
     assert rows[0]["circuit_breaker_open"] is False
     assert rows[0]["circuit_breaker_cooldown_remaining_seconds"] == 0
@@ -164,6 +189,11 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "connector_last_runtime_error_kind" in rows[0]
     assert "connector_last_runtime_stdout_tail" in rows[0]
     assert "connector_last_runtime_stderr_tail" in rows[0]
+    assert rows[0]["tracker_backend"] == "GitHubHealerTracker"
+    assert rows[0]["tracker_enabled"] is False
+    assert rows[0]["tracker_repo_slug"] == "owner/repo"
+    assert rows[0]["tracker_last_error_class"] == "github_network_error"
+    assert rows[0]["tracker_last_error_reason"] == "Temporary DNS failure"
     assert rows[0]["skill_contracts_ok"] is True
     assert rows[0]["skill_contracts"]["recommended_skill_by_diagnosis"]["connector_or_patch_generation"] == (
         "flow-healer-connector-debug"
