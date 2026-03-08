@@ -388,7 +388,8 @@ def test_viewer_login_uses_authenticated_user(monkeypatch):
     assert tracker.viewer_login() == "healer-service"
 
 
-def test_open_or_update_pr_sets_auth_error_when_token_missing():
+def test_open_or_update_pr_sets_auth_error_when_token_missing(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     tracker = GitHubHealerTracker(repo_path=Path("."), token="")
     tracker.repo_slug = "owner/repo"
 
