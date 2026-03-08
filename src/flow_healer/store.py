@@ -210,7 +210,6 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_attempts_started ON healer_attempts(started_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_issue_created ON healer_events(issue_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_control_commands_created ON control_commands(created_at DESC);
@@ -220,6 +219,10 @@ class SQLiteStore:
             conn.execute("INSERT OR IGNORE INTO healer_runtime(singleton, status) VALUES(1, 'idle')")
             conn.commit()
             self._migrate(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at)"
+            )
+            conn.commit()
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         with self._lock:
