@@ -199,11 +199,17 @@ test('add keeps existing single-value and empty-call behavior', () => {
 test('add supports variadic invocation helpers without changing promotion rules', () => {
   const overflowingInputs = [0, Number.MAX_SAFE_INTEGER, 2];
   const mixedInputs = [1n, 2, 3, 4];
+  const singleNumberInput = [-0];
+  const singleBigIntInput = [0n];
 
   assert.equal(add.apply(null, []), 0);
+  assert.equal(add.apply(null, singleNumberInput), 0);
+  assert.equal(add.apply(null, singleBigIntInput), 0n);
   assert.equal(add.apply(null, overflowingInputs), 9007199254740993n);
   assert.equal(add.apply(null, mixedInputs), 10n);
   assert.equal(add.call(null), 0);
+  assert.equal(add.call(null, ...singleNumberInput), 0);
+  assert.equal(add.call(null, ...singleBigIntInput), 0n);
   assert.equal(add.call(null, ...overflowingInputs), 9007199254740993n);
   assert.equal(add.call(null, ...mixedInputs), 10n);
 });

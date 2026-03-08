@@ -46,9 +46,9 @@ function addPair(a, b) {
 }
 
 function sumOperands(operands) {
-  let accumulatedSum = addPair(operands[0], operands[1]);
+  let accumulatedSum = normalizeZero(operands[0]);
 
-  for (let index = 2; index < operands.length; index += 1) {
+  for (let index = 1; index < operands.length; index += 1) {
     accumulatedSum = addPair(accumulatedSum, operands[index]);
   }
 
