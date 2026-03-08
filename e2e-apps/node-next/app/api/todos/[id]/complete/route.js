@@ -9,8 +9,12 @@ function json(body, init) {
   });
 }
 
+async function resolveParams(params) {
+  return Promise.resolve(params);
+}
+
 export async function POST(_request, { params }) {
-  const { id } = await Promise.resolve(params);
+  const { id } = await resolveParams(params);
   const todo = completeTodo(id);
 
   if (!todo) {

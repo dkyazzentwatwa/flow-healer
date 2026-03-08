@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { POST as completeTodoRoute } from "../app/api/todos/[id]/complete/route.js";
 import { completeTodo, resetTodosForTests } from "../lib/todo-service.js";
 
 test("completeTodo marks an incomplete todo complete", () => {
@@ -60,4 +61,21 @@ test("completeTodo returns null when the todo does not exist", () => {
   resetTodosForTests([]);
 
   assert.equal(completeTodo("missing"), null);
+});
+
+test("complete todo route stays stable on repeated calls", async () => {
+  resetTodosForTests([
+    { id: "a", title: "One", completed: false, completedAt: null },
+  ]);
+
+  const firstResponse = await completeTodoRoute(new Request("http://localhost"), {
+    params: { id: "a" },
+  });
+  const secondResponse = await completeTodoRoute(new Request("http://localhost"), {
+    params: Promise.resolve({ id: "a" }),
+  });
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.deepEqual(await secondResponse.json(), await firstResponse.json());
 });

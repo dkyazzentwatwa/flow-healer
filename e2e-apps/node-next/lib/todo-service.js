@@ -27,6 +27,10 @@ function buildCompletedTodo(todo) {
   };
 }
 
+function hasStableCompletionState(todo) {
+  return todo.completed && todo.completedAt !== null;
+}
+
 export function listTodos() {
   return todos.map(cloneTodo);
 }
@@ -36,6 +40,10 @@ export function completeTodo(id) {
 
   if (todoIndex === -1) {
     return null;
+  }
+
+  if (hasStableCompletionState(todos[todoIndex])) {
+    return cloneTodo(todos[todoIndex]);
   }
 
   const completedTodo = buildCompletedTodo(todos[todoIndex]);
