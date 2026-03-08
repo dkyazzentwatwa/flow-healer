@@ -2,6 +2,12 @@ function isIntegerNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
 }
 
+const BIGINT_UNSAFE_INTEGER_MESSAGE =
+  'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.';
+
+const VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE =
+  'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.';
+
 function isUnsafeIntegerNumber(value) {
   return isIntegerNumber(value) && !Number.isSafeInteger(value);
 }
@@ -34,6 +40,14 @@ function shouldPromoteSafeIntegerSum(a, b, numericSum) {
     && !Number.isSafeInteger(numericSum);
 }
 
+function throwBigIntUnsafeIntegerError() {
+  throw new RangeError(BIGINT_UNSAFE_INTEGER_MESSAGE);
+}
+
+function throwVariadicOverflowUnsafeIntegerError() {
+  throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
+}
+
 function addPair(a, b) {
   const canPromoteOperandsToBigInt =
     canConvertToBigInt(a) && canConvertToBigInt(b);
@@ -41,9 +55,7 @@ function addPair(a, b) {
   if (canPromoteOperandsToBigInt) {
     if (hasBigIntOperand(a, b)) {
       if (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b)) {
-        throw new RangeError(
-          'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-        );
+        throwBigIntUnsafeIntegerError();
       }
 
       return normalizeZero(toBigInt(a) + toBigInt(b));
@@ -78,15 +90,11 @@ function sumOperands(operands) {
     const operand = operands[index];
 
     if (typeof operand === 'bigint' && hasUnsafeIntegerOperand) {
-      throw new RangeError(
-        'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
-      );
+      throwBigIntUnsafeIntegerError();
     }
 
     if (hasOverflowBoundaryPromotion && isUnsafeIntegerNumber(operand)) {
-      throw new RangeError(
-        'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.',
-      );
+      throwVariadicOverflowUnsafeIntegerError();
     }
 
     hasOverflowBoundaryPromotion = hasOverflowBoundaryPromotion

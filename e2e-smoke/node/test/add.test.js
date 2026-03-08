@@ -308,3 +308,13 @@ test('add keeps that overflow-boundary guard after later bigint operands', () =>
     },
   );
 });
+
+test('add keeps the overflow-boundary guard on negative sums after returning near safety', () => {
+  assert.throws(
+    () => add(0, Number.MIN_SAFE_INTEGER, -1, 1, Number.MIN_SAFE_INTEGER - 1),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
