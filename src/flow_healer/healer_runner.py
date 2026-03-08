@@ -2850,12 +2850,27 @@ def _looks_like_status_update_summary(text: str) -> bool:
     lowered = (text or "").strip().lower()
     if not lowered:
         return False
+    narrative_prefixes = ("updated ", "created ", "added ", "wrote ", "fixed ", "changed ", "implemented ")
+    if lowered.startswith(narrative_prefixes):
+        if any(
+            phrase in lowered
+            for phrase in (
+                "ran tests",
+                "did not run tests",
+                "this should work now",
+                "should work now",
+                "requested note",
+                "requested change",
+                "requested update",
+            )
+        ):
+            return True
     if "i did not run tests" in lowered or "artifact_only" in lowered:
-        if lowered.startswith(("updated ", "created ", "added ", "wrote ")):
+        if lowered.startswith(narrative_prefixes):
             return True
-        if lowered.startswith(("updated [", "created [", "added [", "wrote [")):
+        if lowered.startswith(tuple(f"{prefix}[" for prefix in narrative_prefixes)):
             return True
-    if lowered.startswith(("updated [", "created [", "added [", "wrote [")) and " with " in lowered:
+    if lowered.startswith(tuple(f"{prefix}[" for prefix in narrative_prefixes)) and " with " in lowered:
         return True
     return False
 

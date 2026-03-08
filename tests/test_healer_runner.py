@@ -2149,6 +2149,49 @@ def test_run_attempt_app_server_code_task_rejects_fallback_with_extra_paths(tmp_
     assert "unnamed paths" in result.failure_reason
 
 
+def test_run_attempt_app_server_code_task_rejects_narrative_only_path_fenced_body(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "```python path=demo.py\n"
+            "Updated demo.py to fix the add helper and ran tests.\n"
+            "```\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="915aa",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_workspace_change:artifact_not_materialized"
+    assert "not a full file body" in result.failure_reason
+    assert (workspace / "demo.py").read_text(encoding="utf-8") == "def add(a, b):\n    return a - b\n"
+
+
 def test_run_attempt_app_server_code_task_marks_staging_filtered_all_when_only_runtime_artifacts_change(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
