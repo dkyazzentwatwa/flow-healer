@@ -256,6 +256,12 @@ test('add keeps a leading negative zero normalized before bigint promotion', () 
   assert.equal(add(-0, 1n, -1), 0n);
 });
 
+test('add never returns negative zero for normalized number results', () => {
+  assert.equal(Object.is(add(-0), -0), false);
+  assert.equal(Object.is(add(-0, -0), -0), false);
+  assert.equal(Object.is(add(-0, 0, 0), -0), false);
+});
+
 test('add rejects an oversized integer when a later bigint would promote the sum', () => {
   const oversizedNumber = Number.MAX_SAFE_INTEGER + 2;
 

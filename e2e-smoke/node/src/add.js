@@ -17,7 +17,7 @@ function toBigInt(value) {
 function normalizeZero(sum) {
   return typeof sum === 'bigint'
     ? (sum === 0n ? 0n : sum)
-    : (sum === 0 ? 0 : sum);
+    : (Object.is(sum, -0) ? 0 : sum);
 }
 
 function hasBigIntOperand(a, b) {
