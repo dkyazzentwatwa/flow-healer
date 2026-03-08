@@ -80,6 +80,42 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
 }
 
 
+_FAILURE_USER_HINTS: dict[str, str] = {
+    "no_patch": (
+        "The AI agent could not produce file changes. "
+        "Try adding an explicit `Required code outputs:` section to the issue body."
+    ),
+    "no_workspace_change": (
+        "The AI agent could not produce file changes. "
+        "Try adding an explicit `Required code outputs:` section to the issue body."
+    ),
+    "empty_diff": (
+        "The AI agent could not produce file changes. "
+        "Try adding an explicit `Required code outputs:` section to the issue body."
+    ),
+    "connector_unavailable": (
+        "The AI connector is unavailable. "
+        "Ensure `codex` is installed and `GITHUB_TOKEN` is set."
+    ),
+    "tests_failed": (
+        "The proposed fix did not pass tests. See test output above for details."
+    ),
+    "verifier_failed": (
+        "The AI verifier rejected the fix as potentially incorrect. Manual review recommended."
+    ),
+    "patch_apply_failed": (
+        "The generated patch could not be applied cleanly. This may resolve on retry."
+    ),
+    "diff_limit_exceeded": (
+        "The proposed change was too large. Break this issue into smaller tasks."
+    ),
+}
+
+
+def _failure_user_hint(failure_class: str) -> str:
+    return _FAILURE_USER_HINTS.get(str(failure_class or "").strip(), "")
+
+
 def _minutes_since(timestamp_str: str) -> float:
     """Return minutes elapsed since an ISO-8601 / SQLite CURRENT_TIMESTAMP string."""
     try:
@@ -1040,6 +1076,21 @@ class AutonomousHealerLoop:
         details = details if details is not None else self.tracker.get_pr_details(pr_number=pr_number)
         if details is None or details.state != "open":
             return False
+        # GitHub computes mergeable_state asynchronously. When a PR is freshly opened it
+        # often returns "unknown". Poll briefly to let GitHub catch up before giving up.
+        if details.mergeable_state == "unknown":
+            for _attempt in range(4):
+                time.sleep(3)
+                refreshed = self.tracker.get_pr_details(pr_number=pr_number)
+                if refreshed is None:
+                    break
+                details = refreshed
+                if details.mergeable_state != "unknown":
+                    break
+            else:
+                logger.info(
+                    "PR #%d mergeable_state still unknown after polling; reconciler will retry.", pr_number
+                )
         if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
             return False
         reviewer = (viewer_login if viewer_login is not None else self.tracker.viewer_login()).strip().lower()
@@ -1221,6 +1272,18 @@ class AutonomousHealerLoop:
                         pr_state=discovered_pr.state,
                     )
                     continue
+                if existing_state == "needs_clarification":
+                    # Issue body was updated; re-check confidence on next cycle
+                    clarification_key = f"healer_clarification_posted:{issue.issue_id}"
+                    new_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
+                    if new_spec.parse_confidence >= 0.3:
+                        self.store.set_state(clarification_key, "")
+                        self.store.set_healer_issue_state(
+                            issue_id=issue.issue_id,
+                            state="queued",
+                            clear_lease=True,
+                        )
+                    continue
                 if existing_state == "archived" or (
                     existing_state == "blocked" and existing_pr_state != "conflict"
                 ) or (
@@ -1325,6 +1388,26 @@ class AutonomousHealerLoop:
             return
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
+        if task_spec.parse_confidence < 0.3:
+            clarification_key = f"healer_clarification_posted:{issue.issue_id}"
+            already_posted = self.store.get_state(clarification_key) == "true"
+            if not already_posted:
+                logger.info(
+                    "Issue #%s has low parse_confidence (%.2f); posting needs-clarification comment.",
+                    issue.issue_id,
+                    task_spec.parse_confidence,
+                )
+                self._post_issue_status(
+                    issue_id=issue.issue_id,
+                    body=self._build_needs_clarification_comment(),
+                )
+                self.store.set_state(clarification_key, "true")
+            self.store.set_healer_issue_state(
+                issue_id=issue.issue_id,
+                state="needs_clarification",
+                clear_lease=True,
+            )
+            return
         prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
         scope_key = self._issue_scope_key(task_spec=task_spec, prediction=prediction)
         dedupe_key = self._issue_dedupe_key(task_spec=task_spec, scope_key=scope_key)
@@ -1544,6 +1627,31 @@ class AutonomousHealerLoop:
                 issue_id=issue.issue_id,
             )
             feedback_context = str(row.get("feedback_context") or "").strip()
+            # Probe connector availability before burning turn timeout on a broken connector.
+            connector_ok, connector_fail_reason = self.preflight.probe_connector(self.connector)
+            if not connector_ok:
+                logger.warning(
+                    "Connector probe failed for issue #%s: %s", issue.issue_id, connector_fail_reason
+                )
+                failure_class = "connector_unavailable"
+                failure_reason = connector_fail_reason or "Connector probe failed before run attempt."
+                self._post_issue_status(
+                    issue_id=issue.issue_id,
+                    body=self._format_flow_status_comment(
+                        title="Connector Unavailable",
+                        subtitle=f"Attempt {attempt_no} skipped — AI connector is not reachable.",
+                        bullets=[
+                            f"Reason: {failure_reason}",
+                            "Please verify that `codex` is installed and the `GITHUB_TOKEN` is set.",
+                        ],
+                    ),
+                )
+                return self._backoff_or_fail(
+                    issue_id=issue.issue_id,
+                    attempt_no=attempt_no,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
             run_result = self.runner.run_attempt(
                 issue_id=issue.issue_id,
                 issue_title=issue.title,
@@ -2017,6 +2125,7 @@ class AutonomousHealerLoop:
                 backoff_until,
                 failure_class,
             )
+            _hint = _failure_user_hint(failure_class)
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
@@ -2027,6 +2136,7 @@ class AutonomousHealerLoop:
                         f"Failure class: `{failure_class}`",
                         f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
                         f"Next retry not before: `{backoff_until} UTC`",
+                        *([f"Hint: {_hint}"] if _hint else []),
                     ],
                 ),
             )
@@ -2073,6 +2183,7 @@ class AutonomousHealerLoop:
                 backoff_until,
                 failure_class,
             )
+        _hint = _failure_user_hint(failure_class)
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
@@ -2084,6 +2195,7 @@ class AutonomousHealerLoop:
                     f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
                     f"Next retry not before: `{backoff_until} UTC`",
                     f"Retry budget: `{self.settings.healer_retry_budget}`",
+                    *([f"Hint: {_hint}"] if _hint else []),
                 ],
             ),
         )
@@ -2387,6 +2499,26 @@ class AutonomousHealerLoop:
                 )
                 if attempt == 0:
                     time.sleep(2)
+
+    @staticmethod
+    @staticmethod
+    def _build_needs_clarification_comment() -> str:
+        return (
+            "## Flow Healer — Needs Clarification\n\n"
+            "This issue doesn't have enough structured information for me to reliably generate a fix.\n"
+            "Please add one or more of the following to the issue body:\n\n"
+            "**Required code outputs** (the files I should edit):\n"
+            "```\n"
+            "Required code outputs:\n"
+            "- src/auth/login.py\n"
+            "- tests/test_auth.py\n"
+            "```\n\n"
+            "**Validation command** (how to verify the fix):\n"
+            "```\n"
+            "Validation: pytest tests/test_auth.py -v\n"
+            "```\n\n"
+            "-- Flow Healer"
+        )
 
     @staticmethod
     def _format_flow_status_comment(

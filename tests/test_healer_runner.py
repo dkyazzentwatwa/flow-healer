@@ -1938,3 +1938,92 @@ def test_run_attempt_app_server_artifact_task_materializes_output_without_diff(t
     assert "docs/runtime-reset-smoke.md" in result.diff_paths
     created = (workspace / "docs" / "runtime-reset-smoke.md").read_text(encoding="utf-8")
     assert "issue-to-pr path" in created.lower()
+
+
+def test_run_attempt_materializes_completion_artifact_for_artifact_task_no_targets(tmp_path):
+    """When the agent returns pure prose for an artifact_only task with no output_targets
+    (so _materialize_artifact_from_output cannot write to a specific file), the completion
+    artifact fallback should write a run-summary and the run should succeed."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+
+    # Pure prose, no diff fence, no path-fenced blocks — completion artifact should trigger
+    prose_output = (
+        "After investigating the authentication module, I found three root causes: "
+        "missing token refresh logic, incorrect session timeout defaults, and a race "
+        "condition in the concurrent login handler. Detailed findings follow..."
+    )
+    connector = _RetryConnector([prose_output])
+    runner = HealerRunner(connector=connector, timeout_seconds=30)
+    runner.max_proposer_retries = 0
+    runner.max_code_proposer_retries = 0
+    runner.max_artifact_proposer_retries = 0
+    result = runner.run_attempt(
+        issue_id="999",
+        issue_title="Research login issues",
+        issue_body="Investigate and report on login issues",
+        task_spec=HealerTaskSpec(
+            task_kind="research",
+            output_mode="patch",
+            output_targets=(),  # No explicit targets → _allows_artifact_synthesis returns False
+            tool_policy="repo_plus_web",
+            validation_profile="artifact_only",  # Docs-only output is acceptable
+        ),
+        learned_context="",
+        feedback_context="",
+        workspace=workspace,
+        max_diff_files=10,
+        max_diff_lines=500,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+    # With artifact_only profile and no code required, the completion artifact should succeed
+    artifact = workspace / "docs" / "healer-runs" / "999-research-login-issues.md"
+    assert result.success is True, f"Expected success via completion artifact, got failure_class={result.failure_class}"
+    assert artifact.exists(), "Completion artifact should have been written"
+    content = artifact.read_text(encoding="utf-8")
+    assert "Issue #999" in content
+    assert "Research login issues" in content
+
+
+def test_run_attempt_completion_artifact_not_triggered_for_structured_output(tmp_path):
+    """Completion artifact should NOT trigger when the agent returned structured output
+    (a diff fence) — only for pure prose with no structured output."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    # Agent returns a diff fence (structured output) but it's empty
+    diff_output = "```diff\n```\nThe fix would change x from 1 to 2."
+    connector = _RetryConnector([diff_output])
+    runner = HealerRunner(connector=connector, timeout_seconds=30)
+    runner.max_proposer_retries = 0
+    runner.max_code_proposer_retries = 0
+    runner.max_artifact_proposer_retries = 0
+    result = runner.run_attempt(
+        issue_id="888",
+        issue_title="Fix x",
+        issue_body="Set x=2",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        learned_context="",
+        feedback_context="",
+        workspace=workspace,
+        max_diff_files=10,
+        max_diff_lines=500,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+    # Should fail without writing completion artifact (structured output, not prose)
+    assert result.success is False
+    artifact = workspace / "docs" / "healer-runs" / "888-fix-x.md"
+    assert not artifact.exists(), "Completion artifact should NOT be written for structured diff output"

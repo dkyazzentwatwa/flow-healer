@@ -17,6 +17,7 @@ class HealerTaskSpec:
     language_source: str = ""
     execution_root: str = ""
     validation_commands: tuple[str, ...] = ()
+    parse_confidence: float = 1.0
 
 
 _EXPLICIT_PATH_RE = re.compile(
@@ -105,6 +106,12 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     )
     resolved_language = inferred_language or str(language or "").strip()
     language_source = "issue" if inferred_language else ("default" if resolved_language else "")
+    parse_confidence = _score_parse_confidence(
+        task_kind_hint=task_kind_hint,
+        explicit_paths=explicit_paths,
+        validation_commands=validation_commands,
+        execution_root=inferred_execution_root,
+    )
     return HealerTaskSpec(
         task_kind=task_kind,
         output_mode="patch",
@@ -116,7 +123,31 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         language_source=language_source,
         execution_root=inferred_execution_root,
         validation_commands=validation_commands,
+        parse_confidence=parse_confidence,
     )
+
+
+def _score_parse_confidence(
+    *,
+    task_kind_hint: str | None,
+    explicit_paths: tuple[str, ...],
+    validation_commands: tuple[str, ...],
+    execution_root: str,
+) -> float:
+    """Score how confidently the task spec was parsed from explicit issue signals.
+
+    Range: 0.0 (all guessed) to 1.0 (all explicit).
+    """
+    score = 0.0
+    if task_kind_hint:
+        score += 0.3
+    if explicit_paths:
+        score += 0.3
+    if validation_commands:
+        score += 0.2
+    if execution_root:
+        score += 0.2
+    return min(1.0, score)
 
 
 def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:

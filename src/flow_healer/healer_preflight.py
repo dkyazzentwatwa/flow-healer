@@ -13,10 +13,12 @@ from .language_strategies import get_strategy
 
 if TYPE_CHECKING:
     from .healer_runner import HealerRunner, ResolvedExecution
+    from .protocols import ConnectorProtocol
     from .store import SQLiteStore
 
 
 _DEFAULT_PREFLIGHT_TTL_SECONDS = 900
+_CONNECTOR_PROBE_TTL_SECONDS = 300
 _SUPPORTED_SANDBOXES: tuple[tuple[str, str], ...] = (
     ("python", "e2e-smoke/python"),
     ("node", "e2e-smoke/node"),
@@ -104,6 +106,43 @@ class HealerPreflight:
         self.runner = runner
         self.repo_path = Path(repo_path).expanduser().resolve()
         self.ttl_seconds = max(60, int(ttl_seconds))
+        # Cache for connector probe results: connector_class_name → (ok, reason, checked_at)
+        self._connector_probe_cache: dict[str, tuple[bool, str, datetime]] = {}
+
+    def probe_connector(self, connector: ConnectorProtocol) -> tuple[bool, str]:
+        """Quickly verify the connector is available before invoking it for an issue.
+
+        Result is cached per connector class for _CONNECTOR_PROBE_TTL_SECONDS to avoid
+        repeated overhead. Returns (available, failure_reason).
+        """
+        connector_name = type(connector).__name__
+        now = datetime.now(UTC)
+        cached = self._connector_probe_cache.get(connector_name)
+        if cached is not None:
+            ok, reason, checked_at = cached
+            age = (now - checked_at).total_seconds()
+            if age < _CONNECTOR_PROBE_TTL_SECONDS:
+                return ok, reason
+        try:
+            connector.ensure_started()
+        except Exception as exc:
+            reason = f"connector.ensure_started() raised: {exc}"
+            self._connector_probe_cache[connector_name] = (False, reason, now)
+            return False, reason
+        # Check health_snapshot if available
+        snapshot_fn = getattr(connector, "health_snapshot", None)
+        if callable(snapshot_fn):
+            try:
+                snapshot = snapshot_fn()
+                availability = str(snapshot.get("availability") or "").lower()
+                if availability == "unavailable":
+                    reason = str(snapshot.get("availability_reason") or "connector reported unavailable")
+                    self._connector_probe_cache[connector_name] = (False, reason, now)
+                    return False, reason
+            except Exception:
+                pass
+        self._connector_probe_cache[connector_name] = (True, "", now)
+        return True, ""
 
     def refresh_all(self, *, force: bool = False) -> list[PreflightReport]:
         reports: list[PreflightReport] = []

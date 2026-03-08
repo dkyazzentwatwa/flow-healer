@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -208,6 +209,25 @@ class HealerRunner:
                     failure_class = "no_workspace_change"
                     failure_reason = "Agent finished without editing files directly in the managed workspace."
                 if proposer_attempt >= max_retries or failure_class in _NON_RETRYABLE_FAILURES:
+                    # Last-resort: write a completion artifact so the run has some output.
+                    if failure_class not in _NON_RETRYABLE_FAILURES and _materialize_completion_artifact(
+                        issue_id=issue_id,
+                        issue_title=issue_title,
+                        task_spec=task_spec,
+                        proposer_output=proposer_output,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        workspace=workspace,
+                    ) and _stage_workspace_changes(
+                        workspace,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        task_spec=task_spec,
+                        language=resolved_execution.language_effective,
+                    ):
+                        failure_class = ""
+                        failure_reason = ""
+                        break
                     return HealerRunResult(
                         success=False,
                         failure_class=failure_class,
@@ -231,6 +251,8 @@ class HealerRunner:
                     failure_reason=failure_reason,
                     task_spec=task_spec,
                     prefer_workspace_edits=True,
+                    attempt_number=proposer_attempt,
+                    issue_id=issue_id,
                 )
                 continue
             patch = _extract_diff_block(proposer_output)
@@ -346,6 +368,25 @@ class HealerRunner:
                 )
 
             if proposer_attempt >= max_retries:
+                    # Last-resort: write a completion artifact so the run has some output.
+                    if _materialize_completion_artifact(
+                        issue_id=issue_id,
+                        issue_title=issue_title,
+                        task_spec=task_spec,
+                        proposer_output=proposer_output,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        workspace=workspace,
+                    ) and _stage_workspace_changes(
+                        workspace,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        task_spec=task_spec,
+                        language=resolved_execution.language_effective,
+                    ):
+                        failure_class = ""
+                        failure_reason = ""
+                        break
                     return HealerRunResult(
                         success=False,
                         failure_class=failure_class,
@@ -370,6 +411,8 @@ class HealerRunner:
                 failure_reason=failure_reason,
                 task_spec=task_spec,
                 prefer_workspace_edits=workspace_edit_mode,
+                attempt_number=proposer_attempt,
+                issue_id=issue_id,
             )
 
         workspace_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
@@ -1122,24 +1165,54 @@ def _build_retry_prompt(
     failure_reason: str,
     task_spec: HealerTaskSpec | None = None,
     prefer_workspace_edits: bool = False,
+    attempt_number: int = 0,
+    issue_id: str = "",
 ) -> str:
     tailored_lines: list[str] = []
     sandbox_scoped = _is_issue_scoped_sandbox(task_spec)
-    if failure_class in {"no_patch", "no_workspace_change"}:
+    if failure_class in {"no_patch", "no_workspace_change", "empty_diff"}:
         if prefer_workspace_edits:
             tailored_lines.append(
-                "You must edit files directly in the managed workspace now. Do not return a diff, plan, or status-only reply."
+                "STOP. You must edit files directly in the managed workspace now using your file editor."
+                " Do not return a diff, plan, or status-only reply."
             )
             tailored_lines.append(
                 "After editing, leave a concise summary of what changed and what validation you ran."
             )
+            if attempt_number >= 1:
+                tailored_lines.append(
+                    "This is your second attempt. Open the target file with your editor, make the change, and save. Do not describe the change — make it."
+                )
+            if attempt_number >= 2 and issue_id:
+                tailored_lines.append(
+                    f"If you cannot make direct file edits, write a structured markdown summary of your findings to docs/healer-runs/{issue_id}-summary.md instead."
+                )
         else:
             tailored_lines.append(
                 "You must produce concrete file edits now. Do not return explanations, plans, or summaries."
             )
             tailored_lines.append(
-                "If direct edits are unavailable, return exactly one valid unified diff fenced block (```diff ... ```)."
+                "Return exactly one valid unified diff fenced block:\n"
+                "```diff\n"
+                "diff --git a/path/to/file.py b/path/to/file.py\n"
+                "--- a/path/to/file.py\n"
+                "+++ b/path/to/file.py\n"
+                "@@ -1,3 +1,3 @@\n"
+                "-old line\n"
+                "+new line\n"
+                "```"
             )
+            if attempt_number >= 1:
+                tailored_lines.append(
+                    "If a unified diff is not possible, return path-fenced file bodies:\n"
+                    "```python path=src/module.py\n"
+                    "# full file content here\n"
+                    "```"
+                )
+            if attempt_number >= 2 and issue_id:
+                tailored_lines.append(
+                    f"If you cannot produce a diff or file body, write a structured markdown summary of your findings to docs/healer-runs/{issue_id}-summary.md."
+                )
     if failure_class == "empty_diff":
         tailored_lines.append(
             "The previous response used a diff fence but left it empty. Return a complete patch body inside the fence."
@@ -1219,6 +1292,13 @@ def _build_proposer_prompt(
     language_hint: str,
     prefer_workspace_edits: bool,
 ) -> str:
+    output_contract = (
+        "Your output MUST be direct file edits via your file editor tools."
+        " Do not write a diff or describe changes in prose — the system only accepts workspace file edits."
+        if prefer_workspace_edits
+        else "Your output MUST contain a fenced diff block (```diff ... ```) or path-fenced file bodies"
+        " (```lang path=/file ... ```). Plain prose responses are rejected and will cause a retry."
+    )
     sections = [
         "### Role And Trusted Inputs\n"
         "You are the proposer agent for autonomous code healing.\n"
@@ -1227,7 +1307,8 @@ def _build_proposer_prompt(
             "Operate directly in the checked-out workspace, edit files in place, run the requested validation, and end with a brief operator summary."
             if prefer_workspace_edits
             else "Operate directly in the checked-out workspace and optimize for a valid finished patch, not commentary."
-        ),
+        )
+        + f"\n{output_contract}",
         "### Task Context\n"
         + (language_hint.strip() + "\n" if language_hint.strip() else "")
         + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
@@ -2124,6 +2205,64 @@ def _materialize_artifact_from_output(
         target_abs.write_text(content, encoding="utf-8")
         wrote_any = True
     return wrote_any
+
+
+_COMPLETION_ARTIFACT_NO_CHANGE_CLASSES = {"no_patch", "no_workspace_change", "empty_diff"}
+
+
+def _materialize_completion_artifact(
+    *,
+    issue_id: str,
+    issue_title: str,
+    task_spec: HealerTaskSpec,
+    proposer_output: str,
+    failure_class: str,
+    failure_reason: str,
+    workspace: Path,
+) -> bool:
+    """Write a structured run-summary artifact when the agent ran but produced no file changes.
+
+    This is a last-resort fallback: instead of hard-failing with no output, we produce a
+    markdown paper trail in docs/healer-runs/ that records what the agent attempted. The
+    file is excluded from generated-artifact filtering (docs/healer-runs/ is not in
+    _GENERIC_ARTIFACT_DIRS) so it will be staged and committed normally.
+
+    Returns True if the artifact was written (and caller should re-check staged changes).
+    """
+    if failure_class not in _COMPLETION_ARTIFACT_NO_CHANGE_CLASSES:
+        return False
+    output_text = (proposer_output or "").strip()
+    if not output_text:
+        return False
+    # If the agent returned a structured diff or path-fenced files, don't replace
+    # with an artifact — the structured output should be retried or escalated instead.
+    if _contains_diff_fence(proposer_output) or bool(_extract_path_fenced_bodies(proposer_output)):
+        return False
+    slug = re.sub(r"[^a-z0-9]+", "-", issue_title.lower()).strip("-")[:40]
+    artifact_path = workspace / "docs" / "healer-runs" / f"{issue_id}-{slug}.md"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    targets = ", ".join(task_spec.output_targets) if task_spec.output_targets else "(inferred from issue)"
+    output_excerpt = output_text[:2000] + ("..." if len(output_text) > 2000 else "")
+    content = (
+        f"# Healer Run: Issue #{issue_id}\n\n"
+        f"**Title:** {issue_title}  \n"
+        f"**Task kind:** {task_spec.task_kind}  \n"
+        f"**Validation profile:** {task_spec.validation_profile}  \n"
+        f"**Output targets:** {targets}  \n"
+        f"**Generated:** {now}\n\n"
+        f"## Status\n\n"
+        f"The agent completed but did not produce direct file changes.\n\n"
+        f"- Failure class: `{failure_class}`\n"
+        f"- Reason: {failure_reason}\n\n"
+        f"## Agent Response\n\n"
+        f"```\n{output_excerpt}\n```\n"
+    )
+    existing = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else None
+    if existing == content:
+        return False
+    artifact_path.write_text(content, encoding="utf-8")
+    return True
 
 
 def _materialize_explicit_path_fenced_files(

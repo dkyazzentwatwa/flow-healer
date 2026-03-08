@@ -106,6 +106,7 @@ def _make_loop(store, **overrides):
     )
     loop.runner.validate_workspace.return_value = {"failed_tests": 0}
     loop.preflight = MagicMock()
+    loop.preflight.probe_connector.return_value = (True, "")
     loop.preflight.refresh_all.return_value = []
     loop.preflight.ensure_language_ready.return_value = PreflightReport(
         language="python",
