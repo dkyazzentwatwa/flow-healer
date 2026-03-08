@@ -90,7 +90,16 @@ def _install_fake_processes(monkeypatch, processes: list[_FakeAppServerProcess])
     return killed
 
 
+def _mock_codex_available(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "flow_healer.codex_app_server_connector.shutil.which",
+        lambda command: "/usr/local/bin/codex" if command == "codex" else None,
+    )
+
+
 def test_get_or_create_thread_reuses_existing_backend_thread(monkeypatch, tmp_path) -> None:
+    _mock_codex_available(monkeypatch)
+
     def handler(proc: _FakeAppServerProcess, request: dict[str, object]) -> None:
         request_id = request["id"]
         method = request["method"]
@@ -114,6 +123,8 @@ def test_get_or_create_thread_reuses_existing_backend_thread(monkeypatch, tmp_pa
 
 
 def test_reset_thread_returns_fresh_backend_thread(monkeypatch, tmp_path) -> None:
+    _mock_codex_available(monkeypatch)
+
     def handler(proc: _FakeAppServerProcess, request: dict[str, object]) -> None:
         request_id = request["id"]
         method = request["method"]
@@ -136,6 +147,8 @@ def test_reset_thread_returns_fresh_backend_thread(monkeypatch, tmp_path) -> Non
 
 
 def test_run_turn_returns_final_answer_item(monkeypatch, tmp_path) -> None:
+    _mock_codex_available(monkeypatch)
+
     def handler(proc: _FakeAppServerProcess, request: dict[str, object]) -> None:
         request_id = request["id"]
         method = request["method"]
@@ -214,7 +227,81 @@ def test_run_turn_returns_final_answer_item(monkeypatch, tmp_path) -> None:
     connector.shutdown()
 
 
+def test_run_turn_detailed_reports_commentary_and_final_answer(monkeypatch, tmp_path) -> None:
+    _mock_codex_available(monkeypatch)
+
+    def handler(proc: _FakeAppServerProcess, request: dict[str, object]) -> None:
+        request_id = request["id"]
+        method = request["method"]
+        if method == "initialize":
+            proc.emit({"jsonrpc": "2.0", "id": request_id, "result": {"userAgent": "test"}})
+            return
+        if method == "thread/start":
+            proc.emit({"jsonrpc": "2.0", "id": request_id, "result": {"thread": {"id": "thread-1"}}})
+            return
+        if method == "turn/start":
+            turn_id = "turn-2"
+            proc.emit({"jsonrpc": "2.0", "id": request_id, "result": {"turn": {"id": turn_id}}})
+            proc.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": turn_id,
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "item-commentary",
+                            "text": "I inspected the target file and found the likely fix path.",
+                            "phase": "commentary",
+                        },
+                    },
+                }
+            )
+            proc.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": turn_id,
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "item-final",
+                            "text": "Updated the file in place and ran tests.",
+                            "phase": "final_answer",
+                        },
+                    },
+                }
+            )
+            proc.emit(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": turn_id, "status": "completed", "error": None},
+                    },
+                }
+            )
+
+    process = _FakeAppServerProcess(pid=104, handler=handler)
+    _install_fake_processes(monkeypatch, [process])
+    connector = CodexAppServerConnector(workspace=str(tmp_path))
+    thread_id = connector.get_or_create_thread("healer:4")
+
+    result = connector.run_turn_detailed(thread_id, "fix it")
+
+    assert result.output_text == "Updated the file in place and ran tests."
+    assert result.final_answer_present is True
+    assert "likely fix path" in result.commentary_tail
+    assert "item/completed" in result.raw_event_kinds
+    connector.shutdown()
+
+
 def test_workspace_change_restarts_app_server(monkeypatch, tmp_path) -> None:
+    _mock_codex_available(monkeypatch)
+
     workspace_a = tmp_path / "repo-a"
     workspace_b = tmp_path / "repo-b"
     workspace_a.mkdir()

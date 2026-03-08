@@ -316,14 +316,19 @@ def _check_command(cmd: list[str]) -> bool:
 
 
 def _launch_agent_path(label: str) -> str:
+    if shutil.which("launchctl") is None:
+        return ""
     domain = f"gui/{os.getuid()}/{label}"
-    proc = subprocess.run(
-        ["launchctl", "print", domain],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        proc = subprocess.run(
+            ["launchctl", "print", domain],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except OSError:
+        return ""
     if proc.returncode != 0:
         return ""
     text = proc.stdout or ""
