@@ -51,10 +51,12 @@ def test_healer_verifier_passes_timeout_to_connector() -> None:
     )
 
     assert result.passed is True
+    assert result.verdict == "pass"
+    assert result.hard_failure is False
     assert connector.timeout_seconds == 123
 
 
-def test_healer_verifier_treats_non_json_output_as_failure() -> None:
+def test_healer_verifier_treats_non_json_output_as_advisory_failure() -> None:
     connector = _CaptureConnector("This should pass, and it did not fail in my opinion.")
     verifier = HealerVerifier(connector=connector)
 
@@ -69,5 +71,69 @@ def test_healer_verifier_treats_non_json_output_as_failure() -> None:
     )
 
     assert result.passed is False
+    assert result.verdict == "soft_fail"
+    assert result.hard_failure is False
+    assert result.parse_error is True
     assert "not valid JSON" in result.summary
     assert "This should pass" in result.summary
+
+
+def test_healer_verifier_accepts_fenced_json() -> None:
+    connector = _CaptureConnector('```json\n{"verdict":"pass","summary":"Looks good."}\n```')
+    verifier = HealerVerifier(connector=connector)
+
+    result = verifier.verify(
+        issue_id="803",
+        issue_title="Fix service issue",
+        issue_body="Body",
+        task_spec=_task_spec(),
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="summary",
+    )
+
+    assert result.passed is True
+    assert result.verdict == "pass"
+    assert result.hard_failure is False
+
+
+def test_healer_verifier_extracts_first_json_object_from_prose() -> None:
+    connector = _CaptureConnector(
+        'I checked the patch.\n{"verdict":"soft_fail","summary":"Validation passed but this should stay advisory."}\nThanks.'
+    )
+    verifier = HealerVerifier(connector=connector)
+
+    result = verifier.verify(
+        issue_id="804",
+        issue_title="Fix service issue",
+        issue_body="Body",
+        task_spec=_task_spec(),
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="summary",
+    )
+
+    assert result.passed is False
+    assert result.verdict == "soft_fail"
+    assert result.hard_failure is False
+    assert result.parse_error is False
+
+
+def test_healer_verifier_marks_unknown_verdict_as_hard_failure() -> None:
+    connector = _CaptureConnector('{"verdict":"fail","summary":"Too broad."}')
+    verifier = HealerVerifier(connector=connector)
+
+    result = verifier.verify(
+        issue_id="805",
+        issue_title="Fix service issue",
+        issue_body="Body",
+        task_spec=_task_spec(),
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="summary",
+    )
+
+    assert result.passed is False
+    assert result.verdict == "hard_fail"
+    assert result.hard_failure is True
+    assert result.parse_error is False

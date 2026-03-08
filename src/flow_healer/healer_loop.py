@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from uuid import uuid4
 
 from .config import RelaySettings
@@ -28,8 +28,9 @@ from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
 from .healer_runner import HealerRunner, _stage_workspace_changes
 from .healer_scan import FlowHealerScanner
-from .healer_tracker import GitHubHealerTracker, HealerIssue
+from .healer_tracker import GitHubHealerTracker, HealerIssue, PullRequestDetails, PullRequestResult
 from .healer_task_spec import compile_task_spec
+from .healer_triage import classify_failure_family
 from .healer_verifier import HealerVerifier
 from .language_strategies import UnsupportedLanguageError
 from .protocols import ConnectorProtocol
@@ -62,14 +63,16 @@ _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "no_patch",
     "no_workspace_change",
     "patch_apply_failed",
+    "push_non_fast_forward",
     "no_code_diff",
 }
-_STUCK_PR_STATES = {"blocked", "has_failure", "behind"}
+_STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
 
 _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "tests_failed":          {"backoff_multiplier": 0.5, "feedback_hint": "Previous attempt's tests failed. Focus on the failing test output and adjust the fix."},
     "verifier_failed":       {"backoff_multiplier": 1.5, "feedback_hint": "The verifier rejected the previous fix. Address the root cause, not symptoms."},
     "push_failed":           {"backoff_multiplier": 2.0, "feedback_hint": "Push failed on last attempt, likely transient."},
+    "push_non_fast_forward": {"backoff_multiplier": 1.0, "feedback_hint": "The managed issue branch diverged remotely. Refresh the branch state and retry from the latest managed base."},
     "pr_open_failed":        {"backoff_multiplier": 2.0, "feedback_hint": "Could not open PR last time."},
     "lock_upgrade_conflict": {"backoff_multiplier": 1.0, "feedback_hint": "Previous fix expanded beyond predicted scope. Keep changes narrow."},
     "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
@@ -200,9 +203,13 @@ class AutonomousHealerLoop:
         self._maybe_run_scan()
         self._ingest_ready_issues()
         self.preflight.refresh_all(force=False)
-        self._reconcile_pr_outcomes()
-        self._auto_approve_open_prs()
-        self._auto_merge_open_prs()
+        active_pr_rows = self._list_active_pr_rows(include_blocked=True)
+        open_pr_rows = [
+            row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
+        ]
+        self._reconcile_pr_outcomes(active_prs=active_pr_rows)
+        self._auto_approve_open_prs(active_prs=open_pr_rows)
+        self._auto_merge_open_prs(active_prs=open_pr_rows)
         self._reconcile_pr_outcomes()
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
@@ -253,15 +260,26 @@ class AutonomousHealerLoop:
             self._reconcile_pr_outcomes()
             processed += 1
 
-    def _ingest_pr_feedback(self) -> None:
-        active_prs = self.store.list_healer_issues(states=["pr_open", "pr_pending_approval"], limit=100)
+    def _ingest_pr_feedback(self, active_prs: list[dict[str, object]] | None = None) -> None:
+        active_prs = active_prs or self._list_active_pr_rows(include_blocked=False)
         self_actor = self.tracker.viewer_login().lower()
+        details_cache: dict[int, PullRequestDetails | None] = {}
         for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
             if pr_number <= 0:
                 continue
 
             issue_id = str(row.get("issue_id") or "")
+            details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
+            if details is None:
+                continue
+            current_updated_at = str(details.updated_at or "").strip()
+            # Skip the 3 feedback list endpoints when GitHub says the PR has not changed.
+            if (
+                current_updated_at
+                and current_updated_at == str(row.get("pr_last_seen_updated_at") or "").strip()
+            ):
+                continue
             last_issue_comment_id = int(row.get("last_issue_comment_id") or 0)
             last_review_id = int(row.get("last_review_id") or 0)
             last_review_comment_id = int(row.get("last_review_comment_id") or 0)
@@ -323,11 +341,11 @@ class AutonomousHealerLoop:
                 combined_feedback = "\n\n".join(part for part in [existing_feedback, rendered_feedback] if part).strip()
                 self.store.set_healer_issue_state(
                     issue_id=issue_id,
-                    state="queued",
-                    backoff_until="",
+                    state=str(row.get("state") or "pr_open"),
                     last_issue_comment_id=max_issue_comment_id,
                     last_review_id=max_review_id,
                     last_review_comment_id=max_review_comment_id,
+                    pr_last_seen_updated_at=current_updated_at,
                     feedback_context=combined_feedback,
                     clear_lease=True,
                 )
@@ -344,7 +362,31 @@ class AutonomousHealerLoop:
                     last_issue_comment_id=max_issue_comment_id,
                     last_review_id=max_review_id,
                     last_review_comment_id=max_review_comment_id,
+                    pr_last_seen_updated_at=current_updated_at,
                 )
+
+    def _restore_open_pr_state(self, *, issue_id: str, pr_number: int, pr_state: str = "open") -> None:
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="pr_open",
+            pr_number=pr_number,
+            pr_state=(pr_state or "open"),
+            clear_lease=True,
+        )
+
+    def _discover_open_pr_for_issue(self, *, issue_id: str) -> PullRequestResult | None:
+        try:
+            pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
+        except Exception as exc:
+            logger.warning("Failed to discover PR for issue #%s: %s", issue_id, exc)
+            return None
+        if pr is None:
+            return None
+        if str(pr.state or "").strip().lower() != "open":
+            return None
+        if int(pr.number or 0) <= 0:
+            return None
+        return pr
 
     def _maybe_run_scan(self) -> dict[str, object] | None:
         if not self.settings.healer_scan_enable_issue_creation:
@@ -367,8 +409,9 @@ class AutonomousHealerLoop:
             logger.warning("Healer scan failed for repo %s: %s", self.settings.repo_name, exc)
             return None
 
-    def _reconcile_pr_outcomes(self) -> int:
-        active_prs = self.store.list_healer_issues(states=["pr_open", "pr_pending_approval", "blocked"], limit=100)
+    def _reconcile_pr_outcomes(self, active_prs: list[dict[str, object]] | None = None) -> int:
+        active_prs = active_prs or self._list_active_pr_rows(include_blocked=True)
+        details_cache: dict[int, PullRequestDetails | None] = {}
         resolved = 0
         for row in active_prs:
             issue_id = str(row.get("issue_id") or "")
@@ -380,34 +423,55 @@ class AutonomousHealerLoop:
             pr_number = int(row.get("pr_number") or 0)
             pr_state = ""
             mergeable_state = ""
+            head_ref = ""
             if pr_number > 0:
-                pr_details = self.tracker.get_pr_details(pr_number=pr_number)
+                pr_details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
                 if pr_details is None:
                     continue
                 pr_state = pr_details.state
                 mergeable_state = pr_details.mergeable_state
-                pr_state, mergeable_state = self._recheck_conflict_state(
+                head_ref = pr_details.head_ref
+                pr_state, mergeable_state, refreshed = self._recheck_conflict_state(
                     pr_number=pr_number,
                     current_state=pr_state,
                     current_mergeable_state=mergeable_state,
                 )
+                if refreshed is not None:
+                    details_cache[pr_number] = refreshed
+                    head_ref = refreshed.head_ref
             else:
                 discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
                 if discovered_pr is None:
                     continue
                 pr_number = discovered_pr.number
                 pr_state = discovered_pr.state.strip().lower()
+                head_ref = ""
 
             if pr_state == "conflict":
+                stuck_since = str(row.get("stuck_since") or "").strip()
+                debounce_seconds = max(0, int(getattr(self.settings, "healer_conflict_requeue_debounce_seconds", 120)))
+                if debounce_seconds > 0 and not stuck_since:
+                    self.store.mark_pr_stuck(issue_id=issue_id, pr_number=pr_number)
+                    continue
+                if debounce_seconds > 0 and _minutes_since(stuck_since) < (debounce_seconds / 60.0):
+                    continue
                 auto_resolve = getattr(self.settings, "healer_auto_resolve_conflicts", True)
                 if auto_resolve and self._attempt_conflict_resolution(issue_id=issue_id, pr_number=pr_number, row=row):
                     resolved += 1
                 else:
                     auto_requeue = bool(getattr(self.settings, "healer_conflict_auto_requeue_enabled", True))
                     if auto_requeue:
-                        handled = self._close_conflicted_pr_and_requeue_issue(issue_id=issue_id, pr_number=pr_number)
+                        handled = self._close_conflicted_pr_and_requeue_issue(
+                            issue_id=issue_id,
+                            pr_number=pr_number,
+                            head_ref=head_ref,
+                        )
                     else:
-                        handled = self._close_conflicted_pr_and_issue(issue_id=issue_id, pr_number=pr_number)
+                        handled = self._close_conflicted_pr_and_issue(
+                            issue_id=issue_id,
+                            pr_number=pr_number,
+                            head_ref=head_ref,
+                        )
                     if not handled:
                         self._block_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
                 continue
@@ -423,8 +487,9 @@ class AutonomousHealerLoop:
                         pr_state="closed",
                         clear_lease=True,
                     )
+                    self._cleanup_managed_remote_branch(branch=head_ref)
                     continue
-                self._requeue_closed_conflicted_pr(issue_id=issue_id, pr_number=pr_number)
+                self._requeue_closed_conflicted_pr(issue_id=issue_id, pr_number=pr_number, head_ref=head_ref)
                 continue
 
             # Stuck-PR detection: re-queue issues whose PR has been non-mergeable too long
@@ -438,6 +503,7 @@ class AutonomousHealerLoop:
                         issue_id=issue_id,
                         pr_number=pr_number,
                         mergeable_state=mergeable_state,
+                        head_ref=head_ref,
                     )
                 continue
 
@@ -487,6 +553,7 @@ class AutonomousHealerLoop:
                 pr_state="merged",
                 clear_lease=True,
             )
+            self._cleanup_managed_remote_branch(branch=head_ref)
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
@@ -501,6 +568,22 @@ class AutonomousHealerLoop:
             self._reset_infra_failure_streak()
             resolved += 1
         return resolved
+
+    def _list_active_pr_rows(self, *, include_blocked: bool) -> list[dict[str, object]]:
+        states = ["pr_open", "pr_pending_approval"]
+        if include_blocked:
+            states.append("blocked")
+        return self.store.list_healer_issues(states=states, limit=100)
+
+    def _get_pr_details_cached(
+        self,
+        *,
+        pr_number: int,
+        cache: dict[int, PullRequestDetails | None],
+    ) -> PullRequestDetails | None:
+        if pr_number not in cache:
+            cache[pr_number] = self.tracker.get_pr_details(pr_number=pr_number)
+        return cache[pr_number]
 
     @staticmethod
     def _is_conflict_blocked_row(row: dict[str, object], *, pr_number: int) -> bool:
@@ -535,7 +618,19 @@ class AutonomousHealerLoop:
             ),
         )
 
-    def _close_conflicted_pr_and_requeue_issue(self, *, issue_id: str, pr_number: int) -> bool:
+    def _cleanup_managed_remote_branch(self, *, branch: str) -> None:
+        normalized = str(branch or "").strip()
+        if not _is_managed_healer_branch(normalized):
+            return
+        try:
+            deleted = self.tracker.delete_branch(branch=normalized)
+        except Exception as exc:
+            logger.warning("Failed to delete managed remote branch %s: %s", normalized, exc)
+            return
+        if not deleted:
+            logger.warning("Managed remote branch %s could not be deleted cleanly.", normalized)
+
+    def _close_conflicted_pr_and_requeue_issue(self, *, issue_id: str, pr_number: int, head_ref: str = "") -> bool:
         close_pr_comment = self._format_flow_status_comment(
             "Closing stale conflicted pull request",
             "This appears to be a stale-branch conflict after newer base-branch changes landed.",
@@ -558,6 +653,7 @@ class AutonomousHealerLoop:
         ):
             logger.warning("Failed to close conflicted PR #%d for issue #%s", pr_number, issue_id)
             return False
+        self._cleanup_managed_remote_branch(branch=head_ref)
 
         requeue_count = self.store.increment_conflict_requeue_count(issue_id)
         max_attempts = max(1, int(getattr(self.settings, "healer_conflict_auto_requeue_max_attempts", 3)))
@@ -623,7 +719,7 @@ class AutonomousHealerLoop:
         )
         return True
 
-    def _close_conflicted_pr_and_issue(self, *, issue_id: str, pr_number: int) -> bool:
+    def _close_conflicted_pr_and_issue(self, *, issue_id: str, pr_number: int, head_ref: str = "") -> bool:
         reason = (
             f"PR #{pr_number} hit a normal line-level merge conflict after newer changes landed on the base branch."
         )
@@ -660,6 +756,7 @@ class AutonomousHealerLoop:
         ):
             logger.warning("Failed to close conflicted PR #%d for issue #%s", pr_number, issue_id)
             return False
+        self._cleanup_managed_remote_branch(branch=head_ref)
         self._post_issue_status(issue_id=issue_id, body=issue_comment)
         close_issue_key = self._mutation_key(action="close_issue", issue_id=issue_id)
         if not self._run_idempotent_mutation(
@@ -856,7 +953,8 @@ class AutonomousHealerLoop:
             pass
         return "main"
 
-    def _requeue_closed_conflicted_pr(self, *, issue_id: str, pr_number: int) -> None:
+    def _requeue_closed_conflicted_pr(self, *, issue_id: str, pr_number: int, head_ref: str = "") -> None:
+        self._cleanup_managed_remote_branch(branch=head_ref)
         self.store.set_healer_issue_state(
             issue_id=issue_id,
             state="queued",
@@ -876,7 +974,7 @@ class AutonomousHealerLoop:
             ),
         )
 
-    def _close_and_requeue_stuck_pr(self, *, issue_id: str, pr_number: int, mergeable_state: str) -> None:
+    def _close_and_requeue_stuck_pr(self, *, issue_id: str, pr_number: int, mergeable_state: str, head_ref: str = "") -> None:
         reason = f"PR #{pr_number} has been stuck in `{mergeable_state}` state past the timeout."
         close_body = self._format_flow_status_comment(
             "Closing stale pull request",
@@ -893,6 +991,7 @@ class AutonomousHealerLoop:
             mutation_key=close_pr_key,
             action=lambda: self.tracker.close_pr(pr_number=pr_number, comment=close_body),
         )
+        self._cleanup_managed_remote_branch(branch=head_ref)
         self.store.set_healer_issue_state(
             issue_id=issue_id,
             state="queued",
@@ -914,22 +1013,31 @@ class AutonomousHealerLoop:
             ),
         )
 
-    def _auto_approve_open_prs(self) -> int:
+    def _auto_approve_open_prs(self, active_prs: list[dict[str, object]] | None = None) -> int:
         if not getattr(self.settings, "healer_pr_auto_approve_clean", True):
             return 0
         viewer_login = self.tracker.viewer_login().strip().lower()
+        active_prs = active_prs or self.store.list_healer_issues(states=["pr_open"], limit=100)
+        details_cache: dict[int, PullRequestDetails | None] = {}
         approved = 0
-        for row in self.store.list_healer_issues(states=["pr_open"], limit=100):
+        for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
             if pr_number <= 0:
                 continue
-            approved += int(self._maybe_auto_approve_pr(pr_number=pr_number, viewer_login=viewer_login))
+            details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
+            approved += int(self._maybe_auto_approve_pr(pr_number=pr_number, viewer_login=viewer_login, details=details))
         return approved
 
-    def _maybe_auto_approve_pr(self, *, pr_number: int, viewer_login: str | None = None) -> bool:
+    def _maybe_auto_approve_pr(
+        self,
+        *,
+        pr_number: int,
+        viewer_login: str | None = None,
+        details: PullRequestDetails | None = None,
+    ) -> bool:
         if not getattr(self.settings, "healer_pr_auto_approve_clean", True):
             return False
-        details = self.tracker.get_pr_details(pr_number=pr_number)
+        details = details if details is not None else self.tracker.get_pr_details(pr_number=pr_number)
         if details is None or details.state != "open":
             return False
         if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
@@ -951,21 +1059,24 @@ class AutonomousHealerLoop:
             logger.warning("Failed to auto-approve PR #%d: %s", pr_number, exc)
             return False
 
-    def _auto_merge_open_prs(self) -> int:
+    def _auto_merge_open_prs(self, active_prs: list[dict[str, object]] | None = None) -> int:
         if not getattr(self.settings, "healer_pr_auto_merge_clean", True):
             return 0
+        active_prs = active_prs or self.store.list_healer_issues(states=["pr_open"], limit=100)
+        details_cache: dict[int, PullRequestDetails | None] = {}
         merged = 0
-        for row in self.store.list_healer_issues(states=["pr_open"], limit=100):
+        for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
             if pr_number <= 0:
                 continue
-            merged += int(self._maybe_auto_merge_pr(pr_number=pr_number))
+            details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
+            merged += int(self._maybe_auto_merge_pr(pr_number=pr_number, details=details))
         return merged
 
-    def _maybe_auto_merge_pr(self, *, pr_number: int) -> bool:
+    def _maybe_auto_merge_pr(self, *, pr_number: int, details: PullRequestDetails | None = None) -> bool:
         if not getattr(self.settings, "healer_pr_auto_merge_clean", True):
             return False
-        details = self.tracker.get_pr_details(pr_number=pr_number)
+        details = details if details is not None else self.tracker.get_pr_details(pr_number=pr_number)
         if details is None or details.state != "open":
             return False
         if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
@@ -1099,9 +1210,17 @@ class AutonomousHealerLoop:
                 scope_key=scope_key,
                 dedupe_key=dedupe_key,
             )
+            discovered_pr = self._discover_open_pr_for_issue(issue_id=issue.issue_id)
             if existing_issue is not None:
                 existing_state = str(existing_issue.get("state") or "").strip().lower()
                 existing_pr_state = str(existing_issue.get("pr_state") or "").strip().lower()
+                if discovered_pr is not None:
+                    self._restore_open_pr_state(
+                        issue_id=issue.issue_id,
+                        pr_number=discovered_pr.number,
+                        pr_state=discovered_pr.state,
+                    )
+                    continue
                 if existing_state == "archived" or (
                     existing_state == "blocked" and existing_pr_state != "conflict"
                 ) or (
@@ -1316,6 +1435,7 @@ class AutonomousHealerLoop:
                 self.workspace_manager.prepare_workspace(
                     workspace_path=workspace.path,
                     branch=workspace.branch,
+                    base_branch=self.settings.healer_default_branch,
                 )
             except Exception as exc:
                 failure_class = "workspace_corrupt"
@@ -1401,6 +1521,7 @@ class AutonomousHealerLoop:
                         f"Attempt: `{attempt_no}`",
                         f"Branch: `{workspace.branch}`",
                         f"Task kind: `{task_spec.task_kind}`",
+                        f"Execution mode: `{_execution_mode_for_task(connector=self.connector, task_spec=task_spec)}`",
                         f"Targets: `{self._clean_comment_text(', '.join(task_spec.output_targets) if task_spec.output_targets else 'inferred in code', max_chars=220)}`",
                         f"Test gate mode: `{self.runner.test_gate_mode}`",
                     ],
@@ -1509,8 +1630,15 @@ class AutonomousHealerLoop:
                 language=detected_language,
                 workspace_status=run_result.workspace_status,
             )
-            verifier_summary = {"passed": verification.passed, "summary": verification.summary}
-            if not verification.passed:
+            verifier_summary = {
+                "passed": verification.passed,
+                "summary": verification.summary,
+                "verdict": getattr(verification, "verdict", "pass" if verification.passed else "hard_fail"),
+                "hard_failure": bool(getattr(verification, "hard_failure", not verification.passed)),
+                "parse_error": bool(getattr(verification, "parse_error", False)),
+                "policy": _verifier_policy_for_settings(self.settings),
+            }
+            if _should_block_on_verification(self.settings, verification):
                 failure_class = "verifier_failed"
                 failure_reason = verification.summary
                 logger.info(
@@ -1550,6 +1678,7 @@ class AutonomousHealerLoop:
                         [
                             "Status: `pr_pending_approval`",
                             f"Required label to continue: `{self.settings.healer_pr_required_label}`",
+                            f"Verifier mode: `{_verifier_mode_label(self.settings, verification)}`",
                             f"Verifier: {self._clean_comment_text(verification.summary, max_chars=260)}",
                             *self._format_test_summary_bullets(run_result.test_summary),
                         ],
@@ -1574,7 +1703,7 @@ class AutonomousHealerLoop:
                 language=detected_language,
             )
             if not commit_ok:
-                failure_class = "push_failed"
+                failure_class = _classify_push_failure(commit_reason)
                 failure_reason = commit_reason
                 logger.info(
                     "Issue #%s attempt %s failed during commit/push: %s",
@@ -1585,7 +1714,7 @@ class AutonomousHealerLoop:
                 issue_state = self._backoff_or_fail(
                     issue_id=issue.issue_id,
                     attempt_no=attempt_no,
-                    failure_class="push_failed",
+                    failure_class=failure_class,
                     failure_reason=commit_reason,
                 )
                 return
@@ -1630,6 +1759,9 @@ class AutonomousHealerLoop:
                     "I opened or updated the pull request for this issue.",
                     [
                         f"PR: [#{pr.number}]({pr.html_url})",
+                        f"Execution mode: `{_execution_mode_for_task(connector=self.connector, task_spec=task_spec)}`",
+                        f"Verifier mode: `{_verifier_mode_label(self.settings, verification)}`",
+                        f"Verifier verdict: `{getattr(verification, 'verdict', 'pass' if verification.passed else 'hard_fail')}`",
                         *self._format_test_summary_bullets(run_result.test_summary),
                     ],
                 ),
@@ -1755,6 +1887,19 @@ class AutonomousHealerLoop:
                 ", ".join(missing_labels),
             )
             return False
+        open_pr = self._discover_open_pr_for_issue(issue_id=issue.issue_id)
+        if open_pr is not None:
+            self._restore_open_pr_state(
+                issue_id=issue.issue_id,
+                pr_number=open_pr.number,
+                pr_state=open_pr.state,
+            )
+            logger.info(
+                "Skipping issue #%s because PR #%s is already open.",
+                issue.issue_id,
+                open_pr.number,
+            )
+            return False
         return True
 
     @staticmethod
@@ -1838,7 +1983,8 @@ class AutonomousHealerLoop:
         failure_reason: str,
     ) -> str:
         is_infra = failure_class in _INFRA_FAILURE_CLASSES
-        is_always_requeue = is_infra or (failure_class in _ALWAYS_REQUEUE_FAILURE_CLASSES)
+        counts_against_trust = _counts_against_issue_trust(failure_class=failure_class, failure_reason=failure_reason)
+        is_always_requeue = is_infra or (failure_class in _ALWAYS_REQUEUE_FAILURE_CLASSES) or not counts_against_trust
 
         if is_always_requeue:
             if is_infra:
@@ -2084,6 +2230,10 @@ class AutonomousHealerLoop:
         for attempt in attempts:
             state = str(attempt.get("state") or "").lower()
             if state not in {"pr_open", "resolved", "pr_pending_approval", "interrupted"}:
+                issue = self.store.get_healer_issue(str(attempt.get("issue_id") or ""))
+                family = classify_failure_family(issue, attempt)
+                if family != "product":
+                    continue
                 failures += 1
                 finished_at = _parse_store_timestamp(str(attempt.get("finished_at") or ""))
                 if finished_at is not None and (latest_failure_at is None or finished_at > latest_failure_at):
@@ -2190,14 +2340,20 @@ class AutonomousHealerLoop:
             return False
         return datetime.now(UTC) < pause_until
 
-    def _recheck_conflict_state(self, *, pr_number: int, current_state: str, current_mergeable_state: str) -> tuple[str, str]:
+    def _recheck_conflict_state(
+        self,
+        *,
+        pr_number: int,
+        current_state: str,
+        current_mergeable_state: str,
+    ) -> tuple[str, str, PullRequestDetails | None]:
         if current_state != "conflict":
-            return current_state, current_mergeable_state
+            return current_state, current_mergeable_state, None
         delay = max(1, int(getattr(self.settings, "healer_mergeability_recheck_delay_seconds", 2)))
         time.sleep(delay)
         details = self.tracker.get_pr_details(pr_number=pr_number)
         if details is None:
-            return current_state, current_mergeable_state
+            return current_state, current_mergeable_state, None
         if details.state != "conflict":
             logger.info(
                 "PR #%d conflict cleared on recheck (state=%s mergeable_state=%s).",
@@ -2205,7 +2361,7 @@ class AutonomousHealerLoop:
                 details.state,
                 details.mergeable_state,
             )
-        return details.state, details.mergeable_state
+        return details.state, details.mergeable_state, details
 
     def _post_issue_status(self, *, issue_id: str, body: str) -> None:
         mutation_key = self._mutation_key(action="issue_comment", issue_id=issue_id, body=body)
@@ -2397,13 +2553,7 @@ class AutonomousHealerLoop:
         if commit.returncode != 0:
             return False, (commit.stderr or commit.stdout or "git commit failed").strip()
 
-        push = subprocess.run(
-            ["git", "-C", str(workspace), "push", "-u", "origin", branch],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
+        push = _push_issue_branch(workspace=workspace, branch=branch)
         if push.returncode != 0:
             return False, (push.stderr or push.stdout or "git push failed").strip()
         return True, ""
@@ -2432,6 +2582,107 @@ def _is_actionable_feedback_author(author: str, self_actor: str) -> bool:
     if normalized.endswith("[bot]"):
         return False
     return True
+
+
+def _execution_mode_for_task(*, connector: ConnectorProtocol, task_spec: Any) -> str:
+    if str(getattr(task_spec, "validation_profile", "") or "") == "artifact_only":
+        return "artifact_synthesis"
+    if connector.__class__.__name__ == "CodexAppServerConnector":
+        return "workspace_edit"
+    return "serialized_patch"
+
+
+def _verifier_policy_for_settings(settings: RelaySettings) -> str:
+    policy = str(getattr(settings, "healer_verifier_policy", "advisory") or "advisory").strip().lower()
+    return "required" if policy == "required" else "advisory"
+
+
+def _should_block_on_verification(settings: RelaySettings, verification: Any) -> bool:
+    if bool(getattr(verification, "passed", False)):
+        return False
+    if bool(getattr(verification, "hard_failure", False)):
+        return True
+    return _verifier_policy_for_settings(settings) == "required"
+
+
+def _verifier_mode_label(settings: RelaySettings, verification: Any) -> str:
+    policy = _verifier_policy_for_settings(settings)
+    if bool(getattr(verification, "hard_failure", False)):
+        return "required"
+    return policy
+
+
+def _is_managed_healer_branch(branch: str) -> bool:
+    normalized = str(branch or "").strip()
+    return normalized.startswith("healer/issue-")
+
+
+def _classify_push_failure(reason: str) -> str:
+    lowered = str(reason or "").lower()
+    if "non-fast-forward" in lowered:
+        return "push_non_fast_forward"
+    return "push_failed"
+
+
+def _counts_against_issue_trust(*, failure_class: str, failure_reason: str) -> bool:
+    family = classify_failure_family(
+        {"state": "failed", "last_failure_class": failure_class, "last_failure_reason": failure_reason},
+        {"failure_class": failure_class, "failure_reason": failure_reason},
+    )
+    return family == "product"
+
+
+def _push_issue_branch(*, workspace: Path, branch: str) -> subprocess.CompletedProcess[str]:
+    branch_name = str(branch or "").strip()
+    target_ref = f"HEAD:refs/heads/{branch_name}"
+    if not _is_managed_healer_branch(branch_name):
+        return subprocess.run(
+            ["git", "-C", str(workspace), "push", "-u", "origin", target_ref],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+
+    def _managed_push(expected_sha: str) -> subprocess.CompletedProcess[str]:
+        cmd = ["git", "-C", str(workspace), "push"]
+        if expected_sha:
+            cmd.append(f"--force-with-lease=refs/heads/{branch_name}:{expected_sha}")
+        cmd.extend(["-u", "origin", target_ref])
+        return subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+
+    expected_sha = _ls_remote_branch_sha(workspace=workspace, branch=branch_name)
+    push = _managed_push(expected_sha)
+    if push.returncode == 0:
+        return push
+    if "non-fast-forward" not in ((push.stderr or "") + (push.stdout or "")).lower():
+        return push
+    refreshed_sha = _ls_remote_branch_sha(workspace=workspace, branch=branch_name)
+    if refreshed_sha == expected_sha:
+        return push
+    return _managed_push(refreshed_sha)
+
+
+def _ls_remote_branch_sha(*, workspace: Path, branch: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(workspace), "ls-remote", "--heads", "origin", branch],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return ""
+    line = (proc.stdout or "").strip().splitlines()
+    if not line:
+        return ""
+    return line[0].split()[0].strip() if line[0].split() else ""
 
 
 def _collect_targeted_tests(

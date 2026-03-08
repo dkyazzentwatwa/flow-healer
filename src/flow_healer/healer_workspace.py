@@ -75,19 +75,44 @@ class HealerWorkspaceManager:
                 )
         return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
 
-    def prepare_workspace(self, *, workspace_path: Path, branch: str) -> None:
+    def prepare_workspace(self, *, workspace_path: Path, branch: str, base_branch: str = "main") -> None:
         ws = Path(workspace_path).resolve()
         if not self._is_under_root(ws):
             raise ValueError(f"Refusing to prepare workspace outside healer root: {ws}")
+        fetch = subprocess.run(
+            ["git", "-C", str(self.repo_path), "fetch", "origin", base_branch],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        base_ref = f"origin/{base_branch}"
+        if fetch.returncode != 0:
+            logger.warning(
+                "Failed to fetch %s for workspace preparation in %s: %s",
+                base_branch,
+                ws,
+                (fetch.stderr or fetch.stdout).strip(),
+            )
+            base_ref = base_branch
+        checkout = subprocess.run(
+            ["git", "-C", str(ws), "checkout", "-B", branch, base_ref],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if checkout.returncode != 0:
+            raise RuntimeError(f"Failed to reset workspace {ws}: {(checkout.stderr or checkout.stdout).strip()}")
         reset = subprocess.run(
-            ["git", "-C", str(ws), "reset", "--hard", branch],
+            ["git", "-C", str(ws), "reset", "--hard", base_ref],
             check=False,
             capture_output=True,
             text=True,
             timeout=30,
         )
         if reset.returncode != 0:
-            raise RuntimeError(f"Failed to reset workspace {ws}: {(reset.stderr or reset.stdout).strip()}")
+            raise RuntimeError(f"Failed to hard-reset workspace {ws}: {(reset.stderr or reset.stdout).strip()}")
         clean = subprocess.run(
             ["git", "-C", str(ws), "clean", "-fd"],
             check=False,

@@ -402,6 +402,33 @@ def test_build_lesson_text_verifier_failed_includes_summary():
     assert "root cause" in text
 
 
+def test_build_test_hint_uses_issue_scoped_sandbox_language():
+    hint = HealerMemoryService._build_test_hint(
+        {
+            "execution_root": "e2e-apps/python-fastapi",
+            "execution_root_source": "issue",
+            "targeted_tests": ["tests/test_api_contract.py"],
+        }
+    )
+    assert "targeted sandbox validation" in hint
+    assert "e2e-apps/python-fastapi" in hint
+
+
+def test_build_lesson_text_tests_failed_uses_sandbox_validation_language():
+    text = HealerMemoryService._build_lesson_text(
+        outcome="failure",
+        title="Fix sandbox health endpoint",
+        scope_key="path:e2e-apps/python-fastapi/app/api.py",
+        failure_class="tests_failed",
+        failure_reason="sandbox tests failed",
+        verifier_summary="",
+        test_hint="Re-run only the issue-scoped validation commands from `e2e-apps/python-fastapi` before publishing.",
+        test_output_excerpt="AssertionError",
+        sandbox_scoped=True,
+    )
+    assert "issue-scoped sandbox validation gates" in text
+
+
 def test_build_prompt_context_groups_lessons_with_prefixes():
     store = FakeStore()
     memory = HealerMemoryService(store, enabled=True)

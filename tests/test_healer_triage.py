@@ -10,6 +10,7 @@ def test_classify_issue_route_sends_connector_failures_to_debug_skill() -> None:
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.recommended_skill == "flow-healer-connector-debug"
     assert "connector-debug" in route.default_action
     assert route.graph_position == 6
@@ -36,6 +37,7 @@ def test_classify_issue_route_detects_fixture_setup_failures() -> None:
     )
 
     assert route.diagnosis == "repo_fixture_or_setup"
+    assert route.failure_family == "automation_process"
     assert route.recommended_skill == "flow-healer-preflight"
     assert route.graph_position == 2
     assert route.previous_skill == "flow-healer-local-validation"
@@ -54,6 +56,7 @@ def test_classify_issue_route_maps_diff_contract_failures_to_connector_focus() -
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.connector_debug_focus == "diff_fence"
     assert route.connector_debug_checks[0] == "Validate diff fence validity"
 
@@ -65,6 +68,7 @@ def test_classify_issue_route_maps_empty_diff_failures_to_empty_diff_focus() -> 
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.connector_debug_focus == "empty_diff"
 
 
@@ -78,6 +82,7 @@ def test_classify_issue_route_maps_malformed_diff_failures_to_diff_fence_focus()
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.connector_debug_focus == "diff_fence"
 
 
@@ -88,6 +93,7 @@ def test_classify_issue_route_maps_runtime_connector_failures_to_runtime_crash_f
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.recommended_skill == "flow-healer-connector-debug"
     assert route.connector_debug_focus == "runtime_crash"
     assert route.connector_debug_checks[0] == "Rerun the connector against a fixed prompt fixture"
@@ -103,6 +109,7 @@ def test_classify_issue_route_maps_docs_only_code_change_failures_to_contract_co
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.recommended_skill == "flow-healer-connector-debug"
     assert route.connector_debug_focus == "contract_comparison"
     assert route.connector_debug_checks[0] == "Compare proposer and verifier contracts"
@@ -115,9 +122,43 @@ def test_classify_issue_route_maps_verifier_payload_failures_to_json_checks() ->
     )
 
     assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
     assert route.connector_debug_focus == "verifier_payload"
     assert route.connector_debug_checks == (
         "Validate any verifier payload as JSON",
         "Confirm the expected verdict and summary fields are present",
         "Compare verifier output with the expected strict JSON contract",
     )
+
+
+def test_classify_issue_route_treats_non_fast_forward_push_as_automation_process() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {
+            "failure_class": "push_non_fast_forward",
+            "failure_reason": "non-fast-forward push rejected for healer branch",
+        },
+    )
+
+    assert route.diagnosis == "automation_or_process"
+    assert route.failure_family == "automation_process"
+
+
+def test_classify_issue_route_treats_plain_tests_failed_as_product_bug() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {"failure_class": "tests_failed", "failure_reason": "AssertionError: expected 200 got 500"},
+    )
+
+    assert route.diagnosis == "product_bug"
+    assert route.failure_family == "product"
+
+
+def test_classify_issue_route_treats_semantic_verifier_failure_as_product_bug() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {"failure_class": "verifier_failed", "failure_reason": "Patch is broader than the requested sandbox scope."},
+    )
+
+    assert route.diagnosis == "product_bug"
+    assert route.failure_family == "product"

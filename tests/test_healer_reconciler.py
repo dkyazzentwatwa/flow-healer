@@ -119,3 +119,19 @@ def test_reconcile_interrupts_superseded_running_attempt(tmp_path) -> None:
     assert summary["interrupted_superseded_attempts"] == 1
     assert attempts["ha_old"]["state"] == "interrupted"
     assert attempts["ha_current"]["state"] == "running"
+
+
+def test_sweep_orphan_workspaces_skips_store_scan_when_root_missing(tmp_path, monkeypatch) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(store=store, workspace_manager=workspace_manager)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("workspace refs should not be queried when worktrees root is missing")
+
+    monkeypatch.setattr(store, "list_healer_issue_workspace_refs", fail_if_called)
+
+    assert reconciler._sweep_orphan_workspaces() == 0

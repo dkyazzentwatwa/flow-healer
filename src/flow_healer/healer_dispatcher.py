@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .healer_locks import canonicalize_lock_keys, lock_granularity
+from .healer_locks import canonicalize_lock_keys
 from .store import SQLiteStore
 
 
@@ -40,21 +40,15 @@ class HealerDispatcher:
 
     def acquire_prediction_locks(self, *, issue_id: str, lock_keys: list[str]) -> LockAcquireResult:
         keys = canonicalize_lock_keys(lock_keys)
-        acquired: list[str] = []
-        for key in keys:
-            ok = self.store.acquire_healer_lock(
-                lock_key=key,
-                granularity=lock_granularity(key),
-                issue_id=issue_id,
-                lease_owner=self.worker_id,
-                lease_seconds=self.lease_seconds,
-            )
-            if not ok:
-                if acquired:
-                    self.store.release_healer_locks(issue_id=issue_id, lock_keys=acquired)
-                return LockAcquireResult(acquired=False, keys=acquired, reason=f"lock_conflict:{key}")
-            acquired.append(key)
-        return LockAcquireResult(acquired=True, keys=acquired, reason="")
+        acquired, conflict_key, acquired_keys = self.store.acquire_healer_locks_batch(
+            lock_keys=keys,
+            issue_id=issue_id,
+            lease_owner=self.worker_id,
+            lease_seconds=self.lease_seconds,
+        )
+        if not acquired:
+            return LockAcquireResult(acquired=False, keys=[], reason=f"lock_conflict:{conflict_key}")
+        return LockAcquireResult(acquired=True, keys=acquired_keys, reason="")
 
     def upgrade_locks(self, *, issue_id: str, lock_keys: list[str]) -> LockAcquireResult:
         existing = {entry.get("lock_key", "") for entry in self.store.list_healer_locks(issue_id=issue_id)}

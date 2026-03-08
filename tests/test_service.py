@@ -51,6 +51,8 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
             actual_diff_set=[],
             test_summary={},
             verifier_summary={},
+            failure_class="tests_failed" if state == "failed" else "",
+            failure_reason="Targeted sandbox validation failed." if state == "failed" else "",
         )
     runtime.store.close()
 
@@ -73,15 +75,17 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "last_runtime_stdout_tail" in connector
     assert "last_runtime_stderr_tail" in connector
     recent_attempt = rows[0]["recent_attempts"][0]
-    assert recent_attempt["diagnosis"] == "operator_or_environment"
-    assert recent_attempt["recommended_skill"] == "flow-healer-local-validation"
+    assert recent_attempt["diagnosis"] == "product_bug"
+    assert recent_attempt["failure_family"] == "product"
+    assert recent_attempt["recommended_skill"] == "flow-healer-live-smoke"
     assert recent_attempt["default_action"]
-    assert recent_attempt["graph_position"] == 1
-    assert recent_attempt["previous_skill"] == ""
-    assert recent_attempt["next_skill"] == "flow-healer-preflight"
-    assert recent_attempt["skill_relative_path"].endswith("skills/flow-healer-local-validation/SKILL.md")
+    assert recent_attempt["graph_position"] == 3
+    assert recent_attempt["previous_skill"] == "flow-healer-preflight"
+    assert recent_attempt["next_skill"] == "flow-healer-triage"
+    assert recent_attempt["skill_relative_path"].endswith("skills/flow-healer-live-smoke/SKILL.md")
     assert recent_attempt["default_command_preview"]
-    assert recent_attempt["key_output_fields"] == ["repo_root", "checks[*].exit_code", "checks[*].output_tail"]
+    assert "issue_id" in recent_attempt["key_output_fields"]
+    assert "attempt_state" in recent_attempt["key_output_fields"]
     assert recent_attempt["stop_conditions"] == []
     assert recent_attempt["stop_recommended"] is True
     assert recent_attempt["stop_reason"]
@@ -195,3 +199,21 @@ def test_build_runtime_uses_configured_connector_backend(tmp_path) -> None:
     app_runtime = app_server_service.build_runtime(repo)
     assert isinstance(app_runtime.connector, CodexAppServerConnector)
     app_server_service._close_runtime(app_runtime)
+
+
+def test_build_runtime_defaults_to_app_server_backend(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[repo],
+        )
+    )
+
+    runtime = service.build_runtime(repo)
+    assert isinstance(runtime.connector, CodexAppServerConnector)
+    service._close_runtime(runtime)

@@ -142,27 +142,63 @@ class DashboardServer:
 
 def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str) -> str:
     payload = _overview_payload(config, service)
-    action_cards = []
+
+    # Build repo action buttons as Alpine.js powered dropdowns
+    repo_actions = []
     for repo in config.repos:
-        action_cards.append(
+        repo_actions.append(
             f"""
-            <section class='card action-card'>
-              <h3>{escape(repo.repo_name)}</h3>
-              <form method='post' action='/action' class='actions'>
-                <input type='hidden' name='repo' value='{escape(repo.repo_name)}'>
-                <button name='command' value='status'>Status</button>
-                <button name='command' value='doctor'>Doctor</button>
-                <button name='command' value='pause'>Pause</button>
-                <button name='command' value='resume'>Resume</button>
-                <button name='command' value='once'>Run Once</button>
-                <button name='command' value='scan'>Scan</button>
-                <label class='dry'><input type='checkbox' name='dry_run' value='true'> dry</label>
-              </form>
-            </section>
+            <div class='border border-gray-800 rounded-lg p-4 bg-gray-900'>
+              <div class='flex items-center justify-between'>
+                <h3 class='text-sm font-semibold text-gray-100'>{escape(repo.repo_name)}</h3>
+                <button
+                  @click="activeActions === '{escape(repo.repo_name)}' ? activeActions = '' : activeActions = '{escape(repo.repo_name)}'"
+                  class='px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition'
+                >
+                  Actions
+                </button>
+              </div>
+              <div x-show="activeActions === '{escape(repo.repo_name)}'" class='mt-3 pt-3 border-t border-gray-800'>
+                <div class='space-y-2'>
+                  <form method='post' action='/action' class='contents'>
+                    <input type='hidden' name='repo' value='{escape(repo.repo_name)}'>
+                    <button type='submit' name='command' value='status' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
+                      Status
+                    </button>
+                    <button type='submit' name='command' value='doctor' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
+                      Doctor
+                    </button>
+                    <button type='submit' name='command' value='pause' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
+                      Pause
+                    </button>
+                    <button type='submit' name='command' value='resume' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
+                      Resume
+                    </button>
+                    <button type='submit' name='command' value='once' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
+                      Run Once
+                    </button>
+                    <div class='flex items-center gap-2 px-3 py-2'>
+                      <button type='submit' name='command' value='scan' class='flex-1 text-left text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded px-2 py-1 transition'>
+                        Scan
+                      </button>
+                      <label class='text-xs text-gray-400 flex items-center gap-1'>
+                        <input type='checkbox' name='dry_run' value='true' class='rounded'>
+                        dry
+                      </label>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
             """
         )
 
-    notice_html = f"<div class='notice'>{escape(notice)}</div>" if notice else ""
+    notice_html = f"""
+    <div class='mb-4 p-3 bg-amber-900/30 border border-amber-800 rounded-lg text-amber-300 text-sm'>
+      {escape(notice)}
+    </div>
+    """ if notice else ""
+
     initial = escape(json.dumps(payload, default=str))
 
     return f"""
@@ -172,163 +208,207 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Flow Healer Dashboard</title>
-  <style>
-    :root {{ --bg:#0d1117; --panel:#111a22; --line:#2f81f7; --muted:#8b949e; --ok:#7ee787; --warn:#f0b72f; --text:#e6edf3; }}
-    * {{ box-sizing:border-box; }}
-    body {{ font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; margin:0; background:var(--bg); color:var(--text); }}
-    header {{ padding:14px 16px; background:#111a22; position:sticky; top:0; border-bottom:1px solid #1f2a36; z-index:10; }}
-    header h1 {{ margin:0 0 4px 0; font-size:1.1rem; }}
-    .subtitle {{ margin:0; color:var(--muted); font-size:0.85rem; }}
-    .topbar {{ display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap; }}
-    .refresh {{ background:#13202b; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:.85rem; }}
-    main {{ padding:12px; max-width:1200px; margin:0 auto; }}
-    .notice {{ background:#13202b; color:var(--warn); padding:10px; margin-bottom:12px; border-radius:8px; }}
-    .kpis {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin-bottom:12px; }}
-    .kpi {{ background:var(--panel); border:1px solid #23303d; border-radius:10px; padding:10px; }}
-    .kpi .label {{ color:var(--muted); font-size:.75rem; }}
-    .kpi .value {{ font-size:1.2rem; font-weight:600; margin-top:4px; }}
-    .grid {{ display:grid; grid-template-columns:1.2fr .8fr; gap:12px; }}
-    .card {{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }}
-    .card h2 {{ margin:0 0 8px 0; font-size:1rem; }}
-    .actions {{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; }}
-    .actions button {{ background:#13202b; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 9px; font-size:.82rem; }}
-    .dry {{ color:var(--muted); font-size:.82rem; }}
-    table {{ width:100%; border-collapse:collapse; font-size:.83rem; }}
-    th, td {{ border-bottom:1px solid #23303d; padding:8px; text-align:left; vertical-align:top; }}
-    th {{ color:var(--muted); font-weight:600; }}
-    .status-pill {{ display:inline-block; border-radius:999px; padding:2px 8px; border:1px solid #2f81f7; font-size:.75rem; }}
-    .logs {{ background:#0b141d; border:1px solid #23303d; border-radius:8px; min-height:220px; max-height:400px; overflow:auto; padding:10px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.76rem; white-space:pre-wrap; }}
-    .muted {{ color:var(--muted); }}
-    .actions-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:8px; }}
-    .action-card h3 {{ margin:0 0 8px 0; font-size:.95rem; }}
-    @media (max-width: 920px) {{ .grid {{ grid-template-columns:1fr; }} }}
-  </style>
+  <script src='https://cdn.tailwindcss.com'></script>
+  <script defer src='https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js'></script>
+  <script>
+    tailwind.config = {{
+      theme: {{
+        extend: {{
+          colors: {{
+            dark: '#0f172a'
+          }}
+        }}
+      }}
+    }}
+  </script>
 </head>
-<body>
-  <header>
-    <div class='topbar'>
-      <div>
-        <h1>Flow Healer Dashboard</h1>
-        <p class='subtitle'>{escape(config.service.state_root)} • Auto refresh every 5s</p>
+<body class='bg-gray-950 text-gray-100 font-sans'>
+  <header class='sticky top-0 z-10 bg-gray-900 border-b border-gray-800'>
+    <div class='px-6 py-4'>
+      <div class='flex items-center justify-between'>
+        <div>
+          <h1 class='text-lg font-bold text-gray-100'>Flow Healer Dashboard</h1>
+          <p class='text-xs text-gray-400 mt-1'>{escape(config.service.state_root)} • Auto-refresh every 5s</p>
+        </div>
+        <div class='flex items-center gap-3'>
+          <span class='inline-flex items-center gap-2 text-xs text-gray-400'>
+            <span class='inline-block w-2 h-2 bg-emerald-400 rounded-full'></span>
+            Live
+          </span>
+          <button
+            @click='refresh()'
+            class='px-3 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition'
+          >
+            Refresh Now
+          </button>
+        </div>
       </div>
-      <button class='refresh' id='refresh-btn' type='button'>Refresh Now</button>
     </div>
   </header>
-  <main>
+
+  <main class='max-w-7xl mx-auto px-6 py-6' x-data='dashboardApp()' @load='init()'>
     {notice_html}
-    <section class='kpis' id='kpis'></section>
 
-    <section class='card' style='margin-bottom:12px;'>
-      <h2>Quick Actions</h2>
-      <div class='actions-grid'>
-        {''.join(action_cards)}
+    <!-- KPI Strip -->
+    <div class='grid grid-cols-2 md:grid-cols-5 gap-4 mb-6'>
+      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
+        <div class='text-xs text-gray-400 uppercase tracking-wide'>Repos</div>
+        <div class='text-2xl font-bold text-gray-100 mt-2' x-text='rows.length'></div>
       </div>
-    </section>
+      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
+        <div class='text-xs text-gray-400 uppercase tracking-wide'>Total Issues</div>
+        <div class='text-2xl font-bold text-gray-100 mt-2' x-text='totalIssues'></div>
+      </div>
+      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
+        <div class='text-xs text-gray-400 uppercase tracking-wide'>Paused Repos</div>
+        <div class='text-2xl font-bold text-amber-400 mt-2' x-text='pausedRepos'></div>
+      </div>
+      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
+        <div class='text-xs text-gray-400 uppercase tracking-wide'>Connector Down</div>
+        <div class='text-2xl font-bold text-red-400 mt-2' x-text='connectorDown'></div>
+      </div>
+      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
+        <div class='text-xs text-gray-400 uppercase tracking-wide'>Breaker Open</div>
+        <div class='text-2xl font-bold text-red-400 mt-2' x-text='breakerOpen'></div>
+      </div>
+    </div>
 
-    <section class='grid'>
-      <section class='card'>
-        <h2>Repos</h2>
-        <table>
-          <thead><tr><th>Repo</th><th>Paused</th><th>Issues</th><th>States</th><th>Connector</th><th>Breaker</th></tr></thead>
-          <tbody id='repo-rows'></tbody>
-        </table>
-      </section>
+    <!-- Repo Actions (Inline per repo) -->
+    <div class='mb-6'>
+      <h2 class='text-sm font-semibold text-gray-100 mb-4'>Repos</h2>
+      <div class='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
+        {''.join(repo_actions)}
+      </div>
+    </div>
 
-      <section class='card'>
-        <h2>Recent Logs</h2>
-        <div class='muted' id='log-meta'></div>
-        <div class='logs' id='log-lines'></div>
-      </section>
-    </section>
+    <!-- Two-column layout: Commands & Logs -->
+    <div class='grid grid-cols-1 lg:grid-cols-3 gap-6'>
+      <!-- Recent Commands (spans 2 cols on desktop) -->
+      <div class='lg:col-span-2 bg-gray-900 border border-gray-800 rounded-lg p-4'>
+        <h2 class='text-sm font-semibold text-gray-100 mb-4'>Recent Commands</h2>
+        <div class='overflow-x-auto'>
+          <table class='w-full text-xs'>
+            <thead>
+              <tr class='border-b border-gray-800'>
+                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Time</th>
+                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Repo</th>
+                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Source</th>
+                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Command</th>
+                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for='cmd in commands' :key='cmd.created_at + cmd.parsed_command'>
+                <tr class='border-b border-gray-800 hover:bg-gray-800/50'>
+                  <td class='px-3 py-2 text-gray-400' x-text='cmd.created_at'></td>
+                  <td class='px-3 py-2 text-gray-200' x-text='cmd.repo_name'></td>
+                  <td class='px-3 py-2 text-gray-400' x-text='cmd.source'></td>
+                  <td class='px-3 py-2 text-gray-300' x-text='cmd.parsed_command'></td>
+                  <td class='px-3 py-2'>
+                    <span :class='statusClass(cmd.status)' x-text='cmd.status'></span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div x-show='!commands.length' class='text-center py-6 text-gray-400 text-xs'>
+            No recent commands
+          </div>
+        </div>
+      </div>
 
-    <section class='card' style='margin-top:12px;'>
-      <h2>Recent Commands</h2>
-      <table>
-        <thead><tr><th>Time</th><th>Repo</th><th>Source</th><th>Command</th><th>Status</th><th>Error</th></tr></thead>
-        <tbody id='command-rows'></tbody>
-      </table>
-    </section>
+      <!-- Log Viewer -->
+      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col'>
+        <h2 class='text-sm font-semibold text-gray-100 mb-2'>Recent Logs</h2>
+        <div class='text-xs text-gray-500 mb-3' x-text='logMeta'></div>
+        <div class='flex-1 bg-gray-950 border border-gray-800 rounded p-3 overflow-y-auto font-mono text-xs leading-relaxed text-gray-300 whitespace-pre-wrap'>
+          <template x-if='logs.length'>
+            <div x-text='logs.join("\\n")'></div>
+          </template>
+          <template x-if='!logs.length'>
+            <div class='text-gray-500'>No recent logs found.</div>
+          </template>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script id='initial-data' type='application/json'>{initial}</script>
   <script>
-    const refreshMs = {_REFRESH_MS};
+    function dashboardApp() {{
+      return {{
+        rows: [],
+        commands: [],
+        logs: [],
+        logMeta: '',
+        activeActions: '',
+        refreshMs: {_REFRESH_MS},
 
-    const esc = (value) => String(value ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#39;");
+        get totalIssues() {{
+          return this.rows.reduce((acc, row) => acc + Number(row.issues_total || 0), 0);
+        }},
 
-    function render(payload) {{
-      const rows = Array.isArray(payload.rows) ? payload.rows : [];
-      const commands = Array.isArray(payload.commands) ? payload.commands : [];
-      const logs = payload.logs || {{ lines: [], files: [] }};
+        get pausedRepos() {{
+          return this.rows.filter((row) => !!row.paused).length;
+        }},
 
-      const totalIssues = rows.reduce((acc, row) => acc + Number(row.issues_total || 0), 0);
-      const pausedRepos = rows.filter((row) => !!row.paused).length;
-      const unavailable = rows.filter((row) => !(row.connector || {{}}).available).length;
-      const breakerOpen = rows.filter((row) => !!((row.circuit_breaker || {{}}).open)).length;
+        get connectorDown() {{
+          return this.rows.filter((row) => !(row.connector || {{}}).available).length;
+        }},
 
-      document.getElementById('kpis').innerHTML = `
-        <div class='kpi'><div class='label'>Repos</div><div class='value'>${{rows.length}}</div></div>
-        <div class='kpi'><div class='label'>Total Issues</div><div class='value'>${{totalIssues}}</div></div>
-        <div class='kpi'><div class='label'>Paused Repos</div><div class='value'>${{pausedRepos}}</div></div>
-        <div class='kpi'><div class='label'>Connector Down</div><div class='value'>${{unavailable}}</div></div>
-        <div class='kpi'><div class='label'>Breaker Open</div><div class='value'>${{breakerOpen}}</div></div>
-      `;
+        get breakerOpen() {{
+          return this.rows.filter((row) => !!((row.circuit_breaker || {{}}).open)).length;
+        }},
 
-      document.getElementById('repo-rows').innerHTML = rows.map((row) => {{
-        const counts = row.state_counts || {{}};
-        const countsText = Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => `${{k}}:${{v}}`).join(', ') || 'none';
-        const connector = row.connector || {{}};
-        const breaker = row.circuit_breaker || {{}};
-        return `<tr>
-          <td><b>${{esc(row.repo)}}</b></td>
-          <td>${{row.paused ? 'yes' : 'no'}}</td>
-          <td>${{esc(row.issues_total)}}</td>
-          <td>${{esc(countsText)}}</td>
-          <td><span class='status-pill'>${{connector.available ? 'up' : 'down'}}</span></td>
-          <td><span class='status-pill'>${{breaker.open ? 'open' : 'closed'}}</span></td>
-        </tr>`;
-      }}).join('');
+        statusClass(status) {{
+          const lower = (status || '').toLowerCase();
+          if (lower === 'ok' || lower === 'success' || lower === 'completed') {{
+            return 'text-emerald-400';
+          }}
+          if (lower === 'error' || lower === 'failed') {{
+            return 'text-red-400';
+          }}
+          if (lower === 'pending' || lower === 'running') {{
+            return 'text-amber-400';
+          }}
+          return 'text-gray-400';
+        }},
 
-      document.getElementById('command-rows').innerHTML = commands.map((item) => `<tr>
-        <td>${{esc(item.created_at)}}</td>
-        <td>${{esc(item.repo_name)}}</td>
-        <td>${{esc(item.source)}}</td>
-        <td>${{esc(item.parsed_command)}}</td>
-        <td>${{esc(item.status)}}</td>
-        <td>${{esc(item.error_text)}}</td>
-      </tr>`).join('');
+        async init() {{
+          try {{
+            const script = document.getElementById('initial-data');
+            if (script) {{
+              const initial = JSON.parse(script.textContent || '{{}}');
+              this.updateFromPayload(initial);
+            }}
+          }} catch (e) {{
+            console.error('Failed to parse initial data:', e);
+          }}
+          setInterval(() => this.refresh(), this.refreshMs);
+        }},
 
-      const lines = Array.isArray(logs.lines) ? logs.lines : [];
-      document.getElementById('log-lines').textContent = lines.length ? lines.join('\\n') : 'No recent logs found.';
-      const files = Array.isArray(logs.files) ? logs.files : [];
-      const generated = payload.generated_at || '';
-      document.getElementById('log-meta').textContent = `Files: ${{files.join(', ') || 'none'}} • Updated: ${{generated}}`;
+        async refresh() {{
+          try {{
+            const response = await fetch('/api/overview', {{ cache: 'no-store' }});
+            if (!response.ok) return;
+            const payload = await response.json();
+            this.updateFromPayload(payload);
+          }} catch (error) {{
+            console.error('Failed to refresh:', error);
+          }}
+        }},
+
+        updateFromPayload(payload) {{
+          this.rows = Array.isArray(payload.rows) ? payload.rows : [];
+          this.commands = Array.isArray(payload.commands) ? payload.commands : [];
+          const logsData = payload.logs || {{}};
+          this.logs = Array.isArray(logsData.lines) ? logsData.lines : [];
+          const files = Array.isArray(logsData.files) ? logsData.files : [];
+          const generated = payload.generated_at || '';
+          this.logMeta = `Files: ${{files.join(', ') || 'none'}} • Updated: ${{generated}}`;
+        }}
+      }};
     }}
-
-    async function refreshOverview() {{
-      try {{
-        const response = await fetch('/api/overview', {{ cache: 'no-store' }});
-        if (!response.ok) return;
-        const payload = await response.json();
-        render(payload);
-      }} catch (error) {{
-        // Keep last good UI state.
-      }}
-    }}
-
-    document.getElementById('refresh-btn').addEventListener('click', refreshOverview);
-
-    try {{
-      const initial = JSON.parse(document.getElementById('initial-data').textContent || '{{}}');
-      render(initial);
-    }} catch (error) {{}}
-
-    setInterval(refreshOverview, refreshMs);
   </script>
 </body>
 </html>

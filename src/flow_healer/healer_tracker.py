@@ -47,6 +47,7 @@ class PullRequestDetails:
     mergeable_state: str
     author: str
     head_ref: str = ""
+    updated_at: str = ""
 
 
 class GitHubHealerTracker:
@@ -347,6 +348,7 @@ class GitHubHealerTracker:
             mergeable_state=str(payload.get("mergeable_state") or "").strip().lower(),
             author=str((payload.get("user") or {}).get("login") or "").strip(),
             head_ref=str(payload.get("head", {}).get("ref", "") or "").strip(),
+            updated_at=str(payload.get("updated_at") or "").strip(),
         )
 
     def add_pr_comment(self, *, pr_number: int, body: str) -> bool:
@@ -394,6 +396,16 @@ class GitHubHealerTracker:
             body={"state": "closed"},
         )
         return isinstance(payload, dict) and str(payload.get("state") or "") == "closed"
+
+    def delete_branch(self, *, branch: str) -> bool:
+        normalized = str(branch or "").strip().strip("/")
+        if not self.enabled or not normalized:
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/git/refs/heads/{quote(normalized, safe='')}",
+            method="DELETE",
+        )
+        return payload == {} or payload is None
 
     def list_pr_comments(self, *, pr_number: int) -> list[dict[str, Any]]:
         if not self.enabled or pr_number <= 0:

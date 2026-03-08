@@ -14,6 +14,9 @@ class VerificationResult:
     passed: bool
     summary: str
     raw: str
+    verdict: str = "hard_fail"
+    hard_failure: bool = True
+    parse_error: bool = False
 
 
 class HealerVerifier:
@@ -42,6 +45,8 @@ class HealerVerifier:
                 passed=True,
                 summary="Artifact-only verification passed via deterministic docs/config guardrails.",
                 raw="artifact_short_circuit_pass",
+                verdict="pass",
+                hard_failure=False,
             )
         thread_id = self.connector.get_or_create_thread(f"healer-verify:{issue_id}")
         guardrails = _build_guardrails(diff_paths=diff_paths, task_spec=task_spec)
@@ -52,7 +57,7 @@ class HealerVerifier:
             + language_line
             + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
             + "Given the issue and proposer output, return strict JSON only:\n"
-            + '{"verdict":"pass|fail","summary":"..."}\n\n'
+            + '{"verdict":"pass|soft_fail|hard_fail","summary":"..."}\n\n'
             + f"{task_spec_to_prompt_block(task_spec)}\n\n"
             + f"{guardrails}\n\n"
             + f"Issue #{issue_id}: {issue_title}\n\n"
@@ -67,29 +72,79 @@ class HealerVerifier:
             parsed = _parse_json(raw)
             verdict = str(parsed.get("verdict") or "").strip().lower()
             summary = str(parsed.get("summary") or "").strip() or "Verifier returned empty summary."
+            normalized_verdict, passed, hard_failure = _normalize_verdict(verdict)
             return VerificationResult(
-                passed=verdict == "pass",
+                passed=passed,
                 summary=summary,
                 raw=raw,
+                verdict=normalized_verdict,
+                hard_failure=hard_failure,
             )
         except Exception:
             return VerificationResult(
                 passed=False,
                 summary=(
-                    "Verifier output was not valid JSON; treating as fail. "
+                    "Verifier output was not valid JSON; treating as advisory. "
                     f"Raw: {raw.strip()[:200]}"
                 ).strip(),
                 raw=raw,
+                verdict="soft_fail",
+                hard_failure=False,
+                parse_error=True,
             )
 
 
 def _parse_json(text: str) -> dict[str, Any]:
     stripped = (text or "").strip()
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:].strip()
-    return json.loads(stripped)
+    if not stripped:
+        raise ValueError("empty verifier output")
+    fenced = _strip_fence(stripped)
+    try:
+        parsed = json.loads(fenced)
+    except json.JSONDecodeError:
+        parsed = json.loads(_extract_first_json_object(fenced))
+    if not isinstance(parsed, dict):
+        raise ValueError("verifier payload must be a JSON object")
+    return parsed
+
+
+def _strip_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if not lines:
+        return stripped
+    if lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    if lines and lines[0].strip().lower() == "json":
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _extract_first_json_object(text: str) -> str:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return text[index:index + end]
+    raise ValueError("no JSON object found in verifier output")
+
+
+def _normalize_verdict(verdict: str) -> tuple[str, bool, bool]:
+    normalized = str(verdict or "").strip().lower()
+    if normalized == "pass":
+        return "pass", True, False
+    if normalized in {"soft_fail", "advisory", "warn", "warning"}:
+        return "soft_fail", False, False
+    return "hard_fail", False, True
 
 
 def _build_guardrails(*, diff_paths: list[str], task_spec: HealerTaskSpec) -> str:

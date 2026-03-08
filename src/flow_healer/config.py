@@ -17,7 +17,7 @@ class ServiceSettings:
     github_api_base_url: str = "https://api.github.com"
     poll_interval_seconds: float = 30.0
     state_root: str = "~/.flow-healer"
-    connector_backend: str = "exec"
+    connector_backend: str = "app_server"
     connector_command: str = "codex"
     connector_model: str = "gpt-5.4"
     connector_reasoning_effort: str = "medium"
@@ -92,6 +92,7 @@ class RelaySettings:
     healer_circuit_breaker_cooldown_seconds: int = 900
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
+    healer_verifier_policy: str = "advisory"
     healer_test_gate_mode: str = "local_then_docker"
     healer_local_gate_policy: str = "auto"
     healer_language: str = ""
@@ -196,6 +197,7 @@ class AppConfig:
                     ),
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
+                    healer_verifier_policy=_normalize_verifier_policy(item.get("verifier_policy")),
                     healer_test_gate_mode=str(item.get("test_gate_mode") or "local_then_docker"),
                     healer_local_gate_policy=str(item.get("local_gate_policy") or "auto"),
                     healer_language=_validate_healer_language(
@@ -296,12 +298,19 @@ def _list_of_str(value: Any, default: list[str]) -> list[str]:
 
 
 def _normalize_connector_backend(value: Any) -> str:
-    raw = str(value or "exec").strip().lower().replace("-", "_")
+    raw = str(value or "app_server").strip().lower().replace("-", "_")
     if raw in {"exec", "app_server"}:
         return raw
     if raw == "appserver":
         return "app_server"
-    return "exec"
+    return "app_server"
+
+
+def _normalize_verifier_policy(value: Any) -> str:
+    raw = str(value or "advisory").strip().lower().replace("-", "_")
+    if raw in {"advisory", "required"}:
+        return raw
+    return "advisory"
 
 
 def _resolve_env_file(config_path: Path, value: Any) -> Path | None:

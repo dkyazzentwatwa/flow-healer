@@ -36,7 +36,7 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert config.service.env_file == str(Path(env_path).resolve())
     assert config.service.github_token_env == "GITHUB_TOKEN"
     assert config.service.poll_interval_seconds == 30.0
-    assert config.service.connector_backend == "exec"
+    assert config.service.connector_backend == "app_server"
     assert config.service.connector_model == "gpt-5.4"
     assert config.service.connector_reasoning_effort == "medium"
     assert config.control.web.enabled is True
@@ -49,6 +49,7 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert relay.healer_pr_auto_approve_clean is True
     assert relay.healer_pr_auto_merge_clean is True
     assert relay.healer_pr_merge_method == "squash"
+    assert relay.healer_verifier_policy == "advisory"
     assert relay.healer_local_gate_policy == "auto"
     assert relay.healer_language == ""
     assert relay.healer_docker_image == ""
@@ -126,6 +127,69 @@ def test_load_normalizes_connector_backend(tmp_path) -> None:
     config = AppConfig.load(config_path)
 
     assert config.service.connector_backend == "app_server"
+
+
+def test_load_normalizes_invalid_connector_backend_to_app_server(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "service:",
+                "  connector_backend: strange-backend",
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    assert config.service.connector_backend == "app_server"
+
+
+def test_load_normalizes_verifier_policy(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    verifier_policy: required",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    relay = config.select_repos("demo")[0]
+    assert relay.healer_verifier_policy == "required"
+
+
+def test_load_normalizes_unknown_verifier_policy_to_advisory(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    verifier_policy: sometimes",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    relay = config.select_repos("demo")[0]
+    assert relay.healer_verifier_policy == "advisory"
 
 
 def test_relay_settings_stuck_pr_timeout_defaults_to_60(tmp_path) -> None:

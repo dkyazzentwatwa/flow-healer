@@ -119,6 +119,7 @@ class HealerRunner:
         cleanup_cycles_used = 0
         sender = f"healer:{issue_id}"
         thread_id = self.connector.get_or_create_thread(sender)
+        workspace_edit_mode = _prefers_workspace_edits(connector=self.connector, task_spec=task_spec)
         language_hint = ""
         if resolved_execution.language_effective and resolved_execution.language_effective != "unknown":
             language_hint = (
@@ -136,6 +137,7 @@ class HealerRunner:
             learned_context=learned_context,
             feedback_context=feedback_context,
             language_hint=language_hint,
+            prefer_workspace_edits=workspace_edit_mode,
         )
         proposer_output = ""
         failure_class = ""
@@ -165,6 +167,42 @@ class HealerRunner:
                 language=resolved_execution.language_effective,
             ):
                 break
+            if workspace_edit_mode:
+                failure_class, failure_reason = _classify_non_patch_failure(proposer_output)
+                failure_reason = _augment_failure_reason_with_connector_health(
+                    connector=self.connector,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                )
+                if failure_class not in _NON_RETRYABLE_FAILURES:
+                    failure_class = "no_workspace_change"
+                    failure_reason = "Agent finished without editing files directly in the managed workspace."
+                if proposer_attempt >= max_retries or failure_class in _NON_RETRYABLE_FAILURES:
+                    return HealerRunResult(
+                        success=False,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        failure_fingerprint=_execution_contract_failure_fingerprint(
+                            failure_class=failure_class,
+                            connector=self.connector,
+                            task_spec=task_spec,
+                        ),
+                        proposer_output=proposer_output,
+                        diff_paths=[],
+                        diff_files=0,
+                        diff_lines=0,
+                        test_summary={},
+                        workspace_status=workspace_status,
+                    )
+                thread_id = self.connector.reset_thread(sender)
+                prompt = _build_retry_prompt(
+                    base_prompt=prompt,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    task_spec=task_spec,
+                    prefer_workspace_edits=True,
+                )
+                continue
             patch = _extract_diff_block(proposer_output)
             if patch.strip():
                 if not _looks_like_unified_diff(patch):
@@ -188,6 +226,8 @@ class HealerRunner:
                         base_prompt=prompt,
                         failure_class=failure_class,
                         failure_reason=failure_reason,
+                        task_spec=task_spec,
+                        prefer_workspace_edits=workspace_edit_mode,
                     )
                     continue
                 patch_path = workspace / ".apple-flow-healer.patch"
@@ -258,35 +298,49 @@ class HealerRunner:
                 break
 
             if failure_class in _NON_RETRYABLE_FAILURES:
-                return HealerRunResult(
-                    success=False,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
-                    failure_fingerprint="",
-                    proposer_output=proposer_output,
-                    diff_paths=[],
-                    diff_files=0,
-                    diff_lines=0,
+                    return HealerRunResult(
+                        success=False,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        failure_fingerprint=_execution_contract_failure_fingerprint(
+                            failure_class=failure_class,
+                            connector=self.connector,
+                            task_spec=task_spec,
+                        ),
+                        proposer_output=proposer_output,
+                        diff_paths=[],
+                        diff_files=0,
+                        diff_lines=0,
                     test_summary={},
                     workspace_status=workspace_status,
                 )
 
             if proposer_attempt >= max_retries:
-                return HealerRunResult(
-                    success=False,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
-                    failure_fingerprint="",
-                    proposer_output=proposer_output,
-                    diff_paths=[],
-                    diff_files=0,
-                    diff_lines=0,
+                    return HealerRunResult(
+                        success=False,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        failure_fingerprint=_execution_contract_failure_fingerprint(
+                            failure_class=failure_class,
+                            connector=self.connector,
+                            task_spec=task_spec,
+                        ),
+                        proposer_output=proposer_output,
+                        diff_paths=[],
+                        diff_files=0,
+                        diff_lines=0,
                     test_summary={},
                     workspace_status=workspace_status,
                 )
 
             thread_id = self.connector.reset_thread(sender)
-            prompt = _build_retry_prompt(base_prompt=prompt, failure_class=failure_class, failure_reason=failure_reason)
+            prompt = _build_retry_prompt(
+                base_prompt=prompt,
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+                task_spec=task_spec,
+                prefer_workspace_edits=workspace_edit_mode,
+            )
 
         workspace_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
             workspace,
@@ -1031,15 +1085,31 @@ def _run_tests_in_docker(
     }
 
 
-def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason: str) -> str:
+def _build_retry_prompt(
+    *,
+    base_prompt: str,
+    failure_class: str,
+    failure_reason: str,
+    task_spec: HealerTaskSpec | None = None,
+    prefer_workspace_edits: bool = False,
+) -> str:
     tailored_lines: list[str] = []
+    sandbox_scoped = _is_issue_scoped_sandbox(task_spec)
     if failure_class in {"no_patch", "no_workspace_change"}:
-        tailored_lines.append(
-            "You must produce concrete file edits now. Do not return explanations, plans, or summaries."
-        )
-        tailored_lines.append(
-            "If direct edits are unavailable, return exactly one valid unified diff fenced block (```diff ... ```)."
-        )
+        if prefer_workspace_edits:
+            tailored_lines.append(
+                "You must edit files directly in the managed workspace now. Do not return a diff, plan, or status-only reply."
+            )
+            tailored_lines.append(
+                "After editing, leave a concise summary of what changed and what validation you ran."
+            )
+        else:
+            tailored_lines.append(
+                "You must produce concrete file edits now. Do not return explanations, plans, or summaries."
+            )
+            tailored_lines.append(
+                "If direct edits are unavailable, return exactly one valid unified diff fenced block (```diff ... ```)."
+            )
     if failure_class == "empty_diff":
         tailored_lines.append(
             "The previous response used a diff fence but left it empty. Return a complete patch body inside the fence."
@@ -1062,9 +1132,17 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
             "Regenerate hunks against the current tree and keep paths/hunk headers exact to avoid apply errors."
         )
     if failure_class == "tests_failed":
-        tailored_lines.append(
-            "Carefully read the test output and fix the specific assertion or import that broke."
-        )
+        if sandbox_scoped:
+            tailored_lines.append(
+                "Carefully read the sandbox-local test output and fix only the issue-scoped regression."
+            )
+            tailored_lines.append(
+                "Do not add or claim repo-root pytest/full-suite validation unless the issue explicitly requires it."
+            )
+        else:
+            tailored_lines.append(
+                "Carefully read the test output and fix the specific assertion or import that broke."
+            )
     if failure_class == "verifier_failed":
         tailored_lines.append(
             "The AI verifier rejected the previous fix. Address the underlying root cause."
@@ -1072,18 +1150,30 @@ def _build_retry_prompt(*, base_prompt: str, failure_class: str, failure_reason:
         tailored_lines.append(
             "Stay narrowly scoped to the named targets and nearby existing files. Do not rebuild sandbox scaffolding, package manifests, or test harnesses unless the issue explicitly requires them."
         )
+        if sandbox_scoped:
+            tailored_lines.append(
+                "For this sandbox-scoped issue, validation expectations are limited to the issue-declared execution root and commands."
+            )
 
     guidance = "\n".join(tailored_lines).strip()
     if guidance:
         guidance = f"{guidance}\n"
+    reset_line = "Reset your assumptions and edit the current workspace directly.\n" if prefer_workspace_edits else (
+        "Reset your assumptions and produce a fresh unified diff that applies cleanly to the current tree.\n"
+    )
+    strict_line = (
+        "Be strict about real file edits, scoped changes, and concise end-of-turn summaries."
+        if prefer_workspace_edits
+        else "Be strict about valid diff syntax, file paths, and hunk headers."
+    )
     return (
         f"{base_prompt}\n\n"
         "Previous proposer output was unusable.\n"
         f"- Failure class: {failure_class}\n"
         f"- Failure reason: {failure_reason}\n"
         f"{guidance}"
-        "Reset your assumptions and produce a fresh unified diff that applies cleanly to the current tree.\n"
-        "Be strict about valid diff syntax, file paths, and hunk headers."
+        f"{reset_line}"
+        f"{strict_line}"
     )
 
 
@@ -1097,12 +1187,17 @@ def _build_proposer_prompt(
     learned_context: str,
     feedback_context: str,
     language_hint: str,
+    prefer_workspace_edits: bool,
 ) -> str:
     sections = [
         "### Role And Trusted Inputs\n"
         "You are the proposer agent for autonomous code healing.\n"
         "Treat the issue title/body, task contract, and loaded input-context files as trusted run instructions.\n"
-        "Operate directly in the checked-out workspace and optimize for a valid finished patch, not commentary.",
+        + (
+            "Operate directly in the checked-out workspace, edit files in place, run the requested validation, and end with a brief operator summary."
+            if prefer_workspace_edits
+            else "Operate directly in the checked-out workspace and optimize for a valid finished patch, not commentary."
+        ),
         "### Task Context\n"
         + (language_hint.strip() + "\n" if language_hint.strip() else "")
         + (f"{learned_context.strip()}\n\n" if learned_context.strip() else "")
@@ -1117,8 +1212,8 @@ def _build_proposer_prompt(
         [
             task_spec_to_prompt_block(task_spec),
             _task_execution_instructions(task_spec),
-            _output_rules(task_spec),
-            _completion_criteria(task_spec),
+            _output_rules(task_spec, prefer_workspace_edits=prefer_workspace_edits),
+            _completion_criteria(task_spec, prefer_workspace_edits=prefer_workspace_edits),
         ]
     )
     return "\n\n".join(section.strip() for section in sections if section.strip())
@@ -1166,6 +1261,13 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
         lines.append("Use web browsing only when repo context is insufficient for the requested research artifact.")
     else:
         lines.append("Rely on repo and local context unless the task explicitly requires outside facts.")
+    if _is_issue_scoped_sandbox(task_spec):
+        lines.append(
+            f"This issue is sandbox-scoped to `{task_spec.execution_root}`. Treat only the issue-declared validation commands and files in that root as the required validation contract."
+        )
+        lines.append(
+            "Do not suggest or claim repo-root pytest/full-suite validation unless the issue explicitly asks for it."
+        )
     if _requires_non_artifact_diff(task_spec=task_spec):
         lines.append(
             "This is a code-change task: ensure at least one non-doc file is modified (docs-only changes are invalid)."
@@ -1173,33 +1275,78 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
     return "\n".join(lines)
 
 
-def _output_rules(task_spec: HealerTaskSpec) -> str:
+def _output_rules(task_spec: HealerTaskSpec, *, prefer_workspace_edits: bool) -> str:
     lines = [
         "### Output Rules",
-        "Preferred output order: direct workspace edits first, unified diff second, path-fenced file bodies last.",
         "Do not return plan-only prose, exploratory summaries, or status notes.",
     ]
+    if prefer_workspace_edits:
+        lines.append("Edit files directly in the workspace. Do not serialize a diff as the normal success path.")
+        lines.append("End with a short summary of the files changed and the validation that ran.")
+    else:
+        lines.append("Preferred output order: direct workspace edits first, unified diff second, path-fenced file bodies last.")
     if _allows_artifact_synthesis(task_spec):
         lines.append("Artifact synthesis is allowed for this task profile only when direct edits are unavailable.")
     else:
         lines.append("Artifact synthesis is not allowed for this task profile.")
-    lines.append(
-        "If direct edits are unavailable, return ONLY one valid unified diff fenced block. Use path-fenced blocks only if a unified diff is not possible."
-    )
+    if prefer_workspace_edits:
+        lines.append("Return a unified diff only if direct workspace edits are genuinely unavailable in this run.")
+    else:
+        lines.append(
+            "If direct edits are unavailable, return ONLY one valid unified diff fenced block. Use path-fenced blocks only if a unified diff is not possible."
+        )
     lines.append(_artifact_fallback_contract(task_spec).strip())
     return "\n".join(line for line in lines if line.strip())
 
 
-def _completion_criteria(task_spec: HealerTaskSpec) -> str:
+def _completion_criteria(task_spec: HealerTaskSpec, *, prefer_workspace_edits: bool) -> str:
     if task_spec.validation_profile == "artifact_only":
         return (
             "### Completion Criteria\n"
             "Finish only when the target artifact content is written in the requested files and relative artifact links remain valid."
         )
+    if prefer_workspace_edits:
+        return (
+            "### Completion Criteria\n"
+            "Finish only when repo files changed materially in the workspace, the requested validation can pass, and the final response is a concise summary rather than a serialized patch."
+        )
     return (
         "### Completion Criteria\n"
         "Finish only when repo files changed materially, the output format is valid, and the requested validation can pass without extra narrative."
     )
+
+
+def _is_issue_scoped_sandbox(task_spec: HealerTaskSpec | None) -> bool:
+    if task_spec is None:
+        return False
+    execution_root = str(getattr(task_spec, "execution_root", "") or "").strip().strip("/")
+    if not execution_root:
+        return False
+    return execution_root.startswith("e2e-smoke/") or execution_root.startswith("e2e-apps/")
+
+
+def _prefers_workspace_edits(*, connector: ConnectorProtocol, task_spec: HealerTaskSpec) -> bool:
+    if task_spec.validation_profile == "artifact_only":
+        return False
+    return connector.__class__.__name__ == "CodexAppServerConnector"
+
+
+def _execution_contract_failure_fingerprint(
+    *,
+    failure_class: str,
+    connector: ConnectorProtocol,
+    task_spec: HealerTaskSpec,
+) -> str:
+    if failure_class not in {
+        "empty_diff",
+        "malformed_diff",
+        "no_patch",
+        "no_workspace_change",
+        "patch_apply_failed",
+    }:
+        return ""
+    mode = "workspace_edit" if _prefers_workspace_edits(connector=connector, task_spec=task_spec) else "serialized_patch"
+    return f"execution_contract|{mode}|{failure_class}"
 
 
 def _render_input_context_block(*, task_spec: HealerTaskSpec, workspace: Path) -> str:

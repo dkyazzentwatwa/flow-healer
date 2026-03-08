@@ -31,7 +31,7 @@ class HealerReconciler:
         }
 
     def _cleanup_inactive_issue_workspaces(self) -> int:
-        inactive_rows = self.store.list_healer_issues(
+        inactive_rows = self.store.list_healer_issue_workspace_refs(
             states=["queued", "failed", "resolved", "archived", "blocked", "pr_pending_approval", "pr_open"],
             limit=2000,
         )
@@ -57,7 +57,10 @@ class HealerReconciler:
         return cleaned
 
     def _sweep_orphan_workspaces(self) -> int:
-        active_rows = self.store.list_healer_issues(
+        if not self.workspace_manager.worktrees_root.exists():
+            # Avoid a large issue-table scan on idle ticks when no healer worktrees exist.
+            return 0
+        active_rows = self.store.list_healer_issue_workspace_refs(
             states=["queued", "claimed", "running", "verify_pending", "pr_pending_approval", "pr_open", "blocked"],
             limit=2000,
         )

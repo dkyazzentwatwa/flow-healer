@@ -5,6 +5,7 @@ from pathlib import Path
 from flow_healer.healer_runner import (
     HealerRunner,
     ResolvedExecution,
+    _build_proposer_prompt,
     _build_retry_prompt,
     _validate_artifact_outputs,
     _build_docker_test_script,
@@ -16,7 +17,8 @@ from flow_healer.healer_runner import (
     _run_tests_in_docker,
     _run_tests_locally,
     _stage_workspace_changes,
-)
+    _task_execution_instructions,
+    )
 from flow_healer.language_strategies import UnsupportedLanguageError, get_strategy
 from flow_healer.healer_task_spec import HealerTaskSpec, compile_task_spec
 
@@ -1741,3 +1743,134 @@ def test_build_retry_prompt_includes_verifier_failed_guidance():
     assert "verifier rejected" in prompt.lower()
     assert "root cause" in prompt.lower()
     assert "do not rebuild sandbox scaffolding" in prompt.lower()
+
+
+def test_build_retry_prompt_keeps_sandbox_validation_issue_scoped():
+    prompt = _build_retry_prompt(
+        base_prompt="Fix the bug",
+        failure_class="tests_failed",
+        failure_reason="sandbox test failed",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("e2e-apps/python-fastapi/app/api.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            execution_root="e2e-apps/python-fastapi",
+        ),
+    )
+    lowered = prompt.lower()
+    assert "sandbox-local test output" in lowered
+    assert "do not add or claim repo-root pytest/full-suite validation" in lowered
+
+
+def test_build_retry_prompt_prefers_workspace_edits_when_requested():
+    prompt = _build_retry_prompt(
+        base_prompt="Fix the bug",
+        failure_class="no_workspace_change",
+        failure_reason="Agent returned a summary only.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("src/demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        prefer_workspace_edits=True,
+    )
+
+    lowered = prompt.lower()
+    assert "edit files directly in the managed workspace" in lowered
+    assert "do not return a diff" in lowered
+    assert "concise summary" in lowered
+
+
+def test_build_proposer_prompt_prefers_workspace_edits_for_app_server_tasks(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    prompt = _build_proposer_prompt(
+        issue_id="910",
+        issue_title="Fix demo",
+        issue_body="Repair src/demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("src/demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        learned_context="",
+        feedback_context="",
+        language_hint="",
+        prefer_workspace_edits=True,
+    )
+
+    lowered = prompt.lower()
+    assert "edit files in place" in lowered
+    assert "brief operator summary" in lowered
+    assert "do not serialize a diff as the normal success path" in lowered
+
+
+def test_task_execution_instructions_keep_sandbox_validation_local():
+    instructions = _task_execution_instructions(
+        HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("e2e-apps/swift-todo/Sources/TodoCore/TodoService.swift",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            execution_root="e2e-apps/swift-todo",
+        )
+    )
+    lowered = instructions.lower()
+    assert "sandbox-scoped" in lowered
+    assert "do not suggest or claim repo-root pytest/full-suite validation" in lowered
+
+
+def test_run_attempt_app_server_code_task_rejects_diff_only_output(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = app_server_cls([patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="911",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_workspace_change"
+    assert result.failure_fingerprint == "execution_contract|workspace_edit|no_workspace_change"

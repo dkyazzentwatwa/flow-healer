@@ -74,5 +74,6 @@ def test_render_dashboard_escapes_log_join_newline(tmp_path: Path) -> None:
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "lines.join('\\n')" in html
-    assert "lines.join('\n')" not in html
+    # Verify newline escaping in log joining (uses Alpine.js with double quotes)
+    assert 'logs.join("\\n")' in html
+    assert 'logs.join("\n")' not in html

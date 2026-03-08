@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .healer_locks import lock_keys_conflict
+from .healer_locks import lock_granularity, lock_keys_conflict
 
 
 class SQLiteStore:
@@ -73,6 +73,7 @@ class SQLiteStore:
                     last_issue_comment_id INTEGER NOT NULL DEFAULT 0,
                     last_review_id INTEGER NOT NULL DEFAULT 0,
                     last_review_comment_id INTEGER NOT NULL DEFAULT 0,
+                    pr_last_seen_updated_at TEXT NOT NULL DEFAULT '',
                     feedback_context TEXT NOT NULL DEFAULT '',
                     task_kind TEXT NOT NULL DEFAULT '',
                     output_targets_json TEXT NOT NULL DEFAULT '[]',
@@ -203,6 +204,7 @@ class SQLiteStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_healer_issues_state_backoff ON healer_issues(state, backoff_until, priority, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_attempts_started ON healer_attempts(started_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC);
@@ -224,6 +226,7 @@ class SQLiteStore:
                 ("last_issue_comment_id", "ALTER TABLE healer_issues ADD COLUMN last_issue_comment_id INTEGER NOT NULL DEFAULT 0"),
                 ("last_review_id", "ALTER TABLE healer_issues ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0"),
                 ("last_review_comment_id", "ALTER TABLE healer_issues ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0"),
+                ("pr_last_seen_updated_at", "ALTER TABLE healer_issues ADD COLUMN pr_last_seen_updated_at TEXT NOT NULL DEFAULT ''"),
                 ("feedback_context", "ALTER TABLE healer_issues ADD COLUMN feedback_context TEXT NOT NULL DEFAULT ''"),
                 ("task_kind", "ALTER TABLE healer_issues ADD COLUMN task_kind TEXT NOT NULL DEFAULT ''"),
                 ("output_targets_json", "ALTER TABLE healer_issues ADD COLUMN output_targets_json TEXT NOT NULL DEFAULT '[]'"),
@@ -256,6 +259,9 @@ class SQLiteStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_dedupe_state ON healer_issues(dedupe_key, state, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at)"
             )
             conn.commit()
 
@@ -373,6 +379,30 @@ class SQLiteStore:
                     (int(limit),),
                 ).fetchall()
         return [issue for row in rows if (issue := self._decode_healer_issue_row(self._row_to_dict(row))) is not None]
+
+    def list_healer_issue_workspace_refs(
+        self,
+        *,
+        states: list[str],
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        if not states:
+            return []
+        conn = self._connect()
+        with self._lock:
+            placeholders = ",".join("?" for _ in states)
+            rows = conn.execute(
+                f"""
+                SELECT issue_id, state, workspace_path, branch_name
+                FROM healer_issues
+                WHERE state IN ({placeholders})
+                  AND COALESCE(workspace_path, '') != ''
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                [*states, int(limit)],
+            ).fetchall()
+        return [entry for row in rows if (entry := self._row_to_dict(row)) is not None]
 
     def find_active_issue_by_dedupe_key(
         self,
@@ -523,6 +553,7 @@ class SQLiteStore:
         last_issue_comment_id: int | None = None,
         last_review_id: int | None = None,
         last_review_comment_id: int | None = None,
+        pr_last_seen_updated_at: str | None = None,
         feedback_context: str | None = None,
         task_kind: str | None = None,
         output_targets: list[str] | None = None,
@@ -568,6 +599,9 @@ class SQLiteStore:
             if last_review_comment_id is not None:
                 updates.append("last_review_comment_id = ?")
                 params.append(int(last_review_comment_id))
+            if pr_last_seen_updated_at is not None:
+                updates.append("pr_last_seen_updated_at = ?")
+                params.append(pr_last_seen_updated_at)
             if feedback_context is not None:
                 updates.append("feedback_context = ?")
                 params.append(feedback_context)
@@ -912,6 +946,68 @@ class SQLiteStore:
             )
             conn.commit()
             return True
+
+    def acquire_healer_locks_batch(
+        self,
+        *,
+        lock_keys: list[str],
+        issue_id: str,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> tuple[bool, str, list[str]]:
+        keys = [str(lock_key or "").strip() for lock_key in lock_keys if str(lock_key or "").strip()]
+        if not keys:
+            return True, "", []
+
+        conn = self._connect()
+        with self._lock:
+            # Batch acquisition keeps claim-time lock work to one table scan and one commit.
+            conn.execute("DELETE FROM healer_locks WHERE lease_expires_at <= CURRENT_TIMESTAMP")
+            rows = conn.execute("SELECT * FROM healer_locks ORDER BY lock_key ASC").fetchall()
+            existing_by_key: dict[str, sqlite3.Row] = {}
+            for row in rows:
+                existing_key = str(row["lock_key"] or "")
+                existing_issue_id = str(row["issue_id"] or "")
+                existing_by_key[existing_key] = row
+                if existing_issue_id == issue_id:
+                    continue
+                for lock_key in keys:
+                    if lock_keys_conflict(existing_key, lock_key):
+                        conn.commit()
+                        return False, lock_key, []
+
+            renew_keys: list[str] = []
+            insert_rows: list[tuple[str, str, str, str, str]] = []
+            for lock_key in keys:
+                granularity = lock_granularity(lock_key)
+                existing = existing_by_key.get(lock_key)
+                if existing is not None and str(existing["issue_id"] or "") == issue_id:
+                    renew_keys.append(lock_key)
+                    continue
+                insert_rows.append(
+                    (lock_key, granularity, issue_id, lease_owner, f"+{int(max(1, lease_seconds))} seconds")
+                )
+
+            if renew_keys:
+                placeholders = ",".join("?" for _ in renew_keys)
+                conn.execute(
+                    f"""
+                    UPDATE healer_locks
+                    SET lease_owner = ?, lease_expires_at = datetime('now', ?)
+                    WHERE issue_id = ? AND lock_key IN ({placeholders})
+                    """,
+                    [lease_owner, f"+{int(max(1, lease_seconds))} seconds", issue_id, *renew_keys],
+                )
+            if insert_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO healer_locks(lock_key, granularity, issue_id, lease_owner, lease_expires_at)
+                    VALUES(?, ?, ?, ?, datetime('now', ?))
+                    """,
+                    insert_rows,
+                )
+            conn.commit()
+            return True, "", list(keys)
 
     def release_healer_locks(self, *, issue_id: str, lock_keys: list[str] | None = None) -> int:
         conn = self._connect()

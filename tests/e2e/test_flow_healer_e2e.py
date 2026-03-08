@@ -498,6 +498,7 @@ def _make_service(
     *,
     state_root: Path,
     api_base_url: str,
+    connector_backend: str = "exec",
     enable_scan_issue_creation: bool = False,
     test_gate_mode: str = "local_then_docker",
     local_gate_policy: str = "auto",
@@ -513,6 +514,7 @@ def _make_service(
             service=ServiceSettings(
                 github_token_env="GITHUB_TOKEN",
                 github_api_base_url=api_base_url,
+                connector_backend=connector_backend,
                 connector_command="python3",
                 state_root=str(state_root),
             ),

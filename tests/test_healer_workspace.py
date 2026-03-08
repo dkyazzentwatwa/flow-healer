@@ -68,3 +68,35 @@ def test_ensure_workspace_recreates_corrupt_worktree(tmp_path):
         timeout=10,
     )
     assert check.returncode == 0
+
+
+def test_prepare_workspace_resets_issue_branch_to_latest_base(tmp_path):
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True, timeout=60)
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    manager = HealerWorkspaceManager(repo_path=repo)
+    workspace = manager.ensure_workspace(issue_id="903", title="Fix parser")
+
+    _git(workspace.path, "checkout", "-B", workspace.branch)
+    (workspace.path / "feature.txt").write_text("stale branch work\n", encoding="utf-8")
+    _git(workspace.path, "add", "feature.txt")
+    _git(workspace.path, "commit", "-m", "stale branch commit")
+
+    (repo / "README.md").write_text("# Demo\n\nlatest main\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "advance main")
+    _git(repo, "push", "origin", "main")
+
+    manager.prepare_workspace(workspace_path=workspace.path, branch=workspace.branch, base_branch="main")
+
+    head = _git(workspace.path, "rev-parse", "HEAD").stdout.strip()
+    main_head = _git(repo, "rev-parse", "origin/main").stdout.strip()
+    status = _git(workspace.path, "status", "--short").stdout.strip()
+
+    assert head == main_head
+    assert status == ""
+    assert not (workspace.path / "feature.txt").exists()

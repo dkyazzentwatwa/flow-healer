@@ -155,6 +155,7 @@ def operator_skill_graph() -> tuple[str, ...]:
 
 def diagnosis_buckets() -> tuple[str, ...]:
     return (
+        "automation_or_process",
         "operator_or_environment",
         "repo_fixture_or_setup",
         "connector_or_patch_generation",
@@ -192,6 +193,7 @@ def previous_skill_in_graph(skill: str) -> str:
 def recommended_skill_for_diagnosis(diagnosis: str) -> str:
     normalized = str(diagnosis or "").strip().lower()
     mapping = {
+        "automation_or_process": "flow-healer-local-validation",
         "operator_or_environment": "flow-healer-local-validation",
         "repo_fixture_or_setup": "flow-healer-preflight",
         "connector_or_patch_generation": "flow-healer-connector-debug",
@@ -204,6 +206,7 @@ def recommended_skill_for_diagnosis(diagnosis: str) -> str:
 def default_action_for_diagnosis(diagnosis: str) -> str:
     normalized = str(diagnosis or "").strip().lower()
     mapping = {
+        "automation_or_process": "Repair the automation or process failure, then rerun flow-healer-local-validation before another live attempt.",
         "operator_or_environment": "Repair the environment, then rerun flow-healer-preflight before another live attempt.",
         "repo_fixture_or_setup": "Repair the repo or fixture setup, then rerun flow-healer-local-validation.",
         "connector_or_patch_generation": "Hand off to flow-healer-connector-debug and isolate the broken proposer or verifier contract.",

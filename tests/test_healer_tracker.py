@@ -206,6 +206,44 @@ def test_close_pr_posts_comment_and_closes(monkeypatch):
     ]
 
 
+def test_delete_branch(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/git/refs/heads/healer%2Fissue-123"
+        assert method == "DELETE"
+        assert body is None
+        return {}
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    ok = tracker.delete_branch(branch="healer/issue-123")
+    assert ok is True
+
+
+def test_get_pr_details_includes_updated_at(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/pulls/42"
+        assert method == "GET"
+        return {
+            "number": 42,
+            "state": "open",
+            "html_url": "https://github.com/owner/repo/pull/42",
+            "mergeable_state": "clean",
+            "updated_at": "2026-03-07T12:00:00Z",
+            "user": {"login": "alice"},
+            "head": {"ref": "healer/issue-42"},
+        }
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    details = tracker.get_pr_details(pr_number=42)
+    assert details is not None
+    assert details.updated_at == "2026-03-07T12:00:00Z"
+
+
 def test_find_pr_for_issue_uses_all_prs_and_detects_merged(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

@@ -104,6 +104,10 @@ class HealerMemoryService:
             "failure_reason": (failure_reason or "")[:200],
         }
         test_output_excerpt = str(test_summary.get("output_tail", "") or "").strip()[:200]
+        sandbox_scoped = (
+            str(test_summary.get("execution_root_source") or "").strip().lower() == "issue"
+            and _is_sandbox_execution_root(str(test_summary.get("execution_root") or "").strip())
+        )
         lesson_text = self._build_lesson_text(
             outcome=outcome,
             title=title,
@@ -113,6 +117,7 @@ class HealerMemoryService:
             verifier_summary=str(verifier_summary.get("summary") or ""),
             test_hint=test_hint,
             test_output_excerpt=test_output_excerpt,
+            sandbox_scoped=sandbox_scoped,
         )
         fingerprint_basis = "|".join(
             [
@@ -304,11 +309,18 @@ class HealerMemoryService:
 
     @staticmethod
     def _build_test_hint(test_summary: dict[str, Any]) -> str:
+        execution_root = str(test_summary.get("execution_root") or "").strip()
+        execution_root_source = str(test_summary.get("execution_root_source") or "").strip().lower()
+        sandbox_scoped = execution_root_source == "issue" and _is_sandbox_execution_root(execution_root)
         targeted_tests = test_summary.get("targeted_tests") or []
         if isinstance(targeted_tests, list) and targeted_tests:
             rendered = ", ".join(str(item) for item in targeted_tests[:3])
+            if sandbox_scoped:
+                return f"Run the targeted sandbox validation from `{execution_root}` first: {rendered}"
             return f"Run targeted pytest first: {rendered}"
         if test_summary:
+            if sandbox_scoped:
+                return f"Re-run only the issue-scoped validation commands from `{execution_root}` before publishing."
             return "Re-run targeted and full pytest gates before publishing."
         return ""
 
@@ -323,6 +335,7 @@ class HealerMemoryService:
         verifier_summary: str,
         test_hint: str,
         test_output_excerpt: str = "",
+        sandbox_scoped: bool = False,
     ) -> str:
         short_title = title[:100] or "similar healer issues"
         if outcome == "success":
@@ -336,7 +349,11 @@ class HealerMemoryService:
             "no_workspace_change": "Ensure the run actually edits files and stages a scoped artifact diff.",
             "patch_apply_failed": "Do not assume stale file paths or hunk context; align the diff to the current tree.",
             "diff_limit_exceeded": "Keep the patch narrowly scoped and avoid broad refactors.",
-            "tests_failed": "Preserve existing behavior and satisfy both targeted and full pytest gates.",
+            "tests_failed": (
+                "Preserve existing behavior and satisfy the issue-scoped sandbox validation gates."
+                if sandbox_scoped
+                else "Preserve existing behavior and satisfy both targeted and full pytest gates."
+            ),
             "verifier_failed": "Address the root cause instead of silencing symptoms or only making tests pass.",
             "lock_conflict": "Avoid overlapping edits outside the predicted scope to reduce contention.",
             "lock_upgrade_conflict": "Avoid expanding the patch into new paths after the initial scoped plan.",
@@ -384,6 +401,11 @@ def _should_skip_lesson_for_task(
         return False
     rel_path = normalized_scope.removeprefix("path:").strip()
     return _is_artifact_path(rel_path)
+
+
+def _is_sandbox_execution_root(root: str) -> bool:
+    normalized = str(root or "").strip().strip("/")
+    return normalized.startswith("e2e-smoke/") or normalized.startswith("e2e-apps/")
 
 
 def _is_artifact_path(path: str) -> bool:

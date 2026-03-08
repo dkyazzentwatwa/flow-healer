@@ -16,6 +16,7 @@ from .skill_contracts import (
 @dataclass(slots=True, frozen=True)
 class DiagnosisRoute:
     diagnosis: str
+    failure_family: str
     recommended_skill: str
     default_action: str
     graph_position: int
@@ -51,6 +52,16 @@ _FIXTURE_FAILURE_MARKERS = (
     "importerror",
     "modulenotfounderror",
 )
+_PROCESS_FAILURE_CLASSES = {
+    "lease_expired",
+    "lock_conflict",
+    "lock_upgrade_conflict",
+    "preflight_failed",
+    "push_failed",
+    "push_non_fast_forward",
+    "pr_open_failed",
+    "workspace_corrupt",
+}
 _EXTERNAL_FAILURE_MARKERS = (
     "github",
     "gh auth",
@@ -66,21 +77,36 @@ def classify_failure(issue: dict[str, Any] | None, attempt: dict[str, Any] | Non
     failure_reason = str((attempt or {}).get("failure_reason") or (issue or {}).get("last_failure_reason") or "").lower()
     state = str((issue or {}).get("state") or "")
 
+    if failure_class == "verifier_failed":
+        if any(marker in failure_reason for marker in ("invalid json", "json", "verdict", "payload")):
+            return "connector_or_patch_generation"
+        return "product_bug"
     if failure_class in _CONNECTOR_FAILURE_CLASSES:
         return "connector_or_patch_generation"
+    if failure_class in _PROCESS_FAILURE_CLASSES:
+        return "automation_or_process"
     if "connectorunavailable" in failure_reason or "connectorruntimeerror" in failure_reason:
         return "connector_or_patch_generation"
     if failure_class == "tests_failed":
         if any(marker in failure_reason for marker in _FIXTURE_FAILURE_MARKERS):
             return "repo_fixture_or_setup"
-        return "operator_or_environment"
-    if failure_class in {"push_failed", "pr_open_failed"}:
-        return "external_service_or_github"
+        if any(marker in failure_reason for marker in _EXTERNAL_FAILURE_MARKERS):
+            return "automation_or_process"
+        return "product_bug"
     if state == "queued" and str((issue or {}).get("backoff_until") or ""):
         return "product_bug"
     if any(marker in failure_reason for marker in _EXTERNAL_FAILURE_MARKERS):
         return "external_service_or_github"
     return "product_bug" if failure_class else "operator_or_environment"
+
+
+def classify_failure_family(issue: dict[str, Any] | None, attempt: dict[str, Any] | None) -> str:
+    diagnosis = classify_failure(issue, attempt)
+    if diagnosis == "connector_or_patch_generation":
+        return "connector_patch"
+    if diagnosis == "product_bug":
+        return "product"
+    return "automation_process"
 
 
 def diagnosis_route(diagnosis: str) -> DiagnosisRoute:
@@ -89,6 +115,7 @@ def diagnosis_route(diagnosis: str) -> DiagnosisRoute:
     playbook = skill_playbook(recommended)
     return DiagnosisRoute(
         diagnosis=normalized,
+        failure_family=_failure_family_for_diagnosis(normalized),
         recommended_skill=recommended,
         default_action=default_action_for_diagnosis(normalized),
         graph_position=skill_stage_position(recommended),
@@ -113,6 +140,7 @@ def classify_issue_route(issue: dict[str, Any] | None, attempt: dict[str, Any] |
     focus = _connector_debug_focus(issue, attempt)
     return DiagnosisRoute(
         diagnosis=route.diagnosis,
+        failure_family=route.failure_family,
         recommended_skill=route.recommended_skill,
         default_action=route.default_action,
         graph_position=route.graph_position,
@@ -131,6 +159,7 @@ def classify_issue_route(issue: dict[str, Any] | None, attempt: dict[str, Any] |
 
 def _stop_recommended_for_diagnosis(diagnosis: str) -> bool:
     return diagnosis in {
+        "automation_or_process",
         "operator_or_environment",
         "repo_fixture_or_setup",
         "connector_or_patch_generation",
@@ -141,6 +170,7 @@ def _stop_recommended_for_diagnosis(diagnosis: str) -> bool:
 
 def _stop_reason_for_diagnosis(diagnosis: str) -> str:
     mapping = {
+        "automation_or_process": "Stop before another live run until the automation or process failure is repaired.",
         "operator_or_environment": "Stop before another live run until the local environment is repaired.",
         "repo_fixture_or_setup": "Stop before another live run until the repo or fixture setup is repaired.",
         "connector_or_patch_generation": "Stop before another live run until the connector or patch contract is repaired.",
@@ -148,6 +178,15 @@ def _stop_reason_for_diagnosis(diagnosis: str) -> str:
         "external_service_or_github": "Stop live mutation until the external dependency recovers or a retry is intentional.",
     }
     return mapping.get(diagnosis, "")
+
+
+def _failure_family_for_diagnosis(diagnosis: str) -> str:
+    normalized = str(diagnosis or "").strip().lower()
+    if normalized == "connector_or_patch_generation":
+        return "connector_patch"
+    if normalized == "product_bug":
+        return "product"
+    return "automation_process"
 
 
 def _connector_debug_focus(issue: dict[str, Any] | None, attempt: dict[str, Any] | None) -> str:

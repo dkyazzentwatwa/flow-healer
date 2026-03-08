@@ -1,10 +1,17 @@
+import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from flow_healer.healer_loop import AutonomousHealerLoop, _collect_targeted_tests, _FAILURE_CLASS_STRATEGY
+from flow_healer.healer_loop import (
+    AutonomousHealerLoop,
+    _FAILURE_CLASS_STRATEGY,
+    _collect_targeted_tests,
+    _push_issue_branch,
+)
 from flow_healer.healer_preflight import PreflightReport
+from flow_healer.healer_task_spec import HealerTaskSpec
 from flow_healer.healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
 from flow_healer.store import SQLiteStore
 
@@ -33,6 +40,7 @@ def _make_loop(store, **overrides):
         healer_max_wall_clock_seconds_per_issue=300,
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
+        healer_verifier_policy=overrides.get("healer_verifier_policy", "advisory"),
         healer_issue_required_labels=["healer:ready"],
         healer_pr_actions_require_approval=overrides.get("healer_pr_actions_require_approval", False),
         healer_pr_required_label=overrides.get("healer_pr_required_label", "healer:pr-approved"),
@@ -57,6 +65,7 @@ def _make_loop(store, **overrides):
         healer_stuck_pr_timeout_minutes=overrides.get("healer_stuck_pr_timeout_minutes", 60),
         healer_conflict_auto_requeue_enabled=overrides.get("healer_conflict_auto_requeue_enabled", True),
         healer_conflict_auto_requeue_max_attempts=overrides.get("healer_conflict_auto_requeue_max_attempts", 3),
+        healer_conflict_requeue_debounce_seconds=overrides.get("healer_conflict_requeue_debounce_seconds", 0),
         healer_overlap_scope_queue_enabled=overrides.get("healer_overlap_scope_queue_enabled", True),
         healer_dedupe_enabled=overrides.get("healer_dedupe_enabled", True),
         healer_dedupe_close_duplicates=overrides.get("healer_dedupe_close_duplicates", True),
@@ -71,6 +80,15 @@ def _make_loop(store, **overrides):
     loop.tracker = MagicMock()
     loop.tracker.viewer_login.return_value = "healer-service"
     loop.tracker.repo_slug = "owner/repo"
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=123,
+        state="open",
+        html_url="https://example.test/pr/123",
+        mergeable_state="clean",
+        author="alice",
+        head_ref="healer/issue-123",
+        updated_at="2026-03-06T01:05:00Z",
+    )
     loop.worker_id = overrides.get("worker_id", "worker-a")
     loop.dispatcher = MagicMock()
     loop.dispatcher.lease_seconds = overrides.get("lease_seconds", 180)
@@ -105,6 +123,28 @@ def _make_loop(store, **overrides):
     return loop
 
 
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    return proc
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True, text=True, timeout=60)
+    _git(repo, "config", "user.name", "Flow Healer Tests")
+    _git(repo, "config", "user.email", "tests@example.com")
+    (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "init")
+
+
 def test_ingest_pr_feedback_requeues_issue_for_new_external_feedback(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -135,9 +175,11 @@ def test_ingest_pr_feedback_requeues_issue_for_new_external_feedback(tmp_path):
 
     issue = store.get_healer_issue("401")
     assert issue is not None
-    assert issue["state"] == "queued"
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 123
     assert "PR comment from @bob" in issue["feedback_context"]
     assert issue["last_issue_comment_id"] == 1001
+    assert issue["pr_last_seen_updated_at"] == "2026-03-06T01:05:00Z"
 
 
 def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):
@@ -242,6 +284,37 @@ def test_ingest_pr_feedback_ignores_bot_comments(tmp_path):
     assert issue["last_issue_comment_id"] == 2002
 
 
+def test_ingest_pr_feedback_skips_fetch_when_pr_has_not_changed(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="4022",
+        repo="owner/repo",
+        title="Issue 4022",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="4022",
+        state="pr_open",
+        pr_number=125,
+        pr_last_seen_updated_at="2026-03-06T01:05:00Z",
+    )
+
+    loop = _make_loop(store)
+
+    loop._ingest_pr_feedback()
+
+    issue = store.get_healer_issue("4022")
+    assert issue is not None
+    assert issue["pr_last_seen_updated_at"] == "2026-03-06T01:05:00Z"
+    loop.tracker.list_pr_comments.assert_not_called()
+    loop.tracker.list_pr_reviews.assert_not_called()
+    loop.tracker.list_pr_review_comments.assert_not_called()
+
+
 def test_ingest_ready_issues_adds_eyes_reaction_for_new_issue(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -336,6 +409,49 @@ def test_ingest_ready_issues_requeues_archived_issue(tmp_path):
     loop.tracker.add_issue_reaction.assert_not_called()
 
 
+def test_ingest_ready_issues_restores_pr_open_when_existing_issue_has_open_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5035",
+        repo="owner/repo",
+        title="Issue 5035",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="5035", state="queued", pr_number=0, pr_state="")
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="5035",
+            repo="owner/repo",
+            title="Issue 5035 refreshed",
+            body="new body",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/5035",
+        )
+    ]
+    loop.tracker.find_pr_for_issue.return_value = PullRequestResult(
+        number=235,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/235",
+    )
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("5035")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 235
+    assert issue["pr_state"] == "open"
+    loop.tracker.add_issue_reaction.assert_not_called()
+
+
 def test_ingest_ready_issues_coalesces_duplicate_scope(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -411,6 +527,42 @@ def test_process_claimed_issue_archives_closed_remote_issue(tmp_path):
     assert issue["state"] == "archived"
     assert issue["pr_state"] == "closed"
     assert issue["lease_owner"] in ("", None)
+
+
+def test_process_claimed_issue_restores_open_pr_and_skips_attempt(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5040",
+        repo="owner/repo",
+        title="Issue 5040",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {"issue_id": "5040", "state": "open", "labels": ["healer:ready"]}
+    loop.tracker.find_pr_for_issue.return_value = PullRequestResult(
+        number=240,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/240",
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("5040")
+    attempts = store.list_healer_attempts(issue_id="5040")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 240
+    assert issue["pr_state"] == "open"
+    assert issue["attempt_count"] == 0
+    assert attempts == []
+    loop.runner.run_attempt.assert_not_called()
 
 
 def test_process_claimed_issue_requeues_when_language_preflight_fails(tmp_path):
@@ -532,6 +684,117 @@ def test_process_claimed_issue_lock_conflict_requeues_without_attempt_increment(
     assert issue["last_failure_class"] == "lock_conflict"
     assert attempts == []
     loop.runner.run_attempt.assert_not_called()
+
+
+def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5044",
+        repo="owner/repo",
+        title="Issue 5044",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    app_server_connector = type("CodexAppServerConnector", (), {"ensure_started": lambda self: None, "health_snapshot": lambda self: {}})()
+    loop = _make_loop(store, connector=app_server_connector, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-5044"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "5044", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-5044")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=False,
+        summary="Verifier output was not valid JSON; treating as advisory.",
+        verdict="soft_fail",
+        hard_failure=False,
+        parse_error=True,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.tracker.open_or_update_pr.return_value = PullRequestResult(
+        number=241,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/241",
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("5044")
+    attempts = store.list_healer_attempts(issue_id="5044")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 241
+    assert attempts[-1]["state"] == "pr_open"
+    assert attempts[-1]["verifier_summary"]["verdict"] == "soft_fail"
+    loop._commit_and_push.assert_called_once()
+
+
+def test_process_claimed_issue_blocks_when_required_verifier_soft_fails(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5045",
+        repo="owner/repo",
+        title="Issue 5045",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_verifier_policy="required")
+    workspace = tmp_path / "workspaces" / "issue-5045"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "5045", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-5045")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=False,
+        summary="Need stronger semantic verification.",
+        verdict="soft_fail",
+        hard_failure=False,
+        parse_error=False,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("5045")
+    attempts = store.list_healer_attempts(issue_id="5045")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "verifier_failed"
+    assert attempts[-1]["state"] == "failed"
+    loop._commit_and_push.assert_not_called()
 
 
 def test_claim_is_actionable_is_case_insensitive_for_labels(tmp_path):
@@ -740,6 +1003,58 @@ def test_reconcile_pr_outcomes_requeues_conflicted_pr_by_default(tmp_path):
     loop.tracker.close_pr.assert_called_once()
     loop.tracker.close_issue.assert_not_called()
     loop.tracker.add_issue_comment.assert_called_once()
+
+
+def test_reconcile_pr_outcomes_debounces_conflicted_pr_before_requeue(tmp_path):
+    import datetime as dt
+
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60155",
+        repo="owner/repo",
+        title="Issue 60155",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="60155", state="pr_open", pr_number=235, pr_state="open")
+
+    loop = _make_loop(store, healer_conflict_requeue_debounce_seconds=120)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=235,
+        state="conflict",
+        html_url="",
+        mergeable_state="dirty",
+        author="bot",
+        head_ref="healer/issue-60155",
+    )
+    loop.tracker.close_pr.return_value = True
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("60155")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 235
+    assert issue.get("stuck_since") is not None
+    loop.tracker.close_pr.assert_not_called()
+
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = store._connect()
+    conn.execute("UPDATE healer_issues SET stuck_since = ? WHERE issue_id = '60155'", (past,))
+    conn.commit()
+
+    loop._reconcile_pr_outcomes()
+
+    issue = store.get_healer_issue("60155")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["pr_number"] == 0
+    assert issue["last_failure_class"] == "pr_conflict_requeued"
+    loop.tracker.close_pr.assert_called_once()
+    loop.tracker.delete_branch.assert_called_once_with(branch="healer/issue-60155")
 
 
 def test_reconcile_pr_outcomes_blocks_after_conflict_requeue_cap(tmp_path):
@@ -1385,7 +1700,8 @@ def test_ingest_pr_feedback_collects_reviews_and_inline_comments(tmp_path):
 
     issue = store.get_healer_issue("403")
     assert issue is not None
-    assert issue["state"] == "queued"
+    assert issue["state"] == "pr_pending_approval"
+    assert issue["pr_number"] == 125
     assert "PR review (changes_requested) from @reviewer" in issue["feedback_context"]
     assert "Inline review comment on src/example.py from @reviewer" in issue["feedback_context"]
     assert issue["last_review_id"] == 3001
@@ -1743,6 +2059,8 @@ def test_circuit_breaker_opens_when_failure_rate_exceeds_threshold(tmp_path):
             actual_diff_set=[],
             test_summary={},
             verifier_summary={},
+            failure_class="tests_failed" if state == "failed" else "",
+            failure_reason="Targeted sandbox validation failed." if state == "failed" else "",
         )
 
     assert loop._circuit_breaker_open() is True
@@ -1992,7 +2310,7 @@ def test_backoff_sets_feedback_context_with_hint(tmp_path):
     assert issue["feedback_context"] == hint
 
 
-def test_backoff_push_failed_produces_longer_delay(tmp_path):
+def test_backoff_push_failed_requeues_without_consuming_issue_trust(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
     for iid in ("410", "411"):
@@ -2008,11 +2326,71 @@ def test_backoff_push_failed_produces_longer_delay(tmp_path):
     loop = _make_loop(store, healer_retry_budget=3, healer_backoff_initial_seconds=100, healer_backoff_max_seconds=10000)
 
     loop._backoff_or_fail(issue_id="410", attempt_no=1, failure_class="verifier_failed", failure_reason="rejected")
-    loop._backoff_or_fail(issue_id="411", attempt_no=1, failure_class="push_failed", failure_reason="push error")
-    verifier_backoff = store.get_healer_issue("410")["backoff_until"]
-    push_backoff = store.get_healer_issue("411")["backoff_until"]
-    # push_failed (2.0x) should have a later backoff than verifier_failed (1.5x)
-    assert push_backoff >= verifier_backoff
+    push_state = loop._backoff_or_fail(issue_id="411", attempt_no=3, failure_class="push_failed", failure_reason="push error")
+    push_issue = store.get_healer_issue("411")
+    assert push_state == "queued"
+    assert push_issue is not None
+    assert push_issue["state"] == "queued"
+    assert push_issue["backoff_until"] is not None
+    assert push_issue["last_failure_class"] == "push_failed"
+    assert store.get_healer_issue("410")["state"] == "queued"
+
+
+def test_backoff_push_non_fast_forward_requeues_without_failing_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="412",
+        repo="owner/repo",
+        title="Issue 412",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_backoff_initial_seconds=60, healer_backoff_max_seconds=3600)
+
+    state = loop._backoff_or_fail(
+        issue_id="412",
+        attempt_no=1,
+        failure_class="push_non_fast_forward",
+        failure_reason="non-fast-forward",
+    )
+
+    issue = store.get_healer_issue("412")
+    assert state == "queued"
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "push_non_fast_forward"
+
+
+def test_push_issue_branch_force_with_lease_updates_stale_managed_remote_branch(tmp_path):
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True, timeout=60)
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    branch = "healer/issue-999-example"
+    _git(repo, "checkout", "-B", branch)
+    (repo / "feature.txt").write_text("old remote content\n", encoding="utf-8")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-m", "old remote commit")
+    _git(repo, "push", "-u", "origin", f"HEAD:refs/heads/{branch}")
+
+    _git(repo, "checkout", "main")
+    _git(repo, "branch", "-D", branch)
+    _git(repo, "checkout", "-B", branch, "main")
+    (repo / "feature.txt").write_text("fresh retry content\n", encoding="utf-8")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-m", "fresh retry commit")
+
+    push = _push_issue_branch(workspace=repo, branch=branch)
+
+    remote_feature = _git(repo, "show", f"origin/{branch}:feature.txt").stdout
+    assert push.returncode == 0, push.stderr or push.stdout
+    assert remote_feature == "fresh retry content\n"
 
 
 # --- Change 3: Automated merge conflict resolution ---

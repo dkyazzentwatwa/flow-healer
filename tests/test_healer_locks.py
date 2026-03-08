@@ -73,3 +73,45 @@ def test_store_rejects_overlapping_lock_scopes(tmp_path):
         )
         is False
     )
+
+
+def test_store_batch_acquires_multiple_non_conflicting_locks(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    acquired, conflict_key, keys = store.acquire_healer_locks_batch(
+        lock_keys=["path:src/a.py", "path:src/b.py"],
+        issue_id="20",
+        lease_owner="worker-a",
+        lease_seconds=60,
+    )
+
+    assert acquired is True
+    assert conflict_key == ""
+    assert keys == ["path:src/a.py", "path:src/b.py"]
+    rows = store.list_healer_locks(issue_id="20")
+    assert [row["lock_key"] for row in rows] == ["path:src/a.py", "path:src/b.py"]
+
+
+def test_store_batch_rejects_conflict_without_partial_insert(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    assert store.acquire_healer_lock(
+        lock_key="dir:src/flow_healer",
+        granularity="dir",
+        issue_id="30",
+        lease_owner="worker-a",
+        lease_seconds=60,
+    )
+
+    acquired, conflict_key, keys = store.acquire_healer_locks_batch(
+        lock_keys=["path:src/example.py", "path:src/flow_healer/healer_locks.py"],
+        issue_id="31",
+        lease_owner="worker-b",
+        lease_seconds=60,
+    )
+
+    assert acquired is False
+    assert conflict_key == "path:src/flow_healer/healer_locks.py"
+    assert keys == []
+    assert store.list_healer_locks(issue_id="31") == []

@@ -115,6 +115,7 @@ class FlowHealerService:
                     issue = issues_by_id.get(str(attempt.get("issue_id") or ""))
                     route = classify_issue_route(issue, attempt)
                     attempt_row["diagnosis"] = route.diagnosis
+                    attempt_row["failure_family"] = route.failure_family
                     attempt_row["recommended_skill"] = route.recommended_skill
                     attempt_row["default_action"] = route.default_action
                     attempt_row["graph_position"] = route.graph_position
