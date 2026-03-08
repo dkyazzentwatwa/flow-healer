@@ -348,6 +348,20 @@ def test_add_normalized_operands_promotes_exact_int_subclass_without_int_hook() 
             0,
             id="large_string_operands_cross_zero_then_canonicalize",
         ),
+        pytest.param(
+            10**80,
+            str(-(10**80) + 1),
+            "-2",
+            -1,
+            id="large_partial_sum_crosses_zero_on_final_negative_term",
+        ),
+        pytest.param(
+            -(10**80),
+            str((10**80) - 1),
+            "2",
+            1,
+            id="large_partial_sum_crosses_zero_on_final_positive_term",
+        ),
     ),
 )
 def test_add3_matches_python_int_arithmetic_for_large_mixed_sign_operands(
