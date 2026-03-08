@@ -34,6 +34,8 @@ ADD_SUCCESS_CASES = (
     pytest.param(-2, -3, -5, id="adds_negative_integers"),
     pytest.param(" 2 ", "3", 5, id="adds_integer_strings_with_whitespace"),
     pytest.param(" +2 ", " -3 ", -1, id="adds_signed_integer_strings"),
+    pytest.param("-0", "+0", 0, id="normalizes_signed_zero_strings"),
+    pytest.param("-7", "7", 0, id="cancels_opposite_signed_integer_strings"),
     pytest.param(True, False, 1, id="adds_boolean_operands"),
     pytest.param(FancyInt(7), 3, 10, id="adds_integer_subclass_operand"),
 )
@@ -45,7 +47,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(1.5, 1, id="rejects_float_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 8
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 10
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
 
 
@@ -98,6 +100,15 @@ def test_add_case_groups_keep_expected_coverage_shape(
 ) -> None:
     """Keep each smoke coverage group intentionally compact."""
     assert len(cases) == expected_size
+
+
+@pytest.mark.parametrize("value", (0, -3, 9, "0", "-0", "+12", " -5 "))
+def test_add_zero_preserves_additive_identity(value: object) -> None:
+    """Adding zero on either side should preserve the normalized operand."""
+    normalized_value = SMOKE_MATH_MODULE._normalize_operand(value)
+
+    assert _call_add(value, 0) == normalized_value
+    assert _call_add(0, value) == normalized_value
 
 
 def test_missing_digit_guardrail_api_falls_back_to_unlimited_strings(

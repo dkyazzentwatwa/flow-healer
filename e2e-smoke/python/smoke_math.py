@@ -30,6 +30,11 @@ def _has_supported_digit_count(value: str) -> bool:
     return len(unsigned_value) <= max_integer_string_digits
 
 
+def _normalize_zero(value: int) -> int:
+    """Collapse signed or subclassed zero values to the additive identity."""
+    return 0 if value == 0 else value
+
+
 def _normalize_integer_string(value: str) -> int:
     """Return an integer parsed from a supported string operand."""
     stripped_value = str.__str__(value).strip(_ASCII_WHITESPACE)
@@ -46,7 +51,7 @@ def _normalize_integer_string(value: str) -> int:
         raise TypeError(ERROR_MESSAGE)
 
     try:
-        return int(stripped_value)
+        return _normalize_zero(int(stripped_value))
     except (TypeError, ValueError) as exc:
         raise TypeError(ERROR_MESSAGE) from exc
 
@@ -54,7 +59,7 @@ def _normalize_integer_string(value: str) -> int:
 def _normalize_integral_operand(value: Integral) -> int:
     """Return a plain integer for supported integral operands."""
     try:
-        return int(value)
+        return _normalize_zero(int(value))
     except (TypeError, ValueError, OverflowError) as exc:
         raise TypeError(ERROR_MESSAGE) from exc
 
