@@ -38,3 +38,15 @@ test('add handles two negative numbers', () => {
 test('add handles larger integers', () => {
   assert.equal(add(123456789, 987654321), 1111111110);
 });
+
+test('add handles large bigint inputs', () => {
+  assert.equal(
+    add(9_007_199_254_740_991n, 2n),
+    9_007_199_254_740_993n,
+  );
+});
+
+test('add handles negative bigint combinations', () => {
+  assert.equal(add(-9_007_199_254_740_991n, 1n), -9_007_199_254_740_990n);
+  assert.equal(add(-4n, 4n), 0n);
+});
