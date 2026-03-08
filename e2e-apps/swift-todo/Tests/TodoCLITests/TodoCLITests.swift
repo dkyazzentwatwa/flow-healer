@@ -17,10 +17,10 @@ final class TodoCLITests: XCTestCase {
         )
     }
 
-    func testRenderCompletionMessageUsesStableFormat() {
+    func testRenderStableCompletionSummaryUsesStableFormat() {
         let item = TodoItem(id: "7", title: "Ship canary", completed: true, completedAt: nil)
 
-        XCTAssertEqual(renderCompletionMessage(item), "Todo completed: 7 - Ship canary")
+        XCTAssertEqual(renderStableCompletionSummary(item), "Todo completed: 7 - Ship canary")
     }
 
     func testRenderStableCompletionSummaryNormalizesWhitespace() {
@@ -48,6 +48,26 @@ final class TodoCLITests: XCTestCase {
         XCTAssertEqual(
             renderStableCompletionSummary(item),
             "Todo completed: 9 - Ship canary"
+        )
+    }
+
+    func testSanitizeCompletedItemPreservesCompletionState() {
+        let completedAt = Date(timeIntervalSince1970: 1)
+        let item = TodoItem(
+            id: "11",
+            title: "  Ship \n canary  ",
+            completed: true,
+            completedAt: completedAt
+        )
+
+        XCTAssertEqual(
+            sanitizeCompletedItem(item),
+            TodoItem(
+                id: "11",
+                title: "Ship canary",
+                completed: true,
+                completedAt: completedAt
+            )
         )
     }
 

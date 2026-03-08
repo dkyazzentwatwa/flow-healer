@@ -14,8 +14,18 @@ func normalizeTodoTitle(_ title: String) -> String {
         .joined(separator: " ")
 }
 
+func sanitizeCompletedItem(_ item: TodoItem) -> TodoItem {
+    TodoItem(
+        id: item.id,
+        title: normalizeTodoTitle(item.title),
+        completed: item.completed,
+        completedAt: item.completedAt
+    )
+}
+
 func renderStableCompletionSummary(_ item: TodoItem) -> String {
-    "Todo completed: \(item.id) - \(normalizeTodoTitle(item.title))"
+    let stableItem = sanitizeCompletedItem(item)
+    return "Todo completed: \(stableItem.id) - \(stableItem.title)"
 }
 
 func runTodoCLI(
