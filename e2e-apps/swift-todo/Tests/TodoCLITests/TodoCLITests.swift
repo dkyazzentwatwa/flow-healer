@@ -9,6 +9,20 @@ final class TodoCLITests: XCTestCase {
         XCTAssertEqual(renderCompletionMessage(item), "Todo completed: 7 - Ship canary")
     }
 
+    func testRenderStableCompletionSummaryNormalizesWhitespace() {
+        let item = TodoItem(
+            id: "7",
+            title: " Ship\ncanary \t ready ",
+            completed: true,
+            completedAt: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(
+            renderStableCompletionSummary(item),
+            "Todo completed: 7 - Ship canary ready"
+        )
+    }
+
     func testRunTodoCLIPrintsStableCompletedSummary() {
         let service = TodoService()
         var output: [String] = []
