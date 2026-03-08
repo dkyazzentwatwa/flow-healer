@@ -1,7 +1,7 @@
 public func add(_ a: Int, _ b: Int) -> Int {
-    sum(of: a, and: b)
+    addOperands(a, b)
 }
 
-private func sum(of lhs: Int, and rhs: Int) -> Int {
+private func addOperands(_ lhs: Int, _ rhs: Int) -> Int {
     lhs + rhs
 }
