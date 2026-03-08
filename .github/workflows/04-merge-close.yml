@@ -38,6 +38,7 @@ jobs:
       - name: Resolve target numbers
         id: target
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_PR: ${{ github.event.inputs.pr_number }}
           INPUT_ISSUE: ${{ github.event.inputs.issue_number }}
@@ -51,6 +52,14 @@ jobs:
             echo "pr_number=${COMMENT_ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
             issue_no="$(echo "${COMMENT_BODY}" | sed -nE 's|.*close[[:space:]]+#([0-9]+).*|\1|p' | head -n1)"
             echo "issue_number=${issue_no}" >> "$GITHUB_OUTPUT"
+          fi
+          pr_number="$(awk -F= '$1=="pr_number"{print $2}' "$GITHUB_OUTPUT" | tail -n1)"
+          if [[ -z "${pr_number}" ]] || [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then
+            if [[ "${EVENT_NAME}" == "issue_comment" ]]; then
+              gh issue comment "${COMMENT_ISSUE_NUMBER}" --body "Invalid merge command: could not resolve a numeric PR number."
+            fi
+            echo "Failed to resolve numeric PR number."
+            exit 1
           fi
 
       - name: Ensure checks passed, then merge
