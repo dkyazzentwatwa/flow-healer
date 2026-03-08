@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -9,6 +10,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _disable_git_signing_for_tests():
+    """Disable git commit/tag signing so tests that create temp git repos don't fail
+    when the host machine has commit.gpgsign or gpg.format=ssh configured."""
+    os.environ.setdefault("GIT_CONFIG_COUNT", "2")
+    os.environ.setdefault("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    os.environ.setdefault("GIT_CONFIG_VALUE_0", "false")
+    os.environ.setdefault("GIT_CONFIG_KEY_1", "tag.gpgsign")
+    os.environ.setdefault("GIT_CONFIG_VALUE_1", "false")
+    yield
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -489,6 +502,44 @@ class FakeStore:
             if m.get("sender") == sender and query.lower() in (m.get("text", "")).lower()
         ]
         return results[:limit]
+
+    # --- Dispatcher helpers ---
+
+    def claim_next_healer_issue(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        max_active_issues: int,
+        enforce_scope_queue: bool = True,
+    ) -> dict[str, Any] | None:
+        for issue in self.healer_issues.values():
+            if issue.get("state") == "queued":
+                issue["state"] = "claimed"
+                issue["worker_id"] = worker_id
+                return dict(issue)
+        return None
+
+    def acquire_healer_locks_batch(
+        self,
+        *,
+        lock_keys: list[str],
+        issue_id: str,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> tuple[bool, str | None, list[str]]:
+        held = {entry["lock_key"] for entry in self.healer_locks}
+        for key in lock_keys:
+            if key in held and not any(e["lock_key"] == key and e.get("issue_id") == issue_id for e in self.healer_locks):
+                return False, key, []
+        for key in lock_keys:
+            if not any(e["lock_key"] == key for e in self.healer_locks):
+                self.healer_locks.append({"lock_key": key, "issue_id": issue_id, "lease_owner": lease_owner})
+        acquired = [key for key in lock_keys]
+        return True, None, acquired
+
+    def release_healer_locks(self, *, issue_id: str) -> None:
+        self.healer_locks = [e for e in self.healer_locks if e.get("issue_id") != issue_id]
 
 
 @pytest.fixture
