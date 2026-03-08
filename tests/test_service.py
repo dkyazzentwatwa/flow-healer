@@ -94,6 +94,11 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     preflight = rows[0]["preflight"]
     assert preflight["gate_mode"] == "local_then_docker"
     assert len(preflight["reports"]) == 3
+    app_server_metrics = rows[0]["app_server_metrics"]
+    assert app_server_metrics["app_server_attempts"] == 0
+    assert app_server_metrics["app_server_attempts_with_material_diff"] == 0
+    assert app_server_metrics["app_server_attempts_with_zero_diff"] == 0
+    assert app_server_metrics["zero_diff_rate_by_task_kind"] == {}
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:

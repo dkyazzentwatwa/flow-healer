@@ -20,7 +20,7 @@ from .language_strategies import (
     get_strategy,
     is_removed_language,
 )
-from .protocols import ConnectorProtocol
+from .protocols import ConnectorProtocol, ConnectorTurnResult
 from .healer_task_spec import HealerTaskSpec, task_spec_to_prompt_block
 
 logger = logging.getLogger("apple_flow.healer_runner")
@@ -28,8 +28,19 @@ _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTA
 _FENCE_PATH_RE = re.compile(r"(?:^|\s)path=(?P<path>[^\s`]+)")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 _NON_RETRYABLE_FAILURES = {"connector_unavailable", "connector_runtime_error"}
+_NO_WORKSPACE_CHANGE_CLASS_PREFIX = "no_workspace_change:"
 _INPUT_CONTEXT_MAX_CHARS = 12_000
 _DOCKER_UNSUPPORTED_REASON = "docker_unsupported_for_language"
+_COMPLETION_ARTIFACT_MODES = {"always", "fallback_only"}
+_DOCKER_INFRA_OUTPUT_HINTS = (
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "error during connect",
+    "500 server error",
+    "internal server error",
+    "context canceled",
+    "docker desktop is not running",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -68,6 +79,12 @@ class WorkspaceStatusEntry:
     path: str
 
 
+@dataclass(slots=True, frozen=True)
+class PathFenceMaterializationResult:
+    wrote_any: bool
+    rejection_reason: str = ""
+
+
 class HealerRunner:
     def __init__(
         self,
@@ -80,12 +97,14 @@ class HealerRunner:
         docker_image: str = "",
         test_command: str = "",
         install_command: str = "",
+        completion_artifact_mode: str = "fallback_only",
         auto_clean_generated_artifacts: bool = True,
     ) -> None:
         self.connector = connector
         self.timeout_seconds = max(30, int(timeout_seconds))
         self.test_gate_mode = _normalize_test_gate_mode(test_gate_mode)
         self.local_gate_policy = _normalize_local_gate_policy(local_gate_policy)
+        self.completion_artifact_mode = _normalize_completion_artifact_mode(completion_artifact_mode)
         self._language = language.strip()
         self._docker_image = docker_image.strip()
         self._test_command = test_command.strip()
@@ -116,10 +135,26 @@ class HealerRunner:
         self._bind_connector_workspace(workspace)
         resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
         workspace_status = _empty_workspace_status(execution_root=resolved_execution.execution_root)
+        completion_parser_mode = "not_attempted"
+        completion_parser_confidence = 0.0
+        completion_parser_source = ""
+        completion_parser_reason = ""
+        _annotate_completion_artifact_parser(
+            workspace_status,
+            mode=completion_parser_mode,
+            confidence=completion_parser_confidence,
+        )
         cleanup_cycles_used = 0
         sender = f"healer:{issue_id}"
-        thread_id = self.connector.get_or_create_thread(sender)
         workspace_edit_mode = _prefers_workspace_edits(connector=self.connector, task_spec=task_spec)
+        # For app-server workspace-edit mode, always start each attempt with a fresh thread.
+        # Reusing prior issue threads across attempts can cause stale-context "status only" responses
+        # against a newly reset worktree.
+        thread_id = (
+            self.connector.reset_thread(sender)
+            if workspace_edit_mode
+            else self.connector.get_or_create_thread(sender)
+        )
         language_hint = ""
         if resolved_execution.language_effective and resolved_execution.language_effective != "unknown":
             language_hint = (
@@ -142,6 +177,7 @@ class HealerRunner:
         proposer_output = ""
         failure_class = ""
         failure_reason = ""
+        no_workspace_change_retries_used = 0
         max_retries = _proposer_retry_budget_for_task(
             task_spec=task_spec,
             default_retries=self.max_proposer_retries,
@@ -154,43 +190,185 @@ class HealerRunner:
             code_change_timeout_seconds=self.code_change_turn_timeout_seconds,
         )
         for proposer_attempt in range(max_retries + 1):
-            proposer_output = self.connector.run_turn(
+            turn_result = _run_connector_turn(
+                self.connector,
                 thread_id,
                 prompt,
                 timeout_seconds=turn_timeout_seconds,
             )
-            if _stage_workspace_changes(
+            proposer_output = turn_result.output_text
+            initial_stage_result = _stage_workspace_changes_detailed(
                 workspace,
                 issue_title=issue_title,
                 issue_body=issue_body,
                 task_spec=task_spec,
                 language=resolved_execution.language_effective,
-            ):
+            )
+            stage_excluded_paths = list(initial_stage_result.excluded_paths)
+            if initial_stage_result.kept_paths:
                 break
             if workspace_edit_mode:
+                path_fence_result = _materialize_named_code_targets_from_output(
+                    task_spec=task_spec,
+                    proposer_output=proposer_output,
+                    workspace=workspace,
+                    strict=True,
+                )
+                if path_fence_result.wrote_any:
+                    completion_parser_mode = "strict"
+                    completion_parser_confidence = 1.0
+                    completion_parser_source = "named_output_targets"
+                    completion_parser_reason = ""
+                    _annotate_completion_artifact_parser(
+                        workspace_status,
+                        mode=completion_parser_mode,
+                        confidence=completion_parser_confidence,
+                        source=completion_parser_source,
+                        reason=completion_parser_reason,
+                    )
+                elif self.completion_artifact_mode == "always":
+                    lenient_result = _materialize_named_code_targets_from_output(
+                        task_spec=task_spec,
+                        proposer_output=proposer_output,
+                        workspace=workspace,
+                        strict=False,
+                    )
+                    if lenient_result.wrote_any:
+                        path_fence_result = lenient_result
+                        completion_parser_mode = "lenient"
+                        completion_parser_confidence = 0.65
+                        completion_parser_source = "named_output_targets"
+                        completion_parser_reason = ""
+                        _annotate_completion_artifact_parser(
+                            workspace_status,
+                            mode=completion_parser_mode,
+                            confidence=completion_parser_confidence,
+                            source=completion_parser_source,
+                            reason=completion_parser_reason,
+                        )
+                    elif lenient_result.rejection_reason and not path_fence_result.rejection_reason:
+                        path_fence_result = lenient_result
+                if path_fence_result.wrote_any:
+                    stage_after_path_fence = _stage_workspace_changes_detailed(
+                        workspace,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        task_spec=task_spec,
+                        language=resolved_execution.language_effective,
+                    )
+                    stage_excluded_paths.extend(stage_after_path_fence.excluded_paths)
+                else:
+                    stage_after_path_fence = FilteredStageResult(kept_paths=[], excluded_paths=[])
+                if path_fence_result.wrote_any and stage_after_path_fence.kept_paths:
+                    failure_class = ""
+                    failure_reason = ""
+                    break
                 if _allows_artifact_synthesis(task_spec) and _materialize_artifact_from_output(
                     task_spec=task_spec,
                     proposer_output=proposer_output,
                     workspace=workspace,
-                ) and _stage_workspace_changes(
-                    workspace,
-                    issue_title=issue_title,
-                    issue_body=issue_body,
-                    task_spec=task_spec,
-                    language=resolved_execution.language_effective,
                 ):
+                    stage_after_artifact = _stage_workspace_changes_detailed(
+                        workspace,
+                        issue_title=issue_title,
+                        issue_body=issue_body,
+                        task_spec=task_spec,
+                        language=resolved_execution.language_effective,
+                    )
+                    stage_excluded_paths.extend(stage_after_artifact.excluded_paths)
+                else:
+                    stage_after_artifact = FilteredStageResult(kept_paths=[], excluded_paths=[])
+                if _allows_artifact_synthesis(task_spec) and stage_after_artifact.kept_paths:
                     failure_class = ""
                     failure_reason = ""
+                    completion_parser_mode = "lenient"
+                    completion_parser_confidence = 0.6
+                    completion_parser_source = "artifact_synthesis"
+                    completion_parser_reason = ""
+                    _annotate_completion_artifact_parser(
+                        workspace_status,
+                        mode=completion_parser_mode,
+                        confidence=completion_parser_confidence,
+                        source=completion_parser_source,
+                        reason=completion_parser_reason,
+                    )
                     break
-                failure_class, failure_reason = _classify_non_patch_failure(proposer_output)
-                failure_reason = _augment_failure_reason_with_connector_health(
-                    connector=self.connector,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
-                )
-                if failure_class not in _NON_RETRYABLE_FAILURES:
-                    failure_class = "no_workspace_change"
-                    failure_reason = "Agent finished without editing files directly in the managed workspace."
+                patch = _extract_diff_block(proposer_output)
+                if patch.strip():
+                    if not _looks_like_unified_diff(patch):
+                        failure_class = "malformed_diff"
+                        failure_reason = "Proposer returned a diff fence, but the contents were not a valid unified diff."
+                    else:
+                        patch_applied, patch_apply_error = _apply_unified_diff_patch(
+                            workspace=workspace,
+                            patch=patch,
+                            timeout_seconds=self.timeout_seconds,
+                        )
+                        if patch_applied:
+                            stage_after_patch = _stage_workspace_changes_detailed(
+                                workspace,
+                                issue_title=issue_title,
+                                issue_body=issue_body,
+                                task_spec=task_spec,
+                                language=resolved_execution.language_effective,
+                            )
+                            stage_excluded_paths.extend(stage_after_patch.excluded_paths)
+                        else:
+                            stage_after_patch = FilteredStageResult(kept_paths=[], excluded_paths=[])
+                        if patch_applied and stage_after_patch.kept_paths:
+                            failure_class = ""
+                            failure_reason = ""
+                            break
+                        failure_class = "patch_apply_failed"
+                        failure_reason = patch_apply_error or "git apply failed"
+                if path_fence_result.rejection_reason:
+                    completion_parser_mode = "failed"
+                    completion_parser_confidence = 0.0
+                    completion_parser_source = ""
+                    completion_parser_reason = path_fence_result.rejection_reason
+                    _annotate_completion_artifact_parser(
+                        workspace_status,
+                        mode=completion_parser_mode,
+                        confidence=completion_parser_confidence,
+                        source=completion_parser_source,
+                        reason=completion_parser_reason,
+                    )
+                if not failure_class:
+                    failure_class, failure_reason = _classify_non_patch_failure(proposer_output)
+                    failure_reason = _augment_failure_reason_with_connector_health(
+                        connector=self.connector,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                    )
+                if (
+                    failure_class not in _NON_RETRYABLE_FAILURES
+                    and failure_class not in {"patch_apply_failed", "malformed_diff"}
+                ):
+                    failure_class, failure_reason = _classify_workspace_edit_noop(
+                        proposer_output=proposer_output,
+                        turn_result=turn_result,
+                        path_fence_rejection_reason=path_fence_result.rejection_reason,
+                        stage_excluded_paths=stage_excluded_paths,
+                        task_spec=task_spec,
+                    )
+                    if no_workspace_change_retries_used >= 1:
+                        return HealerRunResult(
+                            success=False,
+                            failure_class=failure_class,
+                            failure_reason=failure_reason,
+                            failure_fingerprint=_execution_contract_failure_fingerprint(
+                                failure_class=failure_class,
+                                connector=self.connector,
+                                task_spec=task_spec,
+                            ),
+                            proposer_output=proposer_output,
+                            diff_paths=[],
+                            diff_files=0,
+                            diff_lines=0,
+                            test_summary={},
+                            workspace_status=workspace_status,
+                        )
+                    no_workspace_change_retries_used += 1
                 if proposer_attempt >= max_retries or failure_class in _NON_RETRYABLE_FAILURES:
                     return HealerRunResult(
                         success=False,
@@ -208,13 +386,21 @@ class HealerRunner:
                         test_summary={},
                         workspace_status=workspace_status,
                     )
-                thread_id = self.connector.reset_thread(sender)
+                same_thread_retry = _is_no_workspace_change_failure_class(failure_class)
+                if not same_thread_retry:
+                    thread_id = self.connector.reset_thread(sender)
                 prompt = _build_retry_prompt(
                     base_prompt=prompt,
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                     task_spec=task_spec,
                     prefer_workspace_edits=True,
+                    allow_exact_target_file_fallback=(
+                        _allows_named_code_target_fallback(task_spec) or self.completion_artifact_mode == "always"
+                    ),
+                    allow_artifact_body_fallback=_allows_artifact_synthesis(task_spec),
+                    continue_same_thread=same_thread_retry,
+                    require_exact_target_file_bodies=same_thread_retry,
                 )
                 continue
             patch = _extract_diff_block(proposer_output)
@@ -244,20 +430,12 @@ class HealerRunner:
                         prefer_workspace_edits=workspace_edit_mode,
                     )
                     continue
-                patch_path = workspace / ".apple-flow-healer.patch"
-                patch_path.write_text(patch, encoding="utf-8")
-                try:
-                    apply_proc = subprocess.run(
-                        ["git", "-C", str(workspace), "apply", "--index", "--reject", str(patch_path)],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=self.timeout_seconds,
-                    )
-                finally:
-                    if patch_path.exists():
-                        patch_path.unlink(missing_ok=True)
-                if apply_proc.returncode == 0 and _stage_workspace_changes(
+                patch_applied, patch_apply_error = _apply_unified_diff_patch(
+                    workspace=workspace,
+                    patch=patch,
+                    timeout_seconds=self.timeout_seconds,
+                )
+                if patch_applied and _stage_workspace_changes(
                     workspace,
                     issue_title=issue_title,
                     issue_body=issue_body,
@@ -266,8 +444,7 @@ class HealerRunner:
                 ):
                     break
                 failure_class = "patch_apply_failed"
-                failure_reason = (apply_proc.stderr or apply_proc.stdout or "git apply failed").strip()[:500]
-                _reset_workspace_after_failed_apply(workspace)
+                failure_reason = patch_apply_error or "git apply failed"
             else:
                 failure_class, failure_reason = _classify_non_patch_failure(proposer_output)
                 failure_reason = _augment_failure_reason_with_connector_health(
@@ -330,19 +507,19 @@ class HealerRunner:
                 )
 
             if proposer_attempt >= max_retries:
-                    return HealerRunResult(
-                        success=False,
+                return HealerRunResult(
+                    success=False,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    failure_fingerprint=_execution_contract_failure_fingerprint(
                         failure_class=failure_class,
-                        failure_reason=failure_reason,
-                        failure_fingerprint=_execution_contract_failure_fingerprint(
-                            failure_class=failure_class,
-                            connector=self.connector,
-                            task_spec=task_spec,
-                        ),
-                        proposer_output=proposer_output,
-                        diff_paths=[],
-                        diff_files=0,
-                        diff_lines=0,
+                        connector=self.connector,
+                        task_spec=task_spec,
+                    ),
+                    proposer_output=proposer_output,
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
                     test_summary={},
                     workspace_status=workspace_status,
                 )
@@ -364,6 +541,13 @@ class HealerRunner:
             language=resolved_execution.language_effective,
             execution_root=resolved_execution.execution_root,
             allow_cleanup=self.auto_clean_generated_artifacts and cleanup_cycles_used < self.max_generated_artifact_cleanup_cycles,
+        )
+        _annotate_completion_artifact_parser(
+            workspace_status,
+            mode=completion_parser_mode,
+            confidence=completion_parser_confidence,
+            source=completion_parser_source,
+            reason=completion_parser_reason,
         )
         if cleaned_paths:
             cleanup_cycles_used += 1
@@ -396,7 +580,7 @@ class HealerRunner:
         if not diff_paths:
             return HealerRunResult(
                 success=False,
-                failure_class="no_workspace_change",
+                failure_class="no_workspace_change:connector_noop",
                 failure_reason="Proposer finished without producing any staged file changes.",
                 failure_fingerprint="",
                 proposer_output=proposer_output,
@@ -490,6 +674,13 @@ class HealerRunner:
                 execution_root=resolved_execution.execution_root,
                 allow_cleanup=self.auto_clean_generated_artifacts and cleanup_cycles_used < self.max_generated_artifact_cleanup_cycles,
             )
+            _annotate_completion_artifact_parser(
+                workspace_status,
+                mode=completion_parser_mode,
+                confidence=completion_parser_confidence,
+                source=completion_parser_source,
+                reason=completion_parser_reason,
+            )
             if cleaned_paths:
                 cleanup_cycles_used += 1
             workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
@@ -520,7 +711,7 @@ class HealerRunner:
             if not diff_paths:
                 return HealerRunResult(
                     success=False,
-                    failure_class="no_workspace_change",
+                    failure_class="no_workspace_change:connector_noop",
                     failure_reason="Proposer finished without producing any staged file changes.",
                     failure_fingerprint="",
                     proposer_output=proposer_output,
@@ -596,6 +787,13 @@ class HealerRunner:
                 final_workspace_status["cleanup_performed"] = True
                 final_workspace_status["cleaned_paths"] = list(workspace_status.get("cleaned_paths") or [])
                 final_workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
+                _annotate_completion_artifact_parser(
+                    final_workspace_status,
+                    mode=completion_parser_mode,
+                    confidence=completion_parser_confidence,
+                    source=completion_parser_source,
+                    reason=completion_parser_reason,
+                )
                 fingerprint = _generated_artifact_failure_fingerprint(
                     final_workspace_status["contamination_paths"],
                     execution_root=resolved_execution.execution_root,
@@ -625,6 +823,13 @@ class HealerRunner:
                 workspace_status=workspace_status,
                 failure_fingerprint="",
             )
+        _annotate_completion_artifact_parser(
+            workspace_status,
+            mode=completion_parser_mode,
+            confidence=completion_parser_confidence,
+            source=completion_parser_source,
+            reason=completion_parser_reason,
+        )
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
             return HealerRunResult(
@@ -856,6 +1061,14 @@ def _run_test_gates(
                 targeted_status = "failed"
                 if not targeted.get("gate_reason"):
                     targeted["gate_reason"] = "local_only_requires_local_gate"
+            targeted_status = _maybe_soft_fail_docker_infra_gate(
+                mode=mode,
+                runner_name=runner_name,
+                phase="targeted",
+                summary=summary,
+                gate_result=targeted,
+                gate_status=targeted_status,
+            )
             summary[f"{runner_name}_targeted_exit_code"] = targeted["exit_code"]
             summary[f"{runner_name}_targeted_output_tail"] = targeted["output_tail"]
             summary[f"{runner_name}_targeted_status"] = targeted_status
@@ -882,6 +1095,14 @@ def _run_test_gates(
             full_status = "failed"
             if not full.get("gate_reason"):
                 full["gate_reason"] = "local_only_requires_local_gate"
+        full_status = _maybe_soft_fail_docker_infra_gate(
+            mode=mode,
+            runner_name=runner_name,
+            phase="full",
+            summary=summary,
+            gate_result=full,
+            gate_status=full_status,
+        )
         summary[f"{runner_name}_full_exit_code"] = full["exit_code"]
         summary[f"{runner_name}_full_output_tail"] = full["output_tail"]
         summary[f"{runner_name}_full_status"] = full_status
@@ -906,6 +1127,34 @@ def _unsupported_docker_gate_result(*, mode: str) -> dict[str, Any]:
         "gate_status": "failed" if mode == "docker_only" else "skipped",
         "gate_reason": _DOCKER_UNSUPPORTED_REASON,
     }
+
+
+def _maybe_soft_fail_docker_infra_gate(
+    *,
+    mode: str,
+    runner_name: str,
+    phase: str,
+    summary: dict[str, Any],
+    gate_result: dict[str, Any],
+    gate_status: str,
+) -> str:
+    if mode != "local_then_docker" or runner_name != "docker" or gate_status != "failed":
+        return gate_status
+    local_key = "local_targeted_status" if phase == "targeted" else "local_full_status"
+    if str(summary.get(local_key) or "").strip().lower() != "passed":
+        return gate_status
+    gate_reason = str(gate_result.get("gate_reason") or "").strip().lower()
+    output_tail = str(gate_result.get("output_tail") or "")
+    if gate_reason in {"tool_missing", "infra_unavailable", "docker_infra_unavailable"} or _looks_like_docker_infra_failure(output_tail):
+        gate_result["gate_status"] = "warning"
+        gate_result["gate_reason"] = "docker_infra_unavailable"
+        return "warning"
+    return gate_status
+
+
+def _looks_like_docker_infra_failure(output_tail: str) -> bool:
+    lowered = str(output_tail or "").lower()
+    return any(marker in lowered for marker in _DOCKER_INFRA_OUTPUT_HINTS)
 
 
 def _invoke_gate_runner(
@@ -1089,13 +1338,23 @@ def _run_tests_in_docker(
             "gate_status": "failed",
             "gate_reason": "tool_missing",
         }
+    except subprocess.TimeoutExpired:
+        return {
+            "exit_code": 124,
+            "output_tail": "(docker gate unavailable: timed out while waiting for docker)",
+            "gate_status": "failed",
+            "gate_reason": "infra_unavailable",
+        }
     status = "passed" if int(proc.returncode) == 0 else "failed"
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    gate_reason = ""
+    if status == "failed" and _looks_like_docker_infra_failure(output):
+        gate_reason = "infra_unavailable"
     return {
         "exit_code": int(proc.returncode),
         "output_tail": output[-2000:],
         "gate_status": status,
-        "gate_reason": "",
+        "gate_reason": gate_reason,
     }
 
 
@@ -1106,14 +1365,32 @@ def _build_retry_prompt(
     failure_reason: str,
     task_spec: HealerTaskSpec | None = None,
     prefer_workspace_edits: bool = False,
+    allow_exact_target_file_fallback: bool = False,
+    allow_artifact_body_fallback: bool = False,
+    continue_same_thread: bool = False,
+    require_exact_target_file_bodies: bool = False,
 ) -> str:
     tailored_lines: list[str] = []
     sandbox_scoped = _is_issue_scoped_sandbox(task_spec)
-    if failure_class in {"no_patch", "no_workspace_change"}:
+    if failure_class == "no_patch" or _is_no_workspace_change_failure_class(failure_class):
         if prefer_workspace_edits:
             tailored_lines.append(
                 "You must edit files directly in the managed workspace now. Do not return a diff, plan, or status-only reply."
             )
+            if continue_same_thread:
+                tailored_lines.append("Keep working in the current thread and workspace; do not restart from scratch.")
+            if allow_exact_target_file_fallback:
+                tailored_lines.append(
+                    "If direct edits still do not stick, return complete final file bodies in path-fenced blocks for the named output targets only."
+                )
+                if require_exact_target_file_bodies:
+                    tailored_lines.append(
+                        "This retry is strict: if direct edits do not persist, you must include complete path-fenced final file bodies for the named output targets."
+                    )
+            if allow_artifact_body_fallback:
+                tailored_lines.append(
+                    "If direct edits still do not stick, return the exact final artifact body for each named output target."
+                )
             tailored_lines.append(
                 "After editing, leave a concise summary of what changed and what validation you ran."
             )
@@ -1297,6 +1574,10 @@ def _output_rules(task_spec: HealerTaskSpec, *, prefer_workspace_edits: bool) ->
     if prefer_workspace_edits:
         lines.append("Edit files directly in the workspace. Do not serialize a diff as the normal success path.")
         lines.append("End with a short summary of the files changed and the validation that ran.")
+        if _allows_named_code_target_fallback(task_spec):
+            lines.append(
+                "If direct edits fail in this run, the only accepted fallback is complete path-fenced file bodies for the named output targets."
+            )
     else:
         lines.append("Preferred output order: direct workspace edits first, unified diff second, path-fenced file bodies last.")
     if _allows_artifact_synthesis(task_spec):
@@ -1343,22 +1624,48 @@ def _prefers_workspace_edits(*, connector: ConnectorProtocol, task_spec: HealerT
     return connector.__class__.__name__ == "CodexAppServerConnector"
 
 
+def _run_connector_turn(
+    connector: ConnectorProtocol,
+    thread_id: str,
+    prompt: str,
+    *,
+    timeout_seconds: int,
+) -> ConnectorTurnResult:
+    if hasattr(connector, "run_turn_detailed"):
+        detailed = getattr(connector, "run_turn_detailed")
+        try:
+            return detailed(thread_id, prompt, timeout_seconds=timeout_seconds)
+        except TypeError:
+            pass
+    return ConnectorTurnResult(output_text=connector.run_turn(thread_id, prompt, timeout_seconds=timeout_seconds))
+
+
+def _allows_named_code_target_fallback(task_spec: HealerTaskSpec) -> bool:
+    if task_spec.validation_profile == "artifact_only":
+        return False
+    if not task_spec.output_targets:
+        return False
+    return _requires_non_artifact_diff(task_spec=task_spec)
+
+
 def _execution_contract_failure_fingerprint(
     *,
     failure_class: str,
     connector: ConnectorProtocol,
     task_spec: HealerTaskSpec,
 ) -> str:
-    if failure_class not in {
+    normalized_failure_class = str(failure_class or "").strip()
+    if _is_no_workspace_change_failure_class(normalized_failure_class):
+        pass
+    elif normalized_failure_class not in {
         "empty_diff",
         "malformed_diff",
         "no_patch",
-        "no_workspace_change",
         "patch_apply_failed",
     }:
         return ""
     mode = "workspace_edit" if _prefers_workspace_edits(connector=connector, task_spec=task_spec) else "serialized_patch"
-    return f"execution_contract|{mode}|{failure_class}"
+    return f"execution_contract|{mode}|{normalized_failure_class}"
 
 
 def _render_input_context_block(*, task_spec: HealerTaskSpec, workspace: Path) -> str:
@@ -1571,6 +1878,24 @@ def _stage_workspace_changes(
     task_spec: HealerTaskSpec | None = None,
     language: str = "",
 ) -> bool:
+    result = _stage_workspace_changes_detailed(
+        workspace,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        task_spec=task_spec,
+        language=language,
+    )
+    return bool(result.kept_paths)
+
+
+def _stage_workspace_changes_detailed(
+    workspace: Path,
+    *,
+    issue_title: str = "",
+    issue_body: str = "",
+    task_spec: HealerTaskSpec | None = None,
+    language: str = "",
+) -> bool:
     subprocess.run(
         ["git", "-C", str(workspace), "add", "-A"],
         check=False,
@@ -1595,7 +1920,7 @@ def _stage_workspace_changes(
             workspace,
             preview,
         )
-    return bool(result.kept_paths)
+    return result
 
 
 def _filter_staged_changes(
@@ -2059,6 +2384,26 @@ def _looks_like_unified_diff(patch: str) -> bool:
     return has_diff_header and has_metadata_change
 
 
+def _apply_unified_diff_patch(*, workspace: Path, patch: str, timeout_seconds: int) -> tuple[bool, str]:
+    patch_path = workspace / ".apple-flow-healer.patch"
+    patch_path.write_text(patch, encoding="utf-8")
+    try:
+        apply_proc = subprocess.run(
+            ["git", "-C", str(workspace), "apply", "--index", "--reject", str(patch_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    finally:
+        if patch_path.exists():
+            patch_path.unlink(missing_ok=True)
+    if apply_proc.returncode == 0:
+        return True, ""
+    _reset_workspace_after_failed_apply(workspace)
+    return False, (apply_proc.stderr or apply_proc.stdout or "git apply failed").strip()[:500]
+
+
 def _materialize_artifact_from_output(
     *,
     task_spec: HealerTaskSpec,
@@ -2162,6 +2507,75 @@ def _materialize_explicit_path_fenced_files(
     return wrote_any
 
 
+def _materialize_named_code_targets_from_output(
+    *,
+    task_spec: HealerTaskSpec,
+    proposer_output: str,
+    workspace: Path,
+    strict: bool = True,
+) -> PathFenceMaterializationResult:
+    if not _allows_named_code_target_fallback(task_spec):
+        return PathFenceMaterializationResult(wrote_any=False)
+    text = (proposer_output or "").strip()
+    if not text:
+        return PathFenceMaterializationResult(wrote_any=False)
+    fenced = _extract_path_fenced_bodies(text)
+    if not fenced:
+        return PathFenceMaterializationResult(wrote_any=False)
+
+    allowed_targets = {
+        rel.as_posix()
+        for rel in (_safe_rel_path(path) for path in task_spec.output_targets)
+        if rel is not None and not _is_artifact_path(rel.as_posix())
+    }
+    if not allowed_targets:
+        return PathFenceMaterializationResult(wrote_any=False)
+    emitted_paths = set(fenced)
+    unexpected = sorted(path for path in emitted_paths if path not in allowed_targets)
+    if strict and unexpected:
+        return PathFenceMaterializationResult(
+            wrote_any=False,
+            rejection_reason=f"fallback included unnamed paths: {', '.join(unexpected)}",
+        )
+
+    workspace_root = workspace.resolve()
+    entries = list(fenced.items()) if strict else [(path, body) for path, body in fenced.items() if path in allowed_targets]
+    if not entries:
+        return PathFenceMaterializationResult(
+            wrote_any=False,
+            rejection_reason="fallback omitted all named output targets",
+        )
+    wrote_any = False
+    for rel_path, body in entries:
+        target_rel = _safe_rel_path(rel_path)
+        if target_rel is None:
+            return PathFenceMaterializationResult(wrote_any=False, rejection_reason=f"invalid fallback path: {rel_path}")
+        target_abs = (workspace / target_rel).resolve()
+        if not _is_within_workspace(path=target_abs, workspace=workspace_root):
+            return PathFenceMaterializationResult(
+                wrote_any=False,
+                rejection_reason=f"fallback escaped workspace: {target_rel.as_posix()}",
+            )
+        if not body.strip() or _looks_like_status_update_summary(body):
+            return PathFenceMaterializationResult(
+                wrote_any=False,
+                rejection_reason=f"fallback for {target_rel.as_posix()} was not a full file body",
+            )
+        content = body if body.endswith("\n") else f"{body}\n"
+        existing = target_abs.read_text(encoding="utf-8") if target_abs.exists() else None
+        if existing == content:
+            continue
+        target_abs.parent.mkdir(parents=True, exist_ok=True)
+        target_abs.write_text(content, encoding="utf-8")
+        wrote_any = True
+    if not wrote_any:
+        return PathFenceMaterializationResult(
+            wrote_any=False,
+            rejection_reason="fallback contained no material file-body changes",
+        )
+    return PathFenceMaterializationResult(wrote_any=True)
+
+
 def _allows_artifact_synthesis(task_spec: HealerTaskSpec) -> bool:
     if not task_spec.output_targets:
         return False
@@ -2244,6 +2658,61 @@ def _looks_like_status_update_summary(text: str) -> bool:
     if lowered.startswith(("updated [", "created [", "added [", "wrote [")) and " with " in lowered:
         return True
     return False
+
+
+def _is_no_workspace_change_failure_class(failure_class: str) -> bool:
+    normalized = str(failure_class or "").strip()
+    return normalized == "no_workspace_change" or normalized.startswith(_NO_WORKSPACE_CHANGE_CLASS_PREFIX)
+
+
+def _classify_workspace_edit_noop(
+    *,
+    proposer_output: str,
+    turn_result: ConnectorTurnResult,
+    path_fence_rejection_reason: str,
+    stage_excluded_paths: list[str],
+    task_spec: HealerTaskSpec,
+) -> tuple[str, str]:
+    if stage_excluded_paths:
+        unique_paths = sorted({str(path).strip() for path in stage_excluded_paths if str(path).strip()})
+        preview = ", ".join(unique_paths[:5])
+        if len(unique_paths) > 5:
+            preview += ", ..."
+        return (
+            "no_workspace_change:staging_filtered_all",
+            "Workspace edits landed, but staging filtered all changes as generated/runtime artifacts"
+            + (f": {preview}" if preview else "."),
+        )
+    if path_fence_rejection_reason:
+        return (
+            "no_workspace_change:artifact_not_materialized",
+            f"Agent returned exact-target fallback output, but it was rejected: {path_fence_rejection_reason}.",
+        )
+    text = (proposer_output or "").strip()
+    if _allows_artifact_synthesis(task_spec) and text and not _contains_diff_fence(text) and not _looks_like_status_update_summary(text):
+        return (
+            "no_workspace_change:artifact_not_materialized",
+            "Artifact-capable task returned plain output, but no material artifact was written to output targets.",
+        )
+    if _looks_like_status_update_summary(text):
+        return (
+            "no_workspace_change:narrative_only",
+            "Agent returned a status summary without leaving workspace edits or exact target file bodies.",
+        )
+    if turn_result.final_answer_present and text:
+        return (
+            "no_workspace_change:narrative_only",
+            "Agent returned a final answer, but it did not leave workspace edits or exact target file bodies.",
+        )
+    if turn_result.commentary_tail:
+        return (
+            "no_workspace_change:connector_noop",
+            "Agent stayed in commentary mode and did not leave workspace edits or exact target file bodies.",
+        )
+    return (
+        "no_workspace_change:connector_noop",
+        "Agent completed the turn without producing durable workspace edits in the managed workspace.",
+    )
 
 
 def _recover_artifact_from_diff(*, text: str, target_path: Path) -> str:
@@ -2365,11 +2834,38 @@ def _normalize_test_gate_mode(mode: str) -> str:
     return "local_then_docker"
 
 
+def _normalize_completion_artifact_mode(mode: str) -> str:
+    candidate = str(mode or "").strip().lower()
+    if candidate in _COMPLETION_ARTIFACT_MODES:
+        return candidate
+    return "fallback_only"
+
+
 def _normalize_local_gate_policy(policy: str) -> str:
     candidate = str(policy or "").strip().lower().replace("-", "_")
     if candidate in {"auto", "skip", "force"}:
         return candidate
     return "auto"
+
+
+def _annotate_completion_artifact_parser(
+    workspace_status: dict[str, Any],
+    *,
+    mode: str,
+    confidence: float,
+    source: str = "",
+    reason: str = "",
+) -> None:
+    workspace_status["completion_artifact_parser_mode"] = mode
+    workspace_status["completion_artifact_parser_confidence"] = round(max(0.0, min(1.0, float(confidence))), 2)
+    if source:
+        workspace_status["completion_artifact_parser_source"] = source
+    elif "completion_artifact_parser_source" in workspace_status:
+        workspace_status.pop("completion_artifact_parser_source", None)
+    if reason:
+        workspace_status["completion_artifact_parser_reason"] = reason
+    elif "completion_artifact_parser_reason" in workspace_status:
+        workspace_status.pop("completion_artifact_parser_reason", None)
 
 
 def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:

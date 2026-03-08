@@ -66,6 +66,14 @@ _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "push_non_fast_forward",
     "no_code_diff",
 }
+_EXECUTION_CONTRACT_FAILURE_CLASSES = {
+    "empty_diff",
+    "malformed_diff",
+    "no_patch",
+    "no_workspace_change",
+    "patch_apply_failed",
+}
+_QUARANTINE_NEUTRAL_FAILURE_CLASSES = {"interrupted", "lease_expired"}
 _STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
 
 _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
@@ -135,6 +143,7 @@ class AutonomousHealerLoop:
             timeout_seconds=settings.healer_max_wall_clock_seconds_per_issue,
             test_gate_mode=settings.healer_test_gate_mode,
             local_gate_policy=settings.healer_local_gate_policy,
+            completion_artifact_mode=settings.healer_completion_artifact_mode,
             language=settings.healer_language,
             docker_image=settings.healer_docker_image,
             test_command=settings.healer_test_command,
@@ -1558,11 +1567,17 @@ class AutonomousHealerLoop:
                 targeted_tests=targeted_tests,
             )
             actual_diff = run_result.diff_paths
-            test_summary = run_result.test_summary
+            test_summary = dict(run_result.test_summary or {})
+            self._record_app_server_attempt_metrics(
+                task_kind=task_spec.task_kind,
+                had_material_diff=bool(actual_diff),
+            )
             proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
             if not run_result.success:
                 failure_class = run_result.failure_class
                 failure_reason = run_result.failure_reason
+                if run_result.failure_fingerprint and not str(test_summary.get("failure_fingerprint") or "").strip():
+                    test_summary["failure_fingerprint"] = run_result.failure_fingerprint
                 logger.info(
                     "Issue #%s attempt %s proposer/test phase failed (%s): %s",
                     issue.issue_id,
@@ -1984,7 +1999,12 @@ class AutonomousHealerLoop:
     ) -> str:
         is_infra = failure_class in _INFRA_FAILURE_CLASSES
         counts_against_trust = _counts_against_issue_trust(failure_class=failure_class, failure_reason=failure_reason)
-        is_always_requeue = is_infra or (failure_class in _ALWAYS_REQUEUE_FAILURE_CLASSES) or not counts_against_trust
+        is_always_requeue = (
+            is_infra
+            or (failure_class in _ALWAYS_REQUEUE_FAILURE_CLASSES)
+            or _is_no_workspace_change_failure_class(failure_class)
+            or not counts_against_trust
+        )
 
         if is_always_requeue:
             if is_infra:
@@ -2134,6 +2154,26 @@ class AutonomousHealerLoop:
         self.store.set_state("healer_connector_availability_reason", str(health.get("availability_reason") or ""))
         self.store.set_state("healer_connector_last_checked_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
 
+    def _increment_state_counter(self, key: str, *, amount: int = 1) -> None:
+        raw = str(self.store.get_state(key) or "").strip()
+        try:
+            current = int(raw)
+        except ValueError:
+            current = 0
+        self.store.set_state(key, str(max(0, current + int(amount))))
+
+    def _record_app_server_attempt_metrics(self, *, task_kind: str, had_material_diff: bool) -> None:
+        if self.connector.__class__.__name__ != "CodexAppServerConnector":
+            return
+        normalized_task_kind = str(task_kind or "").strip().lower() or "unknown"
+        self._increment_state_counter("app_server_attempts")
+        self._increment_state_counter(f"app_server_attempts_task_kind_{normalized_task_kind}")
+        if had_material_diff:
+            self._increment_state_counter("app_server_attempts_with_material_diff")
+            return
+        self._increment_state_counter("app_server_attempts_with_zero_diff")
+        self._increment_state_counter(f"app_server_attempts_with_zero_diff_task_kind_{normalized_task_kind}")
+
     def _record_failure_fingerprint(
         self,
         *,
@@ -2167,8 +2207,14 @@ class AutonomousHealerLoop:
         attempts = self.store.list_healer_attempts(issue_id=issue_id, limit=max(threshold, 5))
         matches = 1
         for attempt in attempts:
-            summary = attempt.get("test_summary") or {}
-            if str(summary.get("failure_fingerprint") or "").strip() != failure_fingerprint:
+            attempt_failure_class = str(attempt.get("failure_class") or "").strip()
+            if attempt_failure_class in _QUARANTINE_NEUTRAL_FAILURE_CLASSES:
+                continue
+            attempt_fingerprint = self._attempt_failure_fingerprint(
+                attempt=attempt,
+                current_failure_fingerprint=failure_fingerprint,
+            )
+            if attempt_fingerprint != failure_fingerprint:
                 break
             matches += 1
             if matches >= threshold:
@@ -2209,6 +2255,27 @@ class AutonomousHealerLoop:
             ),
         )
         return True
+
+    @staticmethod
+    def _attempt_failure_fingerprint(*, attempt: dict[str, Any], current_failure_fingerprint: str) -> str:
+        summary = attempt.get("test_summary") or {}
+        persisted = str(summary.get("failure_fingerprint") or "").strip()
+        if persisted:
+            return persisted
+        parts = current_failure_fingerprint.split("|")
+        if len(parts) != 3:
+            return ""
+        if parts[0] != "execution_contract":
+            return ""
+        attempt_failure_class = str(attempt.get("failure_class") or "").strip()
+        if (
+            attempt_failure_class not in _EXECUTION_CONTRACT_FAILURE_CLASSES
+            and not _is_no_workspace_change_failure_class(attempt_failure_class)
+        ):
+            return ""
+        if attempt_failure_class == "no_workspace_change" and _is_no_workspace_change_failure_class(parts[2]):
+            return current_failure_fingerprint
+        return f"{parts[0]}|{parts[1]}|{attempt_failure_class}"
 
     def _circuit_breaker_status(self) -> CircuitBreakerStatus:
         window = max(5, self.settings.healer_circuit_breaker_window)
@@ -2396,14 +2463,46 @@ class AutonomousHealerLoop:
         *,
         outro: str | None = None,
     ) -> str:
-        lines = [f"### {title.strip()}", ""]
+        heading = AutonomousHealerLoop._status_heading(title)
+        signoff = AutonomousHealerLoop._status_signoff(title)
+        lines = [f"### {heading}", ""]
         if intro:
             lines.extend([intro.strip(), ""])
         lines.extend(f"- {item}" for item in bullets if item.strip())
         if outro:
             lines.extend(["", outro.strip()])
-        lines.extend(["", "-- Flow Healer"])
+        lines.extend(["", signoff])
         return "\n".join(lines)
+
+    @staticmethod
+    def _status_heading(title: str) -> str:
+        normalized = (title or "").strip()
+        heading_map = {
+            "Started automated fix attempt": "🛠️ Flow Healer is on it",
+            "Patch is ready for approval": "✨ Patch is ready for a human thumbs-up",
+            "Pull request opened or updated": "🚀 Fresh PR energy",
+            "Attempt failed": "😵‍💫 Hit a snag this round",
+            "Issue requeued automatically": "🔁 Automatic retry queued up",
+            "Issue requeued for another attempt": "🎯 Taking another swing",
+            "Repeated failure pattern detected; issue paused": "🧯 Same snag, smart pause",
+        }
+        flair = heading_map.get(normalized)
+        if flair:
+            return f"{flair} · {normalized}"
+        return f"🤖 {normalized}" if normalized else "🤖 Flow Healer update"
+
+    @staticmethod
+    def _status_signoff(title: str) -> str:
+        normalized = (title or "").strip()
+        if normalized == "Pull request opened or updated":
+            return "-- Flow Healer 🤖✨"
+        if normalized in {"Issue requeued automatically", "Issue requeued for another attempt"}:
+            return "-- Flow Healer, warming up another pass 🔁"
+        if normalized == "Attempt failed":
+            return "-- Flow Healer, regrouping for the next round 🧰"
+        if normalized == "Repeated failure pattern detected; issue paused":
+            return "-- Flow Healer, pausing here so we don't thrash 🧯"
+        return "-- Flow Healer 🤖"
 
     @staticmethod
     def _clean_comment_text(value: object, *, max_chars: int = 240) -> str:
@@ -2489,7 +2588,9 @@ class AutonomousHealerLoop:
     ) -> str:
         verifier_line = cls._clean_comment_text(verifier_summary or "passed", max_chars=260) or "passed"
         lines = [
-            f"Automated Flow Healer proposal for issue #{issue_id}.",
+            f"Flow Healer rolled in with an automated proposal for issue #{issue_id}.",
+            "",
+            "A quick heads-up before you review: this branch was assembled by the agent, then checked against the current validation gates.",
             "",
             "### Verification",
             f"- Verifier: `{verifier_line}`",
@@ -2497,6 +2598,7 @@ class AutonomousHealerLoop:
             "### Test Summary",
         ]
         lines.extend(f"- {item}" for item in cls._format_test_summary_bullets(test_summary))
+        lines.extend(["", "_Built with a little hustle by Flow Healer 🤖✨_"])
         return "\n".join(lines) + "\n"
 
     def _cleanup_workspace(self, *, issue_id: str, state: str, workspace_path: Path) -> None:
@@ -2622,6 +2724,11 @@ def _classify_push_failure(reason: str) -> str:
     if "non-fast-forward" in lowered:
         return "push_non_fast_forward"
     return "push_failed"
+
+
+def _is_no_workspace_change_failure_class(failure_class: str) -> bool:
+    normalized = str(failure_class or "").strip()
+    return normalized == "no_workspace_change" or normalized.startswith("no_workspace_change:")
 
 
 def _counts_against_issue_trust(*, failure_class: str, failure_reason: str) -> bool:

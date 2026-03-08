@@ -182,6 +182,7 @@ class FlowHealerService:
                                 )
                             ],
                         },
+                        "app_server_metrics": _app_server_metrics(runtime.store),
                         "recent_attempts": annotated_attempts,
                     }
                 )
@@ -315,15 +316,48 @@ def _check_command(cmd: list[str]) -> bool:
     return proc.returncode == 0
 
 
+def _safe_state_int(store: SQLiteStore, key: str) -> int:
+    raw = str(store.get_state(key) or "").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _app_server_metrics(store: SQLiteStore) -> dict[str, object]:
+    attempts = _safe_state_int(store, "app_server_attempts")
+    with_material_diff = _safe_state_int(store, "app_server_attempts_with_material_diff")
+    with_zero_diff = _safe_state_int(store, "app_server_attempts_with_zero_diff")
+    task_kinds = ("fix", "build", "docs", "research", "unknown")
+    zero_diff_rate_by_task_kind: dict[str, float] = {}
+    for task_kind in task_kinds:
+        total = _safe_state_int(store, f"app_server_attempts_task_kind_{task_kind}")
+        if total <= 0:
+            continue
+        zero = _safe_state_int(store, f"app_server_attempts_with_zero_diff_task_kind_{task_kind}")
+        zero_diff_rate_by_task_kind[task_kind] = round(float(zero) / float(total), 4)
+    return {
+        "app_server_attempts": attempts,
+        "app_server_attempts_with_material_diff": with_material_diff,
+        "app_server_attempts_with_zero_diff": with_zero_diff,
+        "zero_diff_rate_by_task_kind": zero_diff_rate_by_task_kind,
+    }
+
+
 def _launch_agent_path(label: str) -> str:
+    if shutil.which("launchctl") is None:
+        return ""
     domain = f"gui/{os.getuid()}/{label}"
-    proc = subprocess.run(
-        ["launchctl", "print", domain],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        proc = subprocess.run(
+            ["launchctl", "print", domain],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except OSError:
+        return ""
     if proc.returncode != 0:
         return ""
     text = proc.stdout or ""

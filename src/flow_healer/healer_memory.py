@@ -87,7 +87,11 @@ class HealerMemoryService:
             return
         if outcome == "success" and not bool(verifier_summary.get("passed")):
             return
-        if outcome == "failure" and failure_class not in _NEGATIVE_FAILURES:
+        if (
+            outcome == "failure"
+            and failure_class not in _NEGATIVE_FAILURES
+            and not str(failure_class or "").startswith("no_workspace_change:")
+        ):
             return
 
         lesson_kind = "successful_fix" if outcome == "success" else "guardrail"
@@ -360,7 +364,8 @@ class HealerMemoryService:
             "connector_unavailable": "Check worker runtime environment and ensure Codex CLI is available before consuming retries.",
             "connector_runtime_error": "Treat connector runtime crashes as infra failures and capture raw error output for diagnosis.",
         }
-        mapped = failure_map.get(failure_class, "Keep the patch conservative and easy to verify.")
+        normalized_failure_class = "no_workspace_change" if str(failure_class or "").startswith("no_workspace_change:") else failure_class
+        mapped = failure_map.get(normalized_failure_class, "Keep the patch conservative and easy to verify.")
         reason = (failure_reason or "").strip()
         if reason:
             mapped = f"{mapped} Recent failure signal: {reason[:120]}."
