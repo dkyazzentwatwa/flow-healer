@@ -72,9 +72,16 @@ function sumOperands(operands) {
   // semantics until a later bigint operand intentionally promotes the result.
   let accumulatedSum = getInitialAccumulatedSum(operands);
   let hasOverflowBoundaryPromotion = false;
+  let hasUnsafeIntegerOperand = isUnsafeIntegerNumber(accumulatedSum);
 
   for (let index = 1; index < operands.length; index += 1) {
     const operand = operands[index];
+
+    if (typeof operand === 'bigint' && hasUnsafeIntegerOperand) {
+      throw new RangeError(
+        'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+      );
+    }
 
     if (hasOverflowBoundaryPromotion && isUnsafeIntegerNumber(operand)) {
       throw new RangeError(
@@ -84,6 +91,7 @@ function sumOperands(operands) {
 
     hasOverflowBoundaryPromotion = hasOverflowBoundaryPromotion
       || isVariadicOverflowPromotion(accumulatedSum, operand);
+    hasUnsafeIntegerOperand = hasUnsafeIntegerOperand || isUnsafeIntegerNumber(operand);
     accumulatedSum = addPair(accumulatedSum, operand);
   }
 
