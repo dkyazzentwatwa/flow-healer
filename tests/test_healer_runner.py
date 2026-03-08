@@ -312,6 +312,79 @@ def test_run_test_gates_fails_docker_only_for_local_first_swift(monkeypatch, tmp
     assert summary["failed_tests"] == 1
 
 
+def test_run_test_gates_soft_fails_docker_infra_when_local_passes(monkeypatch):
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        return {"exit_code": 0, "output_tail": "local ok", "gate_status": "passed", "gate_reason": ""}
+
+    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        return {
+            "exit_code": 1,
+            "output_tail": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "gate_status": "failed",
+            "gate_reason": "",
+        }
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_in_docker", fake_docker)
+
+    summary = _run_test_gates(
+        Path("."),
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="python",
+            language_effective="python",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=Path("."),
+            strategy=get_strategy("python"),
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert summary["local_full_status"] == "passed"
+    assert summary["docker_full_status"] == "warning"
+    assert summary["docker_full_reason"] == "docker_infra_unavailable"
+    assert summary["failed_tests"] == 0
+
+
+def test_run_test_gates_keeps_docker_test_failures_hard_failed(monkeypatch):
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        return {"exit_code": 0, "output_tail": "local ok", "gate_status": "passed", "gate_reason": ""}
+
+    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        return {
+            "exit_code": 1,
+            "output_tail": "AssertionError: expected 2 got 1",
+            "gate_status": "failed",
+            "gate_reason": "",
+        }
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_in_docker", fake_docker)
+
+    summary = _run_test_gates(
+        Path("."),
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="python",
+            language_effective="python",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=Path("."),
+            strategy=get_strategy("python"),
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert summary["local_full_status"] == "passed"
+    assert summary["docker_full_status"] == "failed"
+    assert summary["failed_tests"] == 1
+
+
 def test_resolve_execution_prefers_issue_sandbox_over_repo_root_python(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
     node_root = tmp_path / "e2e-smoke" / "node"
@@ -1777,12 +1850,38 @@ def test_build_retry_prompt_prefers_workspace_edits_when_requested():
             validation_profile="code_change",
         ),
         prefer_workspace_edits=True,
+        allow_exact_target_file_fallback=True,
+        continue_same_thread=True,
     )
 
     lowered = prompt.lower()
     assert "edit files directly in the managed workspace" in lowered
     assert "do not return a diff" in lowered
     assert "concise summary" in lowered
+    assert "current thread and workspace" in lowered
+    assert "path-fenced blocks" in lowered
+
+
+def test_build_retry_prompt_includes_artifact_body_fallback_when_requested():
+    prompt = _build_retry_prompt(
+        base_prompt="Write the requested doc",
+        failure_class="no_workspace_change",
+        failure_reason="Agent returned a summary only.",
+        task_spec=HealerTaskSpec(
+            task_kind="docs",
+            output_mode="patch",
+            output_targets=("docs/runtime-reset-smoke.md",),
+            tool_policy="repo_only",
+            validation_profile="artifact_only",
+        ),
+        prefer_workspace_edits=True,
+        allow_artifact_body_fallback=True,
+        continue_same_thread=True,
+    )
+
+    lowered = prompt.lower()
+    assert "exact final artifact body" in lowered
+    assert "current thread and workspace" in lowered
 
 
 def test_build_proposer_prompt_prefers_workspace_edits_for_app_server_tasks(tmp_path):
@@ -1829,7 +1928,7 @@ def test_task_execution_instructions_keep_sandbox_validation_local():
     assert "do not suggest or claim repo-root pytest/full-suite validation" in lowered
 
 
-def test_run_attempt_app_server_code_task_rejects_diff_only_output(tmp_path):
+def test_run_attempt_app_server_code_task_accepts_diff_fallback_output(monkeypatch, tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
     _init_git_repo(workspace)
@@ -1852,6 +1951,16 @@ def test_run_attempt_app_server_code_task_rejects_diff_only_output(tmp_path):
     connector = app_server_cls([patch])
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
     runner.max_code_proposer_retries = 0
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
 
     result = runner.run_attempt(
         issue_id="911",
@@ -1871,9 +1980,263 @@ def test_run_attempt_app_server_code_task_rejects_diff_only_output(tmp_path):
         targeted_tests=[],
     )
 
+    assert result.success is True
+    assert result.failure_class == ""
+    assert (workspace / "demo.py").read_text(encoding="utf-8").strip().endswith("return a + b")
+
+
+def test_run_attempt_app_server_code_task_recovers_with_exact_target_fallback(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "Updated [demo.py](/tmp/demo.py) to fix the add helper and ran tests.",
+            "```python path=demo.py\n"
+            "def add(a, b):\n"
+            "    return a + b\n"
+            "```\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="914",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert connector.reset_calls == ["healer:914"]
+    assert len(connector.turns) == 2
+    assert "complete final file bodies in path-fenced blocks" in connector.turns[1][1].lower()
+
+
+def test_run_attempt_app_server_code_task_rejects_fallback_with_extra_paths(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "```python path=demo.py\n"
+            "def add(a, b):\n"
+            "    return a + b\n"
+            "```\n"
+            "```python path=other.py\n"
+            "VALUE = 1\n"
+            "```\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="915",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
     assert result.success is False
-    assert result.failure_class == "no_workspace_change"
-    assert result.failure_fingerprint == "execution_contract|workspace_edit|no_workspace_change"
+    assert result.failure_class == "no_workspace_change:artifact_not_materialized"
+    assert "unnamed paths" in result.failure_reason
+
+
+def test_run_attempt_app_server_code_task_marks_staging_filtered_all_when_only_runtime_artifacts_change(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    class _GeneratedArtifactConnector(_RetryConnector):
+        def __init__(self, workspace_path: Path):
+            super().__init__(["Updated runtime artifacts only."])
+            self.workspace_path = workspace_path
+
+        def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+            self.turns.append((thread_id, prompt))
+            cache_dir = self.workspace_path / ".pytest_cache"
+            cache_dir.mkdir(exist_ok=True)
+            (cache_dir / "v").write_text("cached\n", encoding="utf-8")
+            return self.outputs.pop(0)
+
+    app_server_cls = type("CodexAppServerConnector", (_GeneratedArtifactConnector,), {})
+    connector = app_server_cls(workspace)
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="915a",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_workspace_change:staging_filtered_all"
+    assert ".pytest_cache" in result.failure_reason
+
+
+def test_run_attempt_app_server_no_workspace_change_allows_only_one_same_thread_retry(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+            "Updated [demo.py](/tmp/demo.py) and this should work now.",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    result = runner.run_attempt(
+        issue_id="915b",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class.startswith("no_workspace_change:")
+    assert result.failure_fingerprint.startswith("execution_contract|workspace_edit|no_workspace_change:")
+    assert len(connector.turns) == 2
+    assert "this retry is strict" in connector.turns[1][1].lower()
+
+
+def test_run_attempt_app_server_always_mode_accepts_lenient_named_target_fallback(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "```python path=demo.py\n"
+            "def add(a, b):\n"
+            "    return a + b\n"
+            "```\n"
+            "```python path=other.py\n"
+            "VALUE = 1\n"
+            "```\n",
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        completion_artifact_mode="always",
+    )
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="915c",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert (workspace / "other.py").exists() is False
+    assert result.workspace_status["completion_artifact_parser_mode"] == "lenient"
+    assert result.workspace_status["completion_artifact_parser_confidence"] == 0.65
 
 
 def test_build_proposer_prompt_prefers_workspace_edits_for_app_server_docs_tasks(tmp_path):
@@ -1938,3 +2301,41 @@ def test_run_attempt_app_server_artifact_task_materializes_output_without_diff(t
     assert "docs/runtime-reset-smoke.md" in result.diff_paths
     created = (workspace / "docs" / "runtime-reset-smoke.md").read_text(encoding="utf-8")
     assert "issue-to-pr path" in created.lower()
+
+
+def test_run_attempt_app_server_artifact_task_retries_same_thread_on_summary_only_output(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    connector = app_server_cls(
+        [
+            "Updated [docs/runtime-reset-smoke.md](/tmp/runtime-reset-smoke.md) with the requested note. I did not run tests.",
+            "# Runtime Reset Smoke\n\nRecovered by returning exact artifact content on retry.\n",
+        ]
+    )
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    result = runner.run_attempt(
+        issue_id="917",
+        issue_title="Write runtime note",
+        issue_body="Create docs/runtime-reset-smoke.md",
+        task_spec=HealerTaskSpec(
+            task_kind="docs",
+            output_mode="patch",
+            output_targets=("docs/runtime-reset-smoke.md",),
+            tool_policy="repo_only",
+            validation_profile="artifact_only",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert connector.reset_calls == ["healer:917"]
+    assert len(connector.turns) == 2
+    assert "exact final artifact body" in connector.turns[1][1].lower()

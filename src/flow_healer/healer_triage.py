@@ -40,7 +40,6 @@ _CONNECTOR_FAILURE_CLASSES = {
     "malformed_diff",
     "no_patch",
     "no_code_diff",
-    "no_workspace_change",
     "patch_apply_failed",
     "generated_artifact_contamination",
     "verifier_failed",
@@ -81,7 +80,7 @@ def classify_failure(issue: dict[str, Any] | None, attempt: dict[str, Any] | Non
         if any(marker in failure_reason for marker in ("invalid json", "json", "verdict", "payload")):
             return "connector_or_patch_generation"
         return "product_bug"
-    if failure_class in _CONNECTOR_FAILURE_CLASSES:
+    if failure_class in _CONNECTOR_FAILURE_CLASSES or _is_no_workspace_change_failure_class(failure_class):
         return "connector_or_patch_generation"
     if failure_class in _PROCESS_FAILURE_CLASSES:
         return "automation_or_process"
@@ -210,7 +209,7 @@ def _connector_debug_focus(issue: dict[str, Any] | None, attempt: dict[str, Any]
         marker in failure_reason for marker in ("malformed diff", "invalid patch syntax", "missing hunk header")
     ):
         return "diff_fence"
-    if failure_class == "no_workspace_change" or any(
+    if _is_no_workspace_change_failure_class(failure_class) or any(
         marker in failure_reason for marker in ("no workspace change", "did not edit files", "no file edits")
     ):
         return "empty_diff"
@@ -272,3 +271,8 @@ def _connector_debug_checks(focus: str) -> tuple[str, ...]:
         ),
     }
     return mapping.get(focus, ())
+
+
+def _is_no_workspace_change_failure_class(failure_class: str) -> bool:
+    normalized = str(failure_class or "").strip()
+    return normalized == "no_workspace_change" or normalized.startswith("no_workspace_change:")

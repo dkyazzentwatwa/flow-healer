@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
+
+
+@dataclass(slots=True, frozen=True)
+class ConnectorTurnResult:
+    output_text: str
+    final_answer_present: bool = False
+    commentary_tail: str = ""
 
 
 class ConnectorProtocol(Protocol):

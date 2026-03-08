@@ -95,6 +95,7 @@ class RelaySettings:
     healer_verifier_policy: str = "advisory"
     healer_test_gate_mode: str = "local_then_docker"
     healer_local_gate_policy: str = "auto"
+    healer_completion_artifact_mode: str = "fallback_only"
     healer_language: str = ""
     healer_docker_image: str = ""
     healer_test_command: str = ""
@@ -200,6 +201,7 @@ class AppConfig:
                     healer_verifier_policy=_normalize_verifier_policy(item.get("verifier_policy")),
                     healer_test_gate_mode=str(item.get("test_gate_mode") or "local_then_docker"),
                     healer_local_gate_policy=str(item.get("local_gate_policy") or "auto"),
+                    healer_completion_artifact_mode=str(item.get("completion_artifact_mode") or "fallback_only"),
                     healer_language=_validate_healer_language(
                         item.get("language"),
                         repo_name=name,

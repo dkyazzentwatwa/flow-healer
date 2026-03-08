@@ -1970,6 +1970,108 @@ def test_quarantine_failure_loop_blocks_repeated_generated_artifact_fingerprint(
     loop.tracker.add_issue_comment.assert_called()
 
 
+def test_quarantine_failure_loop_blocks_repeated_no_workspace_change_without_persisted_fingerprint(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="391",
+        repo="owner/repo",
+        title="Issue 391",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.create_healer_attempt(
+        attempt_id="hat_prev",
+        issue_id="391",
+        attempt_no=1,
+        state="failed",
+        predicted_lock_set=["repo:*"],
+        prediction_source="test",
+        task_kind="fix",
+        output_targets=["demo.py"],
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+    store.finish_healer_attempt(
+        attempt_id="hat_prev",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={},
+        verifier_summary={},
+        failure_class="no_workspace_change",
+        failure_reason="Agent returned a status summary without leaving workspace edits.",
+    )
+
+    loop = _make_loop(store, healer_failure_fingerprint_quarantine_threshold=2)
+    blocked = loop._maybe_quarantine_failure_loop(
+        issue_id="391",
+        failure_class="no_workspace_change",
+        failure_reason="Agent returned a status summary without leaving workspace edits.",
+        failure_fingerprint="execution_contract|workspace_edit|no_workspace_change",
+        workspace_status={},
+    )
+
+    issue = store.get_healer_issue("391")
+    assert blocked is True
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["last_failure_class"] == "no_workspace_change"
+    assert "Repeated failure fingerprint" in issue["feedback_context"]
+
+
+def test_quarantine_failure_loop_ignores_interrupted_attempts_between_matching_failures(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="392",
+        repo="owner/repo",
+        title="Issue 392",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_failure_fingerprint_quarantine_threshold=2)
+    loop.store.list_healer_attempts = MagicMock(
+        return_value=[
+            {"failure_class": "interrupted", "test_summary": {}},
+            {"failure_class": "no_workspace_change", "test_summary": {}},
+        ]
+    )
+
+    blocked = loop._maybe_quarantine_failure_loop(
+        issue_id="392",
+        failure_class="no_workspace_change",
+        failure_reason="Agent returned a status summary without leaving workspace edits.",
+        failure_fingerprint="execution_contract|workspace_edit|no_workspace_change",
+        workspace_status={},
+    )
+
+    issue = store.get_healer_issue("392")
+    assert blocked is True
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["last_failure_class"] == "no_workspace_change"
+
+
+def test_record_app_server_attempt_metrics_tracks_zero_diff_and_task_kind(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    app_server_cls = type("CodexAppServerConnector", (_HealthyConnector,), {})
+    loop = _make_loop(store, connector=app_server_cls())
+
+    loop._record_app_server_attempt_metrics(task_kind="fix", had_material_diff=False)
+    loop._record_app_server_attempt_metrics(task_kind="fix", had_material_diff=True)
+
+    assert store.get_state("app_server_attempts") == "2"
+    assert store.get_state("app_server_attempts_with_material_diff") == "1"
+    assert store.get_state("app_server_attempts_with_zero_diff") == "1"
+    assert store.get_state("app_server_attempts_task_kind_fix") == "2"
+    assert store.get_state("app_server_attempts_with_zero_diff_task_kind_fix") == "1"
+
+
 def test_tick_once_skips_claim_when_connector_unavailable(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -2629,7 +2731,8 @@ def test_format_pr_description_uses_markdown_sections():
         test_summary={"failed_tests": 0, "mode": "local_only"},
     )
 
-    assert body.startswith("Automated Flow Healer proposal for issue #155.")
+    assert body.startswith("Flow Healer rolled in with an automated proposal for issue #155.")
     assert "### Verification" in body
     assert "### Test Summary" in body
     assert "- Test gates: `passed`" in body
+    assert "Built with a little hustle by Flow Healer" in body

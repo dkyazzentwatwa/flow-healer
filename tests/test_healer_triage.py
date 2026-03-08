@@ -72,6 +72,20 @@ def test_classify_issue_route_maps_empty_diff_failures_to_empty_diff_focus() -> 
     assert route.connector_debug_focus == "empty_diff"
 
 
+def test_classify_issue_route_maps_no_workspace_change_subclasses_to_empty_diff_focus() -> None:
+    route = classify_issue_route(
+        {"state": "failed"},
+        {
+            "failure_class": "no_workspace_change:staging_filtered_all",
+            "failure_reason": "Workspace edits landed, but staging filtered all changes.",
+        },
+    )
+
+    assert route.diagnosis == "connector_or_patch_generation"
+    assert route.failure_family == "connector_patch"
+    assert route.connector_debug_focus == "empty_diff"
+
+
 def test_classify_issue_route_maps_malformed_diff_failures_to_diff_fence_focus() -> None:
     route = classify_issue_route(
         {"state": "failed"},
