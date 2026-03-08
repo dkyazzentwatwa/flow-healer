@@ -2,6 +2,10 @@ function isIntegerNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
 }
 
+function isUnsafeIntegerNumber(value) {
+  return isIntegerNumber(value) && !Number.isSafeInteger(value);
+}
+
 function canConvertToBigInt(value) {
   return typeof value === 'bigint' || isIntegerNumber(value);
 }
@@ -49,13 +53,32 @@ function addPair(a, b) {
   return normalizeZero(a + b);
 }
 
+function isVariadicOverflowPromotion(accumulatedSum, operand) {
+  if (!Number.isSafeInteger(accumulatedSum) || !Number.isSafeInteger(operand)) {
+    return false;
+  }
+
+  return !Number.isSafeInteger(accumulatedSum + operand);
+}
+
 function sumOperands(operands) {
   // Start from the original first operand so oversized numbers keep plain-number
   // semantics until a later bigint operand intentionally promotes the result.
   let accumulatedSum = getInitialAccumulatedSum(operands);
+  let hasOverflowBoundaryPromotion = false;
 
   for (let index = 1; index < operands.length; index += 1) {
-    accumulatedSum = addPair(accumulatedSum, operands[index]);
+    const operand = operands[index];
+
+    if (hasOverflowBoundaryPromotion && isUnsafeIntegerNumber(operand)) {
+      throw new RangeError(
+        'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.',
+      );
+    }
+
+    hasOverflowBoundaryPromotion = hasOverflowBoundaryPromotion
+      || isVariadicOverflowPromotion(accumulatedSum, operand);
+    accumulatedSum = addPair(accumulatedSum, operand);
   }
 
   return accumulatedSum;

@@ -246,3 +246,23 @@ test('add preserves an oversized integer through negative zero before bigint pro
 
   assert.equal(add(oversizedNumber, -0, 1n), 9007199254740993n);
 });
+
+test('add rejects unsafe integers after a variadic overflow boundary promoted the sum', () => {
+  assert.throws(
+    () => add(0, Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER + 1),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
+
+test('add keeps that overflow-boundary guard after later bigint operands', () => {
+  assert.throws(
+    () => add(0, Number.MAX_SAFE_INTEGER, 1, 1n, Number.MAX_SAFE_INTEGER + 1),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
