@@ -187,6 +187,16 @@ test('add keeps bigint-promoted variadic sums guarded from later unsafe integer 
   );
 });
 
+test('add rejects the first unsafe number past the bigint promotion boundary', () => {
+  assert.throws(
+    () => add(0, Number.MAX_SAFE_INTEGER, 1, 1n, Number.MAX_SAFE_INTEGER + 1),
+    {
+      name: 'RangeError',
+      message: 'Cannot mix bigint values with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
+
 test('add keeps existing single-value and empty-call behavior', () => {
   assert.equal(add(), 0);
   assert.equal(add(-0), 0);
