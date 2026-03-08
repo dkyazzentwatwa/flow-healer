@@ -2,14 +2,26 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - "README.md"
+      - "README.*"
+      - "docs/**"
+      - "**/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
   push:
     branches:
       - main
+    paths-ignore:
+      - "README.md"
+      - "README.*"
+      - "docs/**"
+      - "**/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -22,10 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
-          - "3.13"
+        python-version: ${{ fromJson(github.event_name == 'pull_request' && '["3.11", "3.12"]' || '["3.11", "3.12", "3.13"]') }}
 
     steps:
       - name: Checkout repository

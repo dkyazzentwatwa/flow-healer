@@ -1,12 +1,6 @@
-name: 03 Verify PR
+name: 03 Verify PR (Manual)
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
   workflow_dispatch:
 
 permissions:
