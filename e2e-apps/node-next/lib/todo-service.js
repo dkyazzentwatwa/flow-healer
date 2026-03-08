@@ -9,13 +9,7 @@ export class TodoService {
   }
 
   create(title) {
-    if (typeof title !== "string") {
-      throw new Error("title_required");
-    }
-    const normalized = title.trim();
-    if (!normalized) {
-      throw new Error("title_required");
-    }
+    const normalized = normalizeTodoTitle(title);
     const todo = {
       id: String(this._nextId++),
       title: normalized,
@@ -39,6 +33,19 @@ export class TodoService {
     }
     return { ...todo };
   }
+}
+
+export function normalizeTodoTitle(title) {
+  if (typeof title !== "string") {
+    throw new Error("title_required");
+  }
+
+  const normalized = title.trim();
+  if (!normalized) {
+    throw new Error("title_required");
+  }
+
+  return normalized;
 }
 
 export const todoService = new TodoService();
