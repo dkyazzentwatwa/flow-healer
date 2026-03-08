@@ -25,9 +25,10 @@ final class TodoServiceTests: XCTestCase {
 
     func testCompleteThrowsWhenItemMissing() throws {
         let service = TodoService()
+        let missingID = "404"
 
-        XCTAssertThrowsError(try service.complete(id: "404")) { error in
-            XCTAssertEqual(error as? TodoServiceError, .itemNotFound)
+        XCTAssertThrowsError(try service.complete(id: missingID)) { error in
+            XCTAssertEqual(error as? TodoServiceError, .itemNotFound(id: missingID))
         }
     }
 }
