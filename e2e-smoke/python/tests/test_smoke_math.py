@@ -13,6 +13,20 @@ class FancyInt(int):
     """Simple int subclass used to exercise operand normalization."""
 
 
+class IndexStableInt(int):
+    """Exercise exact integer coercion when __int__ disagrees with __index__."""
+
+    def __int__(self) -> int:
+        return super().__int__() + 100
+
+
+class OverflowingInt(int):
+    """Exercise exact integer coercion when __int__ raises unexpectedly."""
+
+    def __int__(self) -> int:
+        raise OverflowError("lossy int coercion should not be consulted")
+
+
 class IntLikeButNotIntegral:
     """Mimic numeric coercion hooks without opting into Integral semantics."""
 
@@ -43,6 +57,8 @@ ADD_SUCCESS_CASES = (
     pytest.param(" +2 ", " -3 ", -1, id="adds_signed_integer_strings"),
     pytest.param(True, False, 1, id="adds_boolean_operands"),
     pytest.param(FancyInt(7), 3, 10, id="adds_integer_subclass_operand"),
+    pytest.param(IndexStableInt(4), -1, 3, id="uses_exact_index_for_int_subclass"),
+    pytest.param(OverflowingInt(6), "-2", 4, id="ignores_overflowing_int_hook"),
 )
 
 ADD_TYPE_ERROR_CASES = (
@@ -52,7 +68,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(1.5, 1, id="rejects_float_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 8
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 10
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
 
 
@@ -224,6 +240,16 @@ def test_coerce_operands_normalizes_string_and_numeric_inputs_together() -> None
 def test_coerce_operands_normalizes_bool_before_integral_fallback() -> None:
     """Bool operands should stay explicitly supported through shared coercion."""
     assert _coerce_operands(True, " 2 ") == (1, 2)
+
+
+def test_coerce_operands_prefers_exact_index_over_custom_int_rounding() -> None:
+    """Integral normalization should preserve exact integer semantics."""
+    assert _coerce_operands(IndexStableInt(-4), " 1 ") == (-4, 1)
+
+
+def test_coerce_operands_ignores_overflowing_int_hook_for_integral_subclass() -> None:
+    """Integral normalization should not fail because __int__ is unstable."""
+    assert _coerce_operands(OverflowingInt(8), "-3") == (8, -3)
 
 
 def test_add3_preserves_identity_across_signed_inputs() -> None:
