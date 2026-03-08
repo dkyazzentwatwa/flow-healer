@@ -370,6 +370,15 @@ class HealerRunner:
                         task_spec=task_spec,
                     )
                     if no_workspace_change_retries_used >= 1:
+                        _materialize_completion_artifact(
+                            issue_id=issue_id,
+                            issue_title=issue_title,
+                            task_spec=task_spec,
+                            proposer_output=proposer_output,
+                            failure_class=failure_class,
+                            failure_reason=failure_reason,
+                            workspace=workspace,
+                        )
                         return HealerRunResult(
                             success=False,
                             failure_class=failure_class,
@@ -389,24 +398,43 @@ class HealerRunner:
                     no_workspace_change_retries_used += 1
                 if proposer_attempt >= max_retries or failure_class in _NON_RETRYABLE_FAILURES:
                     # Last-resort: write a completion artifact so the run has some output.
-                    if failure_class not in _NON_RETRYABLE_FAILURES and _materialize_completion_artifact(
-                        issue_id=issue_id,
-                        issue_title=issue_title,
-                        task_spec=task_spec,
-                        proposer_output=proposer_output,
-                        failure_class=failure_class,
-                        failure_reason=failure_reason,
-                        workspace=workspace,
-                    ) and _stage_workspace_changes(
-                        workspace,
-                        issue_title=issue_title,
-                        issue_body=issue_body,
-                        task_spec=task_spec,
-                        language=resolved_execution.language_effective,
-                    ):
-                        failure_class = ""
-                        failure_reason = ""
-                        break
+                    if failure_class not in _NON_RETRYABLE_FAILURES:
+                        wrote_completion_artifact = _materialize_completion_artifact(
+                            issue_id=issue_id,
+                            issue_title=issue_title,
+                            task_spec=task_spec,
+                            proposer_output=proposer_output,
+                            failure_class=failure_class,
+                            failure_reason=failure_reason,
+                            workspace=workspace,
+                        )
+                        if wrote_completion_artifact and _requires_non_artifact_diff(task_spec=task_spec):
+                            return HealerRunResult(
+                                success=False,
+                                failure_class=failure_class,
+                                failure_reason=failure_reason,
+                                failure_fingerprint=_execution_contract_failure_fingerprint(
+                                    failure_class=failure_class,
+                                    connector=self.connector,
+                                    task_spec=task_spec,
+                                ),
+                                proposer_output=proposer_output,
+                                diff_paths=[],
+                                diff_files=0,
+                                diff_lines=0,
+                                test_summary={},
+                                workspace_status=workspace_status,
+                            )
+                        if wrote_completion_artifact and _stage_workspace_changes(
+                            workspace,
+                            issue_title=issue_title,
+                            issue_body=issue_body,
+                            task_spec=task_spec,
+                            language=resolved_execution.language_effective,
+                        ):
+                            failure_class = ""
+                            failure_reason = ""
+                            break
                     return HealerRunResult(
                         success=False,
                         failure_class=failure_class,
@@ -549,7 +577,7 @@ class HealerRunner:
 
             if proposer_attempt >= max_retries:
                 # Last-resort: write a completion artifact so the run has some output.
-                if _materialize_completion_artifact(
+                wrote_completion_artifact = _materialize_completion_artifact(
                     issue_id=issue_id,
                     issue_title=issue_title,
                     task_spec=task_spec,
@@ -557,7 +585,25 @@ class HealerRunner:
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                     workspace=workspace,
-                ) and _stage_workspace_changes(
+                )
+                if wrote_completion_artifact and _requires_non_artifact_diff(task_spec=task_spec):
+                    return HealerRunResult(
+                        success=False,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        failure_fingerprint=_execution_contract_failure_fingerprint(
+                            failure_class=failure_class,
+                            connector=self.connector,
+                            task_spec=task_spec,
+                        ),
+                        proposer_output=proposer_output,
+                        diff_paths=[],
+                        diff_files=0,
+                        diff_lines=0,
+                        test_summary={},
+                        workspace_status=workspace_status,
+                    )
+                if wrote_completion_artifact and _stage_workspace_changes(
                     workspace,
                     issue_title=issue_title,
                     issue_body=issue_body,
@@ -2619,7 +2665,10 @@ def _materialize_completion_artifact(
     workspace: Path,
 ) -> bool:
     """Write a structured run-summary artifact when the agent ran but produced no file changes."""
-    if failure_class not in _COMPLETION_ARTIFACT_NO_CHANGE_CLASSES:
+    if (
+        failure_class not in _COMPLETION_ARTIFACT_NO_CHANGE_CLASSES
+        and not _is_no_workspace_change_failure_class(failure_class)
+    ):
         return False
     output_text = (proposer_output or "").strip()
     if not output_text:

@@ -2283,6 +2283,48 @@ def test_run_attempt_app_server_no_workspace_change_allows_only_one_same_thread_
     assert "this retry is strict" in connector.turns[1][1].lower()
 
 
+def test_run_attempt_app_server_writes_completion_artifact_for_repeated_prose_no_diff(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    app_server_cls = type("CodexAppServerConnector", (_RetryConnector,), {})
+    prose_output = "Updated demo.py to fix the bug and verified the result locally."
+    connector = app_server_cls([prose_output, prose_output])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 1
+
+    result = runner.run_attempt(
+        issue_id="915bb",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    artifact = workspace / "docs" / "healer-runs" / "915bb-fix-demo.md"
+    assert result.success is False
+    assert artifact.exists()
+    content = artifact.read_text(encoding="utf-8")
+    assert "did not produce direct file changes" in content
+    assert result.failure_class == "no_workspace_change:connector_noop"
+    assert "no_workspace_change:connector_noop" in content
+    assert len(connector.turns) == 2
+
+
 def test_run_attempt_app_server_always_mode_accepts_lenient_named_target_fallback(monkeypatch, tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
