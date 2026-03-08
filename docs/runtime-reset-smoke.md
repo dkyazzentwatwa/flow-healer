@@ -1,4 +1,3 @@
-# Runtime Reset Smoke
+Changed `docs/runtime-reset-smoke.md` to add a short `Expected Outcome` section that keeps the runtime reset note concise and scoped to the smoke doc.
 
-This file is a Flow Healer smoke issue used to verify the issue-to-PR path
-after a runtime reset.
+Validation ran: read back `docs/runtime-reset-smoke.md` to confirm the final artifact content.
