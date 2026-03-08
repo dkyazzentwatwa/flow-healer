@@ -168,6 +168,22 @@ class HealerRunner:
             ):
                 break
             if workspace_edit_mode:
+                # Fallback: accept explicit path-fenced file outputs when direct workspace
+                # edits were not staged (mirrors the non-workspace-edit recovery path).
+                if _materialize_explicit_path_fenced_files(
+                    task_spec=task_spec,
+                    proposer_output=proposer_output,
+                    workspace=workspace,
+                ) and _stage_workspace_changes(
+                    workspace,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    task_spec=task_spec,
+                    language=resolved_execution.language_effective,
+                ):
+                    failure_class = ""
+                    failure_reason = ""
+                    break
                 if _allows_artifact_synthesis(task_spec) and _materialize_artifact_from_output(
                     task_spec=task_spec,
                     proposer_output=proposer_output,
