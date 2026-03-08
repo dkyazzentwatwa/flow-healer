@@ -24,7 +24,9 @@ jobs:
       matrix:
         include:
           - python-version: "3.11"
+            experimental: false
           - python-version: "3.12"
+            experimental: false
           - python-version: "3.13"
             experimental: true
 
