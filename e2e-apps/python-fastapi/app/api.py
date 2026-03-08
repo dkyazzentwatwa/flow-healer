@@ -37,6 +37,13 @@ service = DomainService(repository)
 app = FastAPI()
 
 
+def _todo_not_found_http_exception(todo_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Todo '{todo_id}' was not found.",
+    )
+
+
 @app.post("/todos", status_code=status.HTTP_201_CREATED)
 def create_todo(payload: TodoCreateRequest) -> dict[str, object]:
     try:
@@ -51,5 +58,9 @@ def complete_todo(todo_id: str) -> dict[str, object]:
     try:
         todo = service.complete_todo(todo_id)
     except TodoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise _todo_not_found_http_exception(todo_id) from exc
+
+    if todo is None:
+        raise _todo_not_found_http_exception(todo_id)
+
     return asdict(todo)

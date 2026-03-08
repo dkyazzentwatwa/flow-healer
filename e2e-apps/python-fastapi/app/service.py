@@ -37,6 +37,11 @@ class DomainService:
 
         todo.completed = True
         try:
-            return self.repository.update(todo)
+            updated_todo = self.repository.update(todo)
         except KeyError as exc:
             raise self._todo_not_found(todo_id) from exc
+
+        if updated_todo is None:
+            raise self._todo_not_found(todo_id)
+
+        return updated_todo
