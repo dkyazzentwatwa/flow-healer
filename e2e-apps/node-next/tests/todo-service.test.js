@@ -67,11 +67,12 @@ test("create rejects blank and non-string titles", () => {
 });
 
 test("POST rejects blank and malformed titles", async () => {
+  const todosBefore = listTodos().length;
   const blankResponse = await POST(
     new Request("http://localhost/api/todos", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "   " }),
+      body: JSON.stringify({ title: "  \n\t  " }),
     }),
   );
   const malformedResponse = await POST(
@@ -86,4 +87,5 @@ test("POST rejects blank and malformed titles", async () => {
   assert.deepEqual(await blankResponse.json(), { error: "title_required" });
   assert.equal(malformedResponse.status, 400);
   assert.deepEqual(await malformedResponse.json(), { error: "title_required" });
+  assert.equal(listTodos().length, todosBefore);
 });
