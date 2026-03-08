@@ -13,18 +13,6 @@ labels=(
 
 for item in "${labels[@]}"; do
   IFS=$'\t' read -r name color desc <<<"${item}"
-  if ! gh label view "${name}" >/dev/null 2>&1; then
-    gh label create "${name}" --color "${color}" --description "${desc}" >/dev/null
-    continue
-  fi
-
-  current="$(gh label view "${name}" --json color,description)"
-  current_color="$(jq -r '.color' <<<"${current}")"
-  current_desc="$(jq -r '.description // ""' <<<"${current}")"
-  desired_color="${color#\#}"
-  desired_color="${desired_color,,}"
-
-  if [[ "${current_color}" != "${desired_color}" ]] || [[ "${current_desc}" != "${desc}" ]]; then
-    gh label edit "${name}" --color "${color}" --description "${desc}" >/dev/null
-  fi
+  # Idempotent upsert that is safe under concurrent workflow runs.
+  gh label create "${name}" --color "${color}" --description "${desc}" --force >/dev/null
 done
