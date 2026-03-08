@@ -13,7 +13,11 @@ _DISALLOWED_STRING_CHARACTERS = ("\x00",)
 
 def _get_max_integer_string_digits() -> int:
     """Return the active interpreter guardrail for integer-string parsing."""
-    return sys.get_int_max_str_digits()
+    get_max_digits = getattr(sys, "get_int_max_str_digits", None)
+    if get_max_digits is None:
+        return 0
+
+    return int(get_max_digits())
 
 
 def _has_supported_digit_count(value: str) -> bool:
