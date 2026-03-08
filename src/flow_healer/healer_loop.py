@@ -2292,6 +2292,16 @@ class AutonomousHealerLoop:
             "last_health_error": "",
         }
 
+    def _tracker_health_snapshot(self) -> dict[str, str | bool]:
+        last_error_class, last_error_reason = self._tracker_last_error()
+        return {
+            "backend": self.tracker.__class__.__name__,
+            "enabled": bool(getattr(self.tracker, "enabled", False)),
+            "repo_slug": str(getattr(self.tracker, "repo_slug", "") or ""),
+            "last_error_class": last_error_class,
+            "last_error_reason": last_error_reason,
+        }
+
     def _record_connector_health(self, health: dict[str, str | bool]) -> None:
         available = "true" if bool(health.get("available")) else "false"
         self.store.set_state("healer_connector_available", available)
