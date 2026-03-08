@@ -24,47 +24,62 @@ def _load_smoke_math_module() -> ModuleType:
 SMOKE_MATH_MODULE = _load_smoke_math_module()
 
 
-VALID_ADD_CASES = (
-    pytest.param(2, 3, 5, id="adds_two_positive_numbers"),
-    pytest.param(-2, 3, 1, id="adds_negative_and_positive_numbers"),
-    pytest.param(2, -3, -1, id="adds_positive_and_negative_numbers"),
-    pytest.param(-2, -3, -5, id="adds_two_negative_numbers"),
-    pytest.param(" 2 ", "3", 5, id="adds_integer_strings_with_whitespace"),
-    pytest.param(" +2 ", " -3 ", -1, id="adds_signed_integer_strings"),
-    pytest.param(True, False, 1, id="adds_boolean_operands_as_integers"),
-    pytest.param(FancyInt(7), 3, 10, id="adds_integral_subclass_operands"),
+# Supported inputs should keep the smoke suite readable at a glance.
+ADD_VALID_OPERANDS = (
+    pytest.param(2, 3, 5, id="positive_ints"),
+    pytest.param(-2, 3, 1, id="negative_plus_positive"),
+    pytest.param(2, -3, -1, id="positive_plus_negative"),
+    pytest.param(-2, -3, -5, id="negative_ints"),
+    pytest.param(" 2 ", "3", 5, id="string_ints_with_whitespace"),
+    pytest.param(" +2 ", " -3 ", -1, id="signed_string_ints"),
+    pytest.param(True, False, 1, id="bool_operands"),
+    pytest.param(FancyInt(7), 3, 10, id="int_subclass_operand"),
 )
 
-INVALID_ADD_CASES = (
-    pytest.param("", 1, id="rejects_empty_string_operand"),
-    pytest.param("   ", 1, id="rejects_whitespace_only_string_operand"),
-    pytest.param("not-a-number", 1, id="rejects_non_numeric_string_operand"),
-    pytest.param(1.5, 1, id="rejects_float_operand"),
+ADD_INVALID_OPERANDS = (
+    pytest.param("", 1, id="empty_string"),
+    pytest.param("   ", 1, id="whitespace_only_string"),
+    pytest.param("not-a-number", 1, id="non_numeric_string"),
+    pytest.param(1.5, 1, id="float_operand"),
 )
 
+EXPECTED_VALID_CASE_COUNT = 8
+EXPECTED_INVALID_CASE_COUNT = 4
 
-def _invoke_add(left: object, right: object) -> int:
+
+def _call_add(left: object, right: object) -> int:
     return SMOKE_MATH_MODULE.add(left, right)
 
 
-@pytest.mark.parametrize(("left", "right", "expected_sum"), VALID_ADD_CASES)
-def test_add_matches_expected_sum_for_supported_integer_like_operands(
+def _assert_case_group_size(cases: tuple[object, ...], expected_size: int) -> None:
+    assert len(cases) == expected_size
+
+
+@pytest.mark.parametrize(("left", "right", "expected"), ADD_VALID_OPERANDS)
+def test_add_returns_expected_sum(
     left: object,
     right: object,
-    expected_sum: int,
+    expected: int,
 ) -> None:
-    actual_sum = _invoke_add(left, right)
-    assert actual_sum == expected_sum, (
-        f"expected add({left!r}, {right!r}) to return {expected_sum!r}, "
-        f"got {actual_sum!r}"
+    """Smoke-check supported operand combinations return the expected total."""
+    result = _call_add(left, right)
+    assert result == expected, (
+        f"expected add({left!r}, {right!r}) to return {expected!r}, "
+        f"got {result!r}"
     )
 
 
-@pytest.mark.parametrize(("invalid_left", "invalid_right"), INVALID_ADD_CASES)
-def test_add_rejects_unsupported_operands_with_type_error(
-    invalid_left: object,
-    invalid_right: object,
+@pytest.mark.parametrize(("left", "right"), ADD_INVALID_OPERANDS)
+def test_add_rejects_invalid_operands(
+    left: object,
+    right: object,
 ) -> None:
-    unsupported_operands = (invalid_left, invalid_right)
+    """Smoke-check unsupported operands raise a TypeError."""
     with pytest.raises(TypeError):
-        _invoke_add(*unsupported_operands)
+        _call_add(left, right)
+
+
+def test_add_case_groups_cover_expected_smoke_scenarios() -> None:
+    """Keep the smoke suite split between valid and invalid operand groups."""
+    _assert_case_group_size(ADD_VALID_OPERANDS, EXPECTED_VALID_CASE_COUNT)
+    _assert_case_group_size(ADD_INVALID_OPERANDS, EXPECTED_INVALID_CASE_COUNT)

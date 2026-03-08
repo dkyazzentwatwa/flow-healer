@@ -2025,7 +2025,7 @@ def test_run_attempt_app_server_code_task_recovers_with_exact_target_fallback(mo
     )
 
     assert result.success is True
-    assert connector.reset_calls == []
+    assert connector.reset_calls == ["healer:914"]
     assert len(connector.turns) == 2
     assert "complete final file bodies in path-fenced blocks" in connector.turns[1][1].lower()
 
@@ -2277,6 +2277,6 @@ def test_run_attempt_app_server_artifact_task_retries_same_thread_on_summary_onl
     )
 
     assert result.success is True
-    assert connector.reset_calls == []
+    assert connector.reset_calls == ["healer:917"]
     assert len(connector.turns) == 2
     assert "exact final artifact body" in connector.turns[1][1].lower()

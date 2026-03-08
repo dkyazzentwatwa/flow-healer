@@ -30,18 +30,23 @@ function addPair(a, b) {
   return normalizeZero(a + b);
 }
 
-function addMany(initialSum, values) {
-  let sum = initialSum;
+function addArguments(args) {
+  const operandCount = args.length;
+  let sum = addPair(args[0], args[1]);
 
-  for (const value of values) {
-    sum = addPair(sum, value);
+  if (operandCount === 2) {
+    return sum;
+  }
+
+  if (operandCount === 3) {
+    return addPair(sum, args[2]);
+  }
+
+  for (let index = 2; index < operandCount; index += 1) {
+    sum = addPair(sum, args[index]);
   }
 
   return sum;
-}
-
-function addFromFirstPair(a, b, rest) {
-  return addMany(addPair(a, b), rest);
 }
 
 function normalizeMultiOperandSum(sum, operandCount) {
@@ -64,7 +69,7 @@ function hasMultipleOperands(operandCount) {
   return operandCount > 2;
 }
 
-export function add(a, b, ...rest) {
+export function add(a, b) {
   const operandCount = getOperandCount(arguments);
 
   if (hasNoOperands(arguments)) {
@@ -75,7 +80,7 @@ export function add(a, b, ...rest) {
     return normalizeZero(a);
   }
 
-  const sum = addFromFirstPair(a, b, rest);
+  const sum = addArguments(arguments);
 
   return normalizeMultiOperandSum(sum, operandCount);
 }

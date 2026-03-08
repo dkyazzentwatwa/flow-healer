@@ -145,8 +145,15 @@ class HealerRunner:
         )
         cleanup_cycles_used = 0
         sender = f"healer:{issue_id}"
-        thread_id = self.connector.get_or_create_thread(sender)
         workspace_edit_mode = _prefers_workspace_edits(connector=self.connector, task_spec=task_spec)
+        # For app-server workspace-edit mode, always start each attempt with a fresh thread.
+        # Reusing prior issue threads across attempts can cause stale-context "status only" responses
+        # against a newly reset worktree.
+        thread_id = (
+            self.connector.reset_thread(sender)
+            if workspace_edit_mode
+            else self.connector.get_or_create_thread(sender)
+        )
         language_hint = ""
         if resolved_execution.language_effective and resolved_execution.language_effective != "unknown":
             language_hint = (

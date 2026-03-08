@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { add } from '../src/add.js';
 
-const addTestCases = [
+const addScenarios = [
   { name: 'returns 5 for two positive numbers', left: 2, right: 3, expected: 5 },
   { name: 'returns 0 when both inputs are zero', left: 0, right: 0, expected: 0 },
   {
@@ -76,13 +76,13 @@ const addTestCases = [
   },
 ];
 
-function assertScenarioResult({ left, right, expected }) {
+function assertExpectedSum({ left, right, expected }) {
   assert.equal(add(left, right), expected);
 }
 
 test('add returns the expected sum for each scenario', async (t) => {
-  for (const { name, ...testCase } of addTestCases) {
-    await t.test(name, () => assertScenarioResult(testCase));
+  for (const { name, ...scenario } of addScenarios) {
+    await t.test(name, () => assertExpectedSum(scenario));
   }
 });
 
@@ -103,6 +103,33 @@ test('add folds larger input combinations through the same promotion rules', () 
   assert.equal(add(2n, -2, 0), 0n);
   assert.equal(add(0, Number.MAX_SAFE_INTEGER, 1), 9007199254740992n);
   assert.equal(add(-0, 0, 0), 0);
+});
+
+test('add handles long input lists without changing promotion behavior', () => {
+  const manyOnes = Array.from({ length: 5000 }, () => 1);
+  const manyNegativeOnes = Array.from({ length: 5000 }, () => -1);
+  const balancedNumberInputs = [
+    ...Array.from({ length: 3000 }, () => 2),
+    ...Array.from({ length: 3000 }, () => -2),
+  ];
+  const precisionBoundaryInputs = [
+    Number.MAX_SAFE_INTEGER - 3,
+    ...Array.from({ length: 6 }, () => 1),
+  ];
+  const balancedBigIntInputs = [
+    ...Array.from({ length: 2000 }, () => 1n),
+    ...Array.from({ length: 2000 }, () => -1n),
+  ];
+  const alternatingMixedInputs = Array.from({ length: 4000 }, (_, index) =>
+    index % 2 === 0 ? 1n : 1,
+  );
+
+  assert.equal(add(...manyOnes), 5000);
+  assert.equal(add(...manyNegativeOnes), -5000);
+  assert.equal(add(...balancedNumberInputs), 0);
+  assert.equal(add(...precisionBoundaryInputs), 9007199254740994n);
+  assert.equal(add(...balancedBigIntInputs), 0n);
+  assert.equal(add(...alternatingMixedInputs), 4000n);
 });
 
 test('add keeps unsafe integer number inputs on normal number semantics', () => {
