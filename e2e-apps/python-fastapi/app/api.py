@@ -44,6 +44,18 @@ def _todo_not_found_http_exception(todo_id: str) -> HTTPException:
     )
 
 
+def _complete_todo_or_raise_not_found(todo_id: str) -> object:
+    try:
+        todo = service.complete_todo(todo_id)
+    except TodoNotFoundError as exc:
+        raise _todo_not_found_http_exception(todo_id) from exc
+
+    if todo is None:
+        raise _todo_not_found_http_exception(todo_id)
+
+    return todo
+
+
 @app.post("/todos", status_code=status.HTTP_201_CREATED)
 def create_todo(payload: TodoCreateRequest) -> dict[str, object]:
     try:
@@ -55,12 +67,5 @@ def create_todo(payload: TodoCreateRequest) -> dict[str, object]:
 
 @app.post("/todos/{todo_id}/complete")
 def complete_todo(todo_id: str) -> dict[str, object]:
-    try:
-        todo = service.complete_todo(todo_id)
-    except TodoNotFoundError as exc:
-        raise _todo_not_found_http_exception(todo_id) from exc
-
-    if todo is None:
-        raise _todo_not_found_http_exception(todo_id)
-
+    todo = _complete_todo_or_raise_not_found(todo_id)
     return asdict(todo)

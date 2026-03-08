@@ -1,4 +1,4 @@
-from app.api import HTTPException, complete_todo
+from app.api import HTTPException, _complete_todo_or_raise_not_found, complete_todo
 from app.repository import TodoRecord, TodoRepository
 from app.service import DomainService, TodoNotFoundError
 
@@ -106,6 +106,25 @@ def test_complete_todo_api_returns_not_found_for_unknown_todo() -> None:
         raise AssertionError("Expected API completion path to raise HTTPException")
 
 
+def test_complete_todo_api_helper_returns_not_found_when_service_raises() -> None:
+    original_service = complete_todo.__globals__["service"]
+
+    class MissingTodoService:
+        def complete_todo(self, todo_id: str) -> None:
+            raise TodoNotFoundError(f"Todo '{todo_id}' was not found.")
+
+    complete_todo.__globals__["service"] = MissingTodoService()
+    try:
+        _complete_todo_or_raise_not_found("todo-404")
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert exc.detail == "Todo 'todo-404' was not found."
+    else:
+        raise AssertionError("Expected missing API todo to raise HTTPException")
+    finally:
+        complete_todo.__globals__["service"] = original_service
+
+
 def test_complete_todo_api_returns_not_found_when_service_returns_none() -> None:
     original_service = complete_todo.__globals__["service"]
 
@@ -115,7 +134,7 @@ def test_complete_todo_api_returns_not_found_when_service_returns_none() -> None
 
     complete_todo.__globals__["service"] = MissingTodoService()
     try:
-        complete_todo("todo-404")
+        _complete_todo_or_raise_not_found("todo-404")
     except HTTPException as exc:
         assert exc.status_code == 404
         assert exc.detail == "Todo 'todo-404' was not found."
