@@ -50,6 +50,16 @@ test("complete marks an item complete and records completedAt", () => {
   assert.ok(completed?.completedAt);
 });
 
+test("complete is idempotent for already-completed items", () => {
+  const service = new TodoService();
+  const created = service.create("Avoid duplicate side effects");
+  const firstCompletion = service.complete(created.id);
+  const secondCompletion = service.complete(created.id);
+
+  assert.equal(secondCompletion?.completed, true);
+  assert.equal(secondCompletion?.completedAt, firstCompletion?.completedAt);
+});
+
 test("list returns a defensive copy to prevent mutation leaks", () => {
   const service = new TodoService();
   service.create("Run canary");
@@ -150,4 +160,23 @@ test("complete route returns the stable public todo fields", async () => {
       completed: true,
     },
   });
+});
+
+test("complete route stays idempotent across repeated requests", async () => {
+  const createdResponse = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Repeat the completion call" }),
+    }),
+  );
+  const createdPayload = await createdResponse.json();
+  const context = { params: Promise.resolve({ id: String(createdPayload.item.id) }) };
+
+  const firstResponse = await completeTodo(undefined, context);
+  const secondResponse = await completeTodo(undefined, context);
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.deepEqual(await secondResponse.json(), await firstResponse.json());
 });

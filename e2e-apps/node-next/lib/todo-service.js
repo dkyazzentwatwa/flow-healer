@@ -30,6 +30,8 @@ export class TodoService {
     if (!todo.completed) {
       todo.completed = true;
       todo.completedAt = new Date().toISOString();
+    } else if (!todo.completedAt) {
+      todo.completedAt = new Date().toISOString();
     }
     return { ...todo };
   }
