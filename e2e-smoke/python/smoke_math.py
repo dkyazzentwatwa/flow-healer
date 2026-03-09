@@ -62,8 +62,7 @@ def _normalize_bool_operand(value: bool) -> int:
 def _normalize_float_operand(value: float) -> int:
     """Round finite float operands with deterministic half-up semantics."""
     try:
-        rounded_value = Decimal(str(value)).quantize(
-            Decimal("1"),
+        rounded_value = Decimal(str(value)).to_integral_value(
             rounding=ROUND_HALF_UP,
         )
     except (InvalidOperation, ValueError) as exc:
