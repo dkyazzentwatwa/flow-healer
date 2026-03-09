@@ -140,6 +140,19 @@ def test_complete_todo_backfills_whitespace_timestamp_for_completed_item() -> No
     assert repository.get("1").completed_at is not None
 
 
+def test_complete_todo_backfills_non_text_timestamp_for_completed_item() -> None:
+    repository = InMemoryTodoRepository(
+        [TodoRecord(id="1", title="Fix stale lock", completed=True, completed_at=123)]  # type: ignore[arg-type]
+    )
+    service = TodoService(repository=repository)
+
+    completed = service.complete_todo("1")
+
+    assert completed.completed is True
+    assert completed.completed_at is not None
+    assert repository.get("1").completed_at is not None
+
+
 def test_complete_todo_raises_for_blank_or_non_text_ids() -> None:
     service = TodoService(repository=InMemoryTodoRepository())
 
