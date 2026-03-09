@@ -1,7 +1,13 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import Stripe from "https://esm.sh/stripe@18.5.0";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.2";
-import { ensureBillingOrigin } from "../_shared/billing.ts";
+import {
+  ensureBillingOrigin,
+  normalizeExistingSubscription,
+  normalizeStripeSubscription,
+  type BillingPlan,
+  type ExistingSubscription,
+} from "../_shared/billing.ts";
 
 const PRODUCT_TO_PLAN: Record<string, string> = {
   "prod_U4PqagQZIyzGV0": "pro",
@@ -41,11 +47,31 @@ serve(async (req) => {
     const user = userData.user;
     if (!user?.email) throw new Error("User not authenticated or email not available");
 
+    const { data: business } = await supabaseAdmin
+      .from("businesses")
+      .select("id")
+      .eq("owner_id", user.id)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    const existingSubscription = business
+      ? await supabaseAdmin
+        .from("subscriptions")
+        .select("plan, status, stripe_subscription_id, current_period_start, current_period_end")
+        .eq("business_id", business.id)
+        .maybeSingle()
+      : { data: null, error: null };
+
+    if (existingSubscription.error) {
+      throw new Error(`Failed to load existing subscription: ${existingSubscription.error.message}`);
+    }
+
     const stripe = new Stripe(stripeKey, { apiVersion: "2025-08-27.basil" });
     const customers = await stripe.customers.list({ email: user.email, limit: 1 });
 
     if (customers.data.length === 0) {
-      return new Response(JSON.stringify({ subscribed: false, plan: "free" }), {
+      return new Response(JSON.stringify(normalizeExistingSubscription(existingSubscription.data as ExistingSubscription | null)), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 200,
       });
@@ -59,44 +85,48 @@ serve(async (req) => {
     });
 
     if (subscriptions.data.length === 0) {
-      return new Response(JSON.stringify({ subscribed: false, plan: "free" }), {
+      return new Response(JSON.stringify(normalizeExistingSubscription(existingSubscription.data as ExistingSubscription | null)), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 200,
       });
     }
 
     const subscription = subscriptions.data[0];
-    const productId = subscription.items.data[0].price.product as string;
-    const plan = PRODUCT_TO_PLAN[productId] || "pro";
-    const subscriptionEnd = new Date(subscription.current_period_end * 1000).toISOString();
-
-    const { data: business } = await supabaseAdmin
-      .from("businesses")
-      .select("id")
-      .eq("owner_id", user.id)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
+    const product = subscription.items.data[0]?.price?.product;
+    const productId = typeof product === "string" ? product : undefined;
+    const fallbackPlan = existingSubscription.data?.plan === "agency" || existingSubscription.data?.plan === "pro"
+      ? existingSubscription.data.plan
+      : "pro";
+    const plan = (productId ? PRODUCT_TO_PLAN[productId] : fallbackPlan) as BillingPlan;
+    const normalizedSubscription = normalizeStripeSubscription(
+      subscription,
+      existingSubscription.data as ExistingSubscription | null,
+      plan,
+    );
 
     if (business) {
+      const persistedPeriodStart = normalizedSubscription.current_period_start
+        ?? existingSubscription.data?.current_period_start
+        ?? new Date().toISOString();
+      const persistedPeriodEnd = normalizedSubscription.current_period_end
+        ?? existingSubscription.data?.current_period_end
+        ?? persistedPeriodStart;
+
       await supabaseAdmin
         .from("subscriptions")
         .upsert({
           business_id: business.id,
-          plan,
-          status: "active",
-          stripe_subscription_id: subscription.id,
-          current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
-          current_period_end: subscriptionEnd,
+          plan: normalizedSubscription.plan,
+          status: normalizedSubscription.status,
+          stripe_subscription_id: normalizedSubscription.stripe_subscription_id ?? null,
+          current_period_start: persistedPeriodStart,
+          current_period_end: persistedPeriodEnd,
         }, { onConflict: "business_id" });
     }
 
     return new Response(JSON.stringify({
-      subscribed: true,
-      plan,
+      ...normalizedSubscription,
       product_id: productId,
-      subscription_end: subscriptionEnd,
-      stripe_subscription_id: subscription.id,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
       status: 200,
