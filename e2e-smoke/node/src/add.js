@@ -79,13 +79,22 @@ function isVariadicOverflowPromotion(accumulatedSum, operand) {
   return !Number.isSafeInteger(accumulatedSum + operand);
 }
 
-function shouldDemoteOverflowPromotedBigInt(sum, hasExplicitBigIntOperand) {
-  if (hasExplicitBigIntOperand || typeof sum !== 'bigint') {
+function shouldDemoteOverflowPromotedBigInt(
+  sum,
+  hasOverflowBoundaryPromotion,
+  hasExplicitBigIntOperand,
+) {
+  if (
+    !hasOverflowBoundaryPromotion
+    || hasExplicitBigIntOperand
+    || typeof sum !== 'bigint'
+  ) {
     return false;
   }
 
-  // Once a prior boundary overflow is corrected back into Number-safe range without
-  // an explicit bigint operand, switch back to number semantics.
+  // Once a prior boundary overflow is corrected by zero or mixed-sign inputs back
+  // into Number-safe range without an explicit bigint operand, switch back to
+  // number semantics.
   return sum >= BigInt(Number.MIN_SAFE_INTEGER) && sum <= BigInt(Number.MAX_SAFE_INTEGER);
 }
 
@@ -118,7 +127,13 @@ function sumOperands(operands) {
     hasUnsafeIntegerOperand = hasUnsafeIntegerOperand || isUnsafeIntegerNumber(operand);
     accumulatedSum = addPair(accumulatedSum, operand);
 
-    if (shouldDemoteOverflowPromotedBigInt(accumulatedSum, hasExplicitBigIntOperand)) {
+    if (
+      shouldDemoteOverflowPromotedBigInt(
+        accumulatedSum,
+        hasOverflowBoundaryPromotion,
+        hasExplicitBigIntOperand,
+      )
+    ) {
       accumulatedSum = normalizeZero(Number(accumulatedSum));
     }
   }
