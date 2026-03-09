@@ -114,6 +114,26 @@ def test_complete_todo_backfills_missing_timestamp_for_completed_item() -> None:
     assert repository.get("1").completed_at is not None
 
 
+def test_complete_todo_backfills_blank_timestamp_for_completed_item() -> None:
+    repository = InMemoryTodoRepository(
+        [TodoRecord(id="1", title="Fix stale lock", completed=True, completed_at="")]
+    )
+    service = TodoService(repository=repository)
+
+    completed = service.complete_todo("1")
+
+    assert completed.completed is True
+    assert completed.completed_at is not None
+    assert repository.get("1").completed_at is not None
+
+
+def test_create_todo_rejects_non_text_titles() -> None:
+    service = TodoService(repository=InMemoryTodoRepository())
+
+    with pytest.raises(ValueError, match="title_required"):
+        service.create_todo(5)  # type: ignore[arg-type]
+
+
 def test_create_todo_uses_next_numeric_id_from_existing_rows() -> None:
     repository = InMemoryTodoRepository()
     repository.put(TodoRecord(id="2", title="Existing task"))
