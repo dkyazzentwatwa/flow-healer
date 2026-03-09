@@ -26,8 +26,14 @@ def test_preflight_refresh_all_caches_reports_for_supported_languages(tmp_path) 
     for relative in (
         "e2e-smoke/python",
         "e2e-smoke/node",
+        "e2e-apps/prosper-chat",
     ):
         (tmp_path / relative).mkdir(parents=True)
+    (tmp_path / "e2e-apps" / "prosper-chat" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "e2e-apps" / "prosper-chat" / "scripts" / "healer_validate.sh").write_text(
+        "#!/bin/sh\nexit 0\n",
+        encoding="utf-8",
+    )
 
     store = SQLiteStore(tmp_path / "state.db")
     store.bootstrap()
@@ -36,14 +42,54 @@ def test_preflight_refresh_all_caches_reports_for_supported_languages(tmp_path) 
 
     reports = preflight.refresh_all(force=True)
 
-    assert len(reports) == 2
+    assert len(reports) == 3
     assert all(report.status == "ready" for report in reports)
     cached = list_cached_preflight_reports(store=store, gate_mode=runner.test_gate_mode)
-    assert [report.language for report in cached] == [
-        "python",
-        "node",
+    assert [(report.language, report.execution_root) for report in cached] == [
+        ("python", "e2e-smoke/python"),
+        ("node", "e2e-smoke/node"),
+        ("node", "e2e-apps/prosper-chat"),
     ]
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == 3
+
+
+def test_preflight_cache_isolated_by_execution_root(tmp_path) -> None:
+    (tmp_path / "e2e-smoke" / "node").mkdir(parents=True)
+    (tmp_path / "e2e-apps" / "prosper-chat" / "scripts").mkdir(parents=True)
+    (tmp_path / "e2e-apps" / "prosper-chat" / "scripts" / "healer_validate.sh").write_text(
+        "#!/bin/sh\nexit 0\n",
+        encoding="utf-8",
+    )
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    runner = _FakeRunner()
+    preflight = HealerPreflight(store=store, runner=runner, repo_path=tmp_path)
+    cached = PreflightReport(
+        language="node",
+        execution_root="e2e-smoke/node",
+        gate_mode=runner.test_gate_mode,
+        status="ready",
+        failure_class="",
+        summary="cached",
+        output_tail="",
+        checked_at="2099-01-01 00:00:00",
+        test_summary={"failed_tests": 0},
+    )
+    store.set_state(
+        preflight_cache_key(
+            gate_mode=runner.test_gate_mode,
+            language="node",
+            execution_root="e2e-smoke/node",
+        ),
+        cached.to_state_value(),
+    )
+
+    report = preflight.ensure_language_ready(language="node", execution_root="e2e-apps/prosper-chat")
+
+    assert report.execution_root == "e2e-apps/prosper-chat"
+    assert report.summary != "cached"
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] == "e2e-apps/prosper-chat"
 
 
 def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
@@ -63,7 +109,14 @@ def test_preflight_uses_fresh_cache_before_rerunning(tmp_path) -> None:
         checked_at="2099-01-01 00:00:00",
         test_summary={"failed_tests": 0},
     )
-    store.set_state(preflight_cache_key(gate_mode=runner.test_gate_mode, language="node"), cached.to_state_value())
+    store.set_state(
+        preflight_cache_key(
+            gate_mode=runner.test_gate_mode,
+            language="node",
+            execution_root="e2e-smoke/node",
+        ),
+        cached.to_state_value(),
+    )
 
     report = preflight.ensure_language_ready(language="node", execution_root="e2e-smoke/node")
 

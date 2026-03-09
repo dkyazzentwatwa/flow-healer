@@ -1,0 +1,22 @@
+project_id = "hggbewojheolywztrggk"
+
+[functions.chat-widget]
+verify_jwt = false
+
+[functions.book-appointment]
+verify_jwt = false
+
+[functions.check-availability]
+verify_jwt = false
+
+[functions.create-checkout]
+verify_jwt = true
+
+[functions.check-subscription]
+verify_jwt = true
+
+[functions.customer-portal]
+verify_jwt = true
+
+[functions.widget-bootstrap]
+verify_jwt = false

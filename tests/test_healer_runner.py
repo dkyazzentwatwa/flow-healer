@@ -92,6 +92,49 @@ def test_run_test_gates_runs_local_then_docker(monkeypatch):
     assert summary["failed_tests"] == 0
 
 
+def test_run_test_gates_prefers_explicit_validation_commands(monkeypatch, tmp_path):
+    calls: list[tuple[str, object]] = []
+
+    def fake_explicit(workspace: Path, commands: tuple[str, ...], timeout_seconds: int):
+        calls.append(("explicit", commands))
+        return {"exit_code": 0, "output_tail": "explicit ok", "gate_status": "passed", "gate_reason": ""}
+
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        calls.append(("local", command))
+        return {"exit_code": 0, "output_tail": "local ok", "gate_status": "passed", "gate_reason": ""}
+
+    def fake_docker(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        calls.append(("docker", command))
+        return {"exit_code": 0, "output_tail": "docker ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_explicit_validation_commands", fake_explicit)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_in_docker", fake_docker)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="e2e-apps/prosper-chat",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("node"),
+        ),
+        validation_commands=("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full",),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("explicit", ("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full",))]
+    assert summary["local_full_status"] == "passed"
+    assert summary["docker_full_status"] == "skipped"
+    assert summary["docker_full_reason"] == "explicit_validation_commands"
+    assert summary["validation_commands"] == ["cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full"]
+
+
 def test_run_tests_locally_normalizes_pytest_command(monkeypatch, tmp_path):
     seen: dict[str, object] = {}
 

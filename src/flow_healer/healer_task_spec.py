@@ -46,7 +46,7 @@ _DIRECTORY_RE = re.compile(
 )
 _COMMAND_LINE_RE = re.compile(
     r"(?:^|\b)(?:cd\s+[^\n&|;]+&&\s*)?"
-    r"(?:npm\s+test|pytest\b|python\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b)"
+    r"(?:npm\s+test|npm\s+run\s+(?:lint|test|build|smoke)\b|pytest\b|python\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b|\./scripts/healer_validate\.sh\b)"
     r"[^\n]*",
     re.IGNORECASE,
 )
@@ -74,6 +74,7 @@ _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-smoke/java-maven", "java_maven"),
     ("e2e-apps/node-next", "node"),
     ("e2e-apps/python-fastapi", "python"),
+    ("e2e-apps/prosper-chat", "node"),
     ("e2e-apps/swift-todo", "swift"),
 )
 

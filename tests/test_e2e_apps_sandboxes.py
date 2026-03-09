@@ -24,6 +24,15 @@ def test_all_demo_app_sandboxes_exist() -> None:
             "tests/test_domain_service.py",
             "tests/test_api_contract.py",
         ],
+        "prosper-chat": [
+            "package.json",
+            "src/main.tsx",
+            "src/App.tsx",
+            "supabase/config.toml",
+            "supabase/functions/chat-widget/index.ts",
+            "supabase/migrations/20260301190615_15638062-0f7f-4cc7-96f5-79466e4cb26b.sql",
+            "scripts/healer_validate.sh",
+        ],
         "swift-todo": [
             "Package.swift",
             "Sources/TodoCore/TodoService.swift",

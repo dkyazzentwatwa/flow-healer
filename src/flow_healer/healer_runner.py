@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1130,6 +1131,7 @@ class HealerRunner:
             timeout_seconds=timeout_seconds or self.timeout_seconds,
             mode=mode or self.test_gate_mode,
             resolved_execution=resolved_execution,
+            validation_commands=task_spec.validation_commands,
             local_gate_policy=local_gate_policy or self.local_gate_policy,
         )
 
@@ -1267,6 +1269,7 @@ def _run_test_gates(
     timeout_seconds: int,
     mode: str,
     resolved_execution: ResolvedExecution | None = None,
+    validation_commands: tuple[str, ...] = (),
     local_gate_policy: str = "auto",
 ) -> dict[str, Any]:
     if resolved_execution is None:
@@ -1292,6 +1295,7 @@ def _run_test_gates(
     runners = _gate_runners_for_mode(mode)
     strategy = resolved_execution.strategy
     execution_path = resolved_execution.execution_path
+    explicit_validation_commands = tuple(str(command).strip() for command in validation_commands if str(command).strip())
 
     if targeted_tests:
         targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
@@ -1330,6 +1334,46 @@ def _run_test_gates(
             if targeted_status == "failed":
                 summary["failed_tests"] += 1
 
+    if _should_use_explicit_validation_commands(strategy=strategy, validation_commands=explicit_validation_commands):
+        full = _run_explicit_validation_commands(
+            execution_path,
+            explicit_validation_commands,
+            timeout_seconds,
+        )
+        full_status = str(full.get("gate_status") or ("passed" if int(full.get("exit_code", 1)) == 0 else "failed"))
+        if mode == "local_only" and full_status == "skipped":
+            full_status = "failed"
+            if not full.get("gate_reason"):
+                full["gate_reason"] = "local_only_requires_local_gate"
+        summary["local_full_exit_code"] = full["exit_code"]
+        summary["local_full_output_tail"] = full["output_tail"]
+        summary["local_full_status"] = full_status
+        if full.get("gate_reason"):
+            summary["local_full_reason"] = full["gate_reason"]
+        summary["local_full_runner"] = "explicit_validation_commands"
+        summary["validation_commands"] = list(explicit_validation_commands)
+        docker_full = {
+            "exit_code": 0,
+            "output_tail": "(docker full gate skipped: using issue validation commands)",
+            "gate_status": "skipped",
+            "gate_reason": "explicit_validation_commands",
+        }
+        if mode == "docker_only":
+            docker_full = {
+                "exit_code": 0,
+                "output_tail": "(docker-only mode satisfied by issue validation commands)",
+                "gate_status": "passed",
+                "gate_reason": "explicit_validation_commands",
+            }
+        summary["docker_full_exit_code"] = docker_full["exit_code"]
+        summary["docker_full_output_tail"] = docker_full["output_tail"]
+        summary["docker_full_status"] = docker_full["gate_status"]
+        if docker_full.get("gate_reason"):
+            summary["docker_full_reason"] = docker_full["gate_reason"]
+        if full_status == "failed":
+            summary["failed_tests"] += 1
+        return summary
+
     full_cmd = list(strategy.docker_test_cmd)
     for runner_name, runner in runners:
         if runner_name == "docker" and not strategy.supports_docker:
@@ -1364,6 +1408,87 @@ def _run_test_gates(
         if full_status == "failed":
             summary["failed_tests"] += 1
     return summary
+
+
+def _run_explicit_validation_commands(
+    workspace: Path,
+    commands: tuple[str, ...],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    output_chunks: list[str] = []
+    for command in commands:
+        output_chunks.append(f"$ {command}")
+        try:
+            proc = subprocess.run(
+                ["/bin/zsh", "-lc", command],
+                cwd=str(workspace),
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=max(30, timeout_seconds),
+            )
+        except FileNotFoundError:
+            return {
+                "exit_code": 127,
+                "output_tail": "(/bin/zsh unavailable for explicit validation commands)",
+                "gate_status": "failed",
+                "gate_reason": "tool_missing",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "exit_code": 124,
+                "output_tail": "\n".join(output_chunks)[-2000:],
+                "gate_status": "failed",
+                "gate_reason": "timeout",
+            }
+
+        output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        if output:
+            output_chunks.append(output)
+        if int(proc.returncode) != 0:
+            return {
+                "exit_code": int(proc.returncode),
+                "output_tail": "\n".join(output_chunks)[-2000:],
+                "gate_status": "failed",
+                "gate_reason": "",
+            }
+    return {
+        "exit_code": 0,
+        "output_tail": "\n".join(output_chunks)[-2000:],
+        "gate_status": "passed",
+        "gate_reason": "",
+    }
+
+
+def _should_use_explicit_validation_commands(
+    *,
+    strategy: LanguageStrategy,
+    validation_commands: tuple[str, ...],
+) -> bool:
+    commands = tuple(command for command in validation_commands if command)
+    if not commands:
+        return False
+    if len(commands) != 1:
+        return True
+    normalized = _normalize_validation_command(commands[0])
+    if not normalized:
+        return False
+    return normalized not in {tuple(strategy.local_test_cmd), tuple(strategy.docker_test_cmd)}
+
+
+def _normalize_validation_command(command: str) -> tuple[str, ...]:
+    candidate = str(command or "").strip()
+    if not candidate:
+        return ()
+    cd_match = re.match(r"^cd\s+([^\n&|;]+?)\s*&&\s*(.+)$", candidate, re.IGNORECASE)
+    if cd_match:
+        candidate = cd_match.group(2).strip()
+    try:
+        return tuple(shlex.split(candidate))
+    except ValueError:
+        return ()
 
 
 def _compose_targeted_command(strategy: LanguageStrategy, targeted_tests: list[str]) -> list[str]:

@@ -104,7 +104,7 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert recent_attempt["connector_debug_checks"] == []
     preflight = rows[0]["preflight"]
     assert preflight["gate_mode"] == "local_then_docker"
-    assert len(preflight["reports"]) == 2
+    assert len(preflight["reports"]) == 3
     app_server_metrics = rows[0]["app_server_metrics"]
     assert app_server_metrics["app_server_attempts"] == 0
     assert app_server_metrics["app_server_attempts_with_material_diff"] == 0
@@ -140,7 +140,7 @@ def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
     )
     runtime = service.build_runtime(service.config.select_repos("demo")[0])
     runtime.store.set_state(
-        preflight_cache_key(gate_mode="docker_only", language="node"),
+        preflight_cache_key(gate_mode="docker_only", language="node", execution_root="e2e-smoke/node"),
         (
             '{"checked_at":"2026-03-06 20:00:00","execution_root":"e2e-smoke/node",'
             '"failure_class":"","gate_mode":"docker_only","language":"node","output_tail":"",'
@@ -151,7 +151,11 @@ def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
 
     rows = service.status_rows("demo")
 
-    node_report = next(report for report in rows[0]["preflight"]["reports"] if report["language"] == "node")
+    node_report = next(
+        report
+        for report in rows[0]["preflight"]["reports"]
+        if report["language"] == "node" and report["execution_root"] == "e2e-smoke/node"
+    )
     assert node_report["status"] == "ready"
     assert node_report["summary"] == "Preflight passed"
 
@@ -200,7 +204,7 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert triage["has_stop_conditions"] is False
     assert preflight["has_stop_conditions"] is True
     assert rows[0]["preflight_gate_mode"] == "local_then_docker"
-    assert len(rows[0]["preflight_reports"]) == 2
+    assert len(rows[0]["preflight_reports"]) == 3
 
 
 def test_build_runtime_uses_configured_connector_backend(tmp_path) -> None:

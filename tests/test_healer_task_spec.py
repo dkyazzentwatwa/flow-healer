@@ -382,6 +382,25 @@ def test_compile_task_spec_infers_swift_execution_root_for_e2e_apps() -> None:
     assert spec.validation_commands == ("cd e2e-apps/swift-todo && swift test",)
 
 
+def test_compile_task_spec_infers_prosper_chat_execution_root_for_e2e_apps() -> None:
+    spec = compile_task_spec(
+        issue_title="Prosper chat backend regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/prosper-chat/src/App.tsx\n"
+            "- e2e-apps/prosper-chat/supabase/functions/chat-widget/index.ts\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.language_source == "issue"
+    assert spec.task_kind == "fix"
+    assert spec.execution_root == "e2e-apps/prosper-chat"
+    assert spec.validation_commands == ("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full",)
+
+
 def test_compile_task_spec_prefers_rooted_swift_paths_over_bare_filename_mentions() -> None:
     spec = compile_task_spec(
         issue_title="Swift todo sandbox: package target wiring for CLI test coverage",

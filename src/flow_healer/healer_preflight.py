@@ -22,6 +22,7 @@ _CONNECTOR_PROBE_TTL_SECONDS = 300
 _SUPPORTED_SANDBOXES: tuple[tuple[str, str], ...] = (
     ("python", "e2e-smoke/python"),
     ("node", "e2e-smoke/node"),
+    ("node", "e2e-apps/prosper-chat"),
 )
 
 
@@ -63,15 +64,22 @@ class PreflightReport:
         )
 
 
-def preflight_cache_key(*, gate_mode: str, language: str) -> str:
-    return f"healer_preflight:{gate_mode.strip()}:{language.strip()}"
+def preflight_cache_key(*, gate_mode: str, language: str, execution_root: str = "") -> str:
+    normalized_root = execution_root.strip().replace(":", "_") or "_repo"
+    return f"healer_preflight:{gate_mode.strip()}:{language.strip()}:{normalized_root}"
 
 
 def list_cached_preflight_reports(*, store: SQLiteStore, gate_mode: str) -> list[PreflightReport]:
     reports: list[PreflightReport] = []
     for language, execution_root in _SUPPORTED_SANDBOXES:
         report = PreflightReport.from_state_value(
-            store.get_state(preflight_cache_key(gate_mode=gate_mode, language=language))
+            store.get_state(
+                preflight_cache_key(
+                    gate_mode=gate_mode,
+                    language=language,
+                    execution_root=execution_root,
+                )
+            )
         )
         if report is not None:
             reports.append(report)
@@ -162,19 +170,29 @@ class HealerPreflight:
         execution_root: str,
         force: bool = False,
     ) -> PreflightReport:
-        cached = self.get_cached_report(language=language)
+        cached = self.get_cached_report(language=language, execution_root=execution_root)
         if not force and cached is not None and not self._is_stale(cached):
             return cached
         report = self._run_preflight(language=language, execution_root=execution_root)
         self.store.set_state(
-            preflight_cache_key(gate_mode=self.runner.test_gate_mode, language=language),
+            preflight_cache_key(
+                gate_mode=self.runner.test_gate_mode,
+                language=language,
+                execution_root=execution_root,
+            ),
             report.to_state_value(),
         )
         return report
 
-    def get_cached_report(self, *, language: str) -> PreflightReport | None:
+    def get_cached_report(self, *, language: str, execution_root: str) -> PreflightReport | None:
         return PreflightReport.from_state_value(
-            self.store.get_state(preflight_cache_key(gate_mode=self.runner.test_gate_mode, language=language))
+            self.store.get_state(
+                preflight_cache_key(
+                    gate_mode=self.runner.test_gate_mode,
+                    language=language,
+                    execution_root=execution_root,
+                )
+            )
         )
 
     def _is_stale(self, report: PreflightReport) -> bool:
@@ -237,7 +255,7 @@ class HealerPreflight:
             language=language,
             language_source="preflight",
             execution_root=execution_root,
-            validation_commands=(),
+            validation_commands=_preflight_validation_commands(execution_root=execution_root, language=language),
         )
         try:
             with tempfile.TemporaryDirectory(prefix="flow-healer-preflight-") as temp_root:
@@ -317,6 +335,15 @@ def execution_root_for_language(language: str) -> str:
         if candidate_language == wanted:
             return execution_root
     return ""
+
+
+def _preflight_validation_commands(*, execution_root: str, language: str) -> tuple[str, ...]:
+    normalized_root = str(execution_root or "").strip().strip("/")
+    if normalized_root == "e2e-apps/prosper-chat":
+        return (f"cd {normalized_root} && ./scripts/healer_validate.sh full",)
+    if language == "node":
+        return (f"cd {normalized_root} && npm test -- --passWithNoTests",) if normalized_root else ()
+    return ()
 
 
 def preflight_report_to_test_summary(report: PreflightReport) -> dict[str, object]:
