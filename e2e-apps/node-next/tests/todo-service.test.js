@@ -159,6 +159,31 @@ test("complete can target numeric id 0 values", () => {
   assert.equal(completed?.completed, true);
 });
 
+test("seeded todos normalize legacy completed flags before completing", () => {
+  const service = new TodoService([
+    {
+      id: "4",
+      title: "Legacy seeded todo",
+      completed: "false",
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: "2026-03-08T12:01:00.000Z",
+    },
+  ]);
+
+  assert.deepEqual(service.list()[0], {
+    id: "4",
+    title: "Legacy seeded todo",
+    completed: false,
+    createdAt: "2026-03-08T12:00:00.000Z",
+    completedAt: null,
+  });
+
+  const completed = service.complete("4");
+
+  assert.equal(completed?.completed, true);
+  assert.ok(completed?.completedAt);
+});
+
 test("list returns a defensive copy to prevent mutation leaks", () => {
   const service = new TodoService();
   service.create("Run canary");
