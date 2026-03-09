@@ -138,6 +138,28 @@ test('add preserves NaN semantics across mixed-number and bigint tails', () => {
   assert.ok(Number.isNaN(leadingNaNResult));
 });
 
+test('add rejects string operands for two-argument calls', () => {
+  assert.throws(() => add('2', 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(2, '3'), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
+test('add rejects string operands for variadic calls', () => {
+  assert.throws(() => add(1, '2', 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(...[1, 2, '3']), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
 test('add keeps a leading undefined input on normal NaN semantics in longer lists', () => {
   assert.ok(Number.isNaN(add(undefined, 1, 2)));
 });
