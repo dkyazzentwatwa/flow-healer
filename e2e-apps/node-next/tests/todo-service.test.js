@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 
 import { GET, POST, listTodos } from "../app/api/todos/route.js";
 import { POST as completeTodo } from "../app/api/todos/[id]/complete/route.js";
-import { TodoService, toPublicTodo } from "../lib/todo-service.js";
+import {
+  TodoService,
+  toPublicTodo,
+  toPublicTodoList,
+  toTodoItemPayload,
+  toTodoListPayload,
+} from "../lib/todo-service.js";
 
 test("listTodos returns todo objects with the stable fields the API exposes", () => {
   const todos = listTodos();
@@ -92,6 +98,42 @@ test("toPublicTodo strips internal fields and normalizes the id type", () => {
       completed: true,
     },
   );
+});
+
+test("todo payload helpers keep the collection and item route shape stable", () => {
+  const todos = [
+    {
+      id: "7",
+      title: "Ship it",
+      completed: true,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: "2026-03-08T12:05:00.000Z",
+    },
+  ];
+
+  assert.deepEqual(toPublicTodoList(todos), [
+    {
+      id: 7,
+      title: "Ship it",
+      completed: true,
+    },
+  ]);
+  assert.deepEqual(toTodoListPayload(todos), {
+    todos: [
+      {
+        id: 7,
+        title: "Ship it",
+        completed: true,
+      },
+    ],
+  });
+  assert.deepEqual(toTodoItemPayload(todos[0]), {
+    item: {
+      id: 7,
+      title: "Ship it",
+      completed: true,
+    },
+  });
 });
 
 test("POST rejects blank and malformed titles", async () => {
