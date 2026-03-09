@@ -86,8 +86,8 @@ run_web() {
 }
 
 run_backend() {
-  smoke_supabase_functions
   run_db
+  smoke_supabase_functions
 }
 
 run_db() {

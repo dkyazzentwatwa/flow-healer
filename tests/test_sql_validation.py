@@ -10,6 +10,8 @@ from flow_healer.sql_validation import (
     database_container_for_project,
     load_sql_checks,
     project_id_for_project_dir,
+    reset_local_database,
+    wait_for_database_ready,
 )
 
 
@@ -89,7 +91,28 @@ def test_load_sql_checks_accepts_repo_relative_selected_paths(tmp_path: Path) ->
     assert checks == [SqlCheck(name="policy", path=policy_file.resolve())]
 
 
-def test_load_sql_checks_rejects_unknown_selected_paths(tmp_path: Path) -> None:
+def test_load_sql_checks_allows_ad_hoc_selected_paths_not_in_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
+    schema_file = tmp_path / "supabase" / "assertions" / "schema.sql"
+    custom_file = tmp_path / "supabase" / "assertions" / "custom.sql"
+    schema_file.parent.mkdir(parents=True)
+    schema_file.write_text("select 1;\n", encoding="utf-8")
+    custom_file.write_text("select 2;\n", encoding="utf-8")
+    manifest.write_text(
+        '{"checks":[{"name":"schema","path":"supabase/assertions/schema.sql"}]}',
+        encoding="utf-8",
+    )
+
+    checks = load_sql_checks(
+        project_dir=tmp_path,
+        manifest_path=manifest,
+        selected_paths=("supabase/assertions/custom.sql",),
+    )
+
+    assert checks == [SqlCheck(name="custom", path=custom_file.resolve())]
+
+
+def test_load_sql_checks_rejects_missing_ad_hoc_selected_paths(tmp_path: Path) -> None:
     manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
     check_file = tmp_path / "supabase" / "assertions" / "schema.sql"
     check_file.parent.mkdir(parents=True)
@@ -106,7 +129,7 @@ def test_load_sql_checks_rejects_unknown_selected_paths(tmp_path: Path) -> None:
             selected_paths=("supabase/assertions/missing.sql",),
         )
     except ValueError as exc:
-        assert "requested check path" in str(exc)
+        assert "does not exist" in str(exc)
     else:
         raise AssertionError("expected load_sql_checks to reject unknown selected paths")
 
@@ -153,3 +176,30 @@ def test_database_is_ready_checks_psql_probe(monkeypatch) -> None:
 
     assert database_is_ready(project_id="demo123") is True
     assert any(cmd[:3] == ["docker", "exec", "-i"] for cmd in calls)
+
+
+def test_wait_for_database_ready_polls_until_success(monkeypatch) -> None:
+    outcomes = iter([False, False, True])
+    sleeps: list[float] = []
+
+    monkeypatch.setattr("flow_healer.sql_validation.database_is_ready", lambda *, project_id: next(outcomes))
+    monkeypatch.setattr("flow_healer.sql_validation.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    assert wait_for_database_ready(project_id="demo123", timeout_seconds=5.0, poll_interval_seconds=0.25) is True
+    assert sleeps == [0.25, 0.25]
+
+
+def test_reset_local_database_tolerates_transient_upstream_failure_when_db_recovers(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="Restarting containers...\n",
+            stderr="Error status 502: An invalid response was received from the upstream server",
+        ),
+    )
+    monkeypatch.setattr("flow_healer.sql_validation.wait_for_database_ready", lambda **kwargs: True)
+
+    reset_local_database(project_dir=tmp_path, project_id="demo123")

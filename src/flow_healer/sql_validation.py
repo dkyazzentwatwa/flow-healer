@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,10 +70,7 @@ def load_sql_checks(
     if normalized_selected_paths:
         missing = sorted(normalized_selected_paths - matched_selected_paths)
         if missing:
-            preview = ", ".join(missing[:5])
-            if len(missing) > 5:
-                preview += ", ..."
-            raise ValueError(f"SQL assertion manifest does not define requested check path(s): {preview}")
+            checks.extend(_ad_hoc_sql_checks(project_dir=project_dir, selected_paths=tuple(missing)))
         if not checks:
             raise ValueError("SQL assertion manifest did not match any requested check paths.")
     return checks
@@ -90,6 +88,7 @@ def project_id_for_project_dir(project_dir: Path) -> str:
 def ensure_local_supabase_stack(*, project_dir: Path) -> None:
     _ensure_command_available("docker")
     _ensure_command_available("supabase")
+    project_id = project_id_for_project_dir(project_dir)
     status = subprocess.run(
         ["supabase", "status"],
         cwd=str(project_dir),
@@ -98,6 +97,7 @@ def ensure_local_supabase_stack(*, project_dir: Path) -> None:
         text=True,
     )
     if status.returncode == 0:
+        wait_for_database_ready(project_id=project_id)
         return
     subprocess.run(
         ["supabase", "start"],
@@ -106,6 +106,7 @@ def ensure_local_supabase_stack(*, project_dir: Path) -> None:
         capture_output=True,
         text=True,
     )
+    wait_for_database_ready(project_id=project_id)
 
 
 def reset_local_database(*, project_dir: Path, project_id: str) -> None:
@@ -117,8 +118,9 @@ def reset_local_database(*, project_dir: Path, project_id: str) -> None:
         text=True,
     )
     if proc.returncode == 0:
+        wait_for_database_ready(project_id=project_id)
         return
-    if database_is_ready(project_id=project_id):
+    if wait_for_database_ready(project_id=project_id, timeout_seconds=45.0, poll_interval_seconds=1.0):
         return
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     raise RuntimeError(f"supabase db reset failed:\n{output}")
@@ -164,6 +166,21 @@ def database_is_ready(*, project_id: str) -> bool:
         text=True,
     )
     return proc.returncode == 0 and (proc.stdout or "").strip() == "1"
+
+
+def wait_for_database_ready(
+    *,
+    project_id: str,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 1.0,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        if database_is_ready(project_id=project_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.1, poll_interval_seconds))
 
 
 def run_sql_checks(
@@ -265,6 +282,21 @@ def _selected_path_matches_manifest_path(*, selected_path: str, manifest_path: s
     if selected_path == manifest_path:
         return True
     return selected_path.endswith(f"/{manifest_path}")
+
+
+def _ad_hoc_sql_checks(*, project_dir: Path, selected_paths: tuple[str, ...]) -> list[SqlCheck]:
+    checks: list[SqlCheck] = []
+    for selected_path in selected_paths:
+        check_path = (project_dir / selected_path).resolve()
+        if not check_path.is_file():
+            raise ValueError(f"Requested SQL assertion path does not exist: {selected_path}")
+        checks.append(
+            SqlCheck(
+                name=check_path.stem,
+                path=check_path,
+            )
+        )
+    return checks
 
 
 def _bool_from_env(name: str) -> bool:
