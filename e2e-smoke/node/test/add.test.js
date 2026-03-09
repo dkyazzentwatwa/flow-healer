@@ -332,3 +332,8 @@ test('add returns to number semantics when negative inputs bring an overflow-pro
   assert.equal(add(0, Number.MIN_SAFE_INTEGER, -1, 1), Number.MIN_SAFE_INTEGER);
   assert.equal(typeof add(0, Number.MIN_SAFE_INTEGER, -1, 1), 'number');
 });
+
+test('add returns to number semantics when positive overflow is restored by subtraction', () => {
+  assert.equal(add(0, Number.MAX_SAFE_INTEGER, 1, -1), Number.MAX_SAFE_INTEGER);
+  assert.equal(typeof add(0, Number.MAX_SAFE_INTEGER, 1, -1), 'number');
+});
