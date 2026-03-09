@@ -41,7 +41,7 @@ class TodoRecord:
 class InMemoryTodoRepository:
     def __init__(self, rows: list[TodoRecord] | None = None) -> None:
         self._rows: dict[str, TodoRecord] = {}
-        for row in rows or []:
+        for row in [] if rows is None else rows:
             self.put(row)
 
     def list_all(self) -> list[TodoRecord]:

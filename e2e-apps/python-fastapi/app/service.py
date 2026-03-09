@@ -32,7 +32,7 @@ class TodoItem:
 
 class TodoService:
     def __init__(self, repository: InMemoryTodoRepository | None = None) -> None:
-        self._repository = repository or InMemoryTodoRepository()
+        self._repository = InMemoryTodoRepository() if repository is None else repository
         self._next_id = self._compute_next_id()
 
     def list_todos(self) -> list[TodoItem]:

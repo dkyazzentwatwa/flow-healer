@@ -49,7 +49,7 @@ def health() -> dict[str, str]:
 
 
 def _service_for(request_service: TodoService | None) -> TodoService:
-    return request_service or service
+    return service if request_service is None else request_service
 
 
 def list_todos(todo_service: TodoService | None = None) -> dict[str, object]:
