@@ -211,6 +211,22 @@ FLOW_HEALER_RESTART=1 scripts/remediate_runtime.sh ~/.flow-healer/config.yaml my
 - `verify_runtime.sh` fails fast if repo path, git state, token, connector health, or circuit-breaker readiness are not healthy.
 - `remediate_runtime.sh` suggests a safer absolute `connector_command` value and can restart the launch agent when explicitly requested.
 
+### Docker Runtime Controls
+
+Flow Healer can now start Docker on demand for SQL validation and Docker test gates, then shut the runtime down again after an idle window.
+
+```bash
+export FLOW_HEALER_DOCKER_RUNTIME=colima
+export FLOW_HEALER_DOCKER_IDLE_SHUTDOWN=1
+export FLOW_HEALER_DOCKER_IDLE_SECONDS=900
+export FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE=1
+```
+
+- `FLOW_HEALER_DOCKER_RUNTIME`: `auto`, `docker_desktop`, `colima`, `orbstack`, or `none`
+- `FLOW_HEALER_DOCKER_IDLE_SHUTDOWN`: `1` to stop the selected runtime when Flow Healer has not used Docker recently
+- `FLOW_HEALER_DOCKER_IDLE_SECONDS`: idle threshold before shutdown
+- `FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE`: pause the Supabase DB container when SQL work finishes
+
 For the rest of the operator workflow, failure recovery, and maintenance guidance, use [docs/usage.md](docs/usage.md) and [docs/operations.md](docs/operations.md).
 
 ## Apple Control DSL

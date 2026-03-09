@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .docker_runtime import ensure_docker_runtime_running, record_docker_activity
 from .language_detector import detect_language_details
 from .language_strategies import (
     LanguageStrategy,
@@ -1883,6 +1884,8 @@ def _run_tests_in_docker(
     del local_gate_policy
     if not strategy.supports_docker:
         return _unsupported_docker_gate_result(mode="docker_only")
+    ensure_docker_runtime_running(reason="docker_test_gate")
+    record_docker_activity(reason="docker_test_gate")
     container_name, docker_labels = _managed_docker_container_metadata(
         workspace=workspace,
         timeout_seconds=timeout_seconds,
@@ -1940,6 +1943,7 @@ def _run_tests_in_docker(
     gate_reason = ""
     if status == "failed" and _looks_like_docker_infra_failure(output):
         gate_reason = "infra_unavailable"
+    record_docker_activity(reason="docker_test_gate")
     return {
         "exit_code": int(proc.returncode),
         "output_tail": output[-2000:],

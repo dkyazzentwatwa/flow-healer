@@ -9,6 +9,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .docker_runtime import ensure_docker_runtime_running, record_docker_activity
+
 
 @dataclass(slots=True, frozen=True)
 class SqlCheck:
@@ -86,6 +88,8 @@ def project_id_for_project_dir(project_dir: Path) -> str:
 
 
 def ensure_local_supabase_stack(*, project_dir: Path) -> None:
+    ensure_docker_runtime_running(reason="sql_validation")
+    record_docker_activity(reason="sql_validation")
     _ensure_command_available("docker")
     _ensure_command_available("supabase")
     project_id = project_id_for_project_dir(project_dir)
@@ -97,6 +101,7 @@ def ensure_local_supabase_stack(*, project_dir: Path) -> None:
         text=True,
     )
     if status.returncode == 0:
+        resume_local_database_container(project_id=project_id)
         wait_for_database_ready(project_id=project_id)
         return
     subprocess.run(
@@ -110,6 +115,7 @@ def ensure_local_supabase_stack(*, project_dir: Path) -> None:
 
 
 def reset_local_database(*, project_dir: Path, project_id: str) -> None:
+    record_docker_activity(reason="sql_reset")
     proc = subprocess.run(
         ["supabase", "db", "reset", "--local", "--yes"],
         cwd=str(project_dir),
@@ -168,6 +174,52 @@ def database_is_ready(*, project_id: str) -> bool:
     return proc.returncode == 0 and (proc.stdout or "").strip() == "1"
 
 
+def database_container_is_paused(*, project_id: str) -> bool:
+    container = database_container_for_project(project_id=project_id)
+    proc = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Paused}}", container],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return (proc.stdout or "").strip().lower() == "true"
+
+
+def resume_local_database_container(*, project_id: str) -> bool:
+    try:
+        if not database_container_is_paused(project_id=project_id):
+            return False
+    except RuntimeError:
+        return False
+    container = database_container_for_project(project_id=project_id)
+    subprocess.run(
+        ["docker", "unpause", container],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wait_for_database_ready(project_id=project_id)
+    return True
+
+
+def pause_local_database_container(*, project_id: str) -> bool:
+    if not _sql_auto_pause_enabled():
+        return False
+    try:
+        if database_container_is_paused(project_id=project_id):
+            return False
+    except RuntimeError:
+        return False
+    container = database_container_for_project(project_id=project_id)
+    subprocess.run(
+        ["docker", "pause", container],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return True
+
+
 def wait_for_database_ready(
     *,
     project_id: str,
@@ -190,18 +242,24 @@ def run_sql_checks(
     reset: bool = True,
     selected_paths: tuple[str, ...] = (),
 ) -> None:
+    record_docker_activity(reason="sql_checks")
     ensure_local_supabase_stack(project_dir=project_dir)
     project_id = project_id_for_project_dir(project_dir)
-    if reset:
-        reset_local_database(project_dir=project_dir, project_id=project_id)
-    container = database_container_for_project(project_id=project_id)
-    checks = load_sql_checks(
-        project_dir=project_dir,
-        manifest_path=manifest_path,
-        selected_paths=selected_paths,
-    )
-    for check in checks:
-        _run_sql_check(container=container, check=check)
+    resume_local_database_container(project_id=project_id)
+    try:
+        if reset:
+            reset_local_database(project_dir=project_dir, project_id=project_id)
+        container = database_container_for_project(project_id=project_id)
+        checks = load_sql_checks(
+            project_dir=project_dir,
+            manifest_path=manifest_path,
+            selected_paths=selected_paths,
+        )
+        for check in checks:
+            record_docker_activity(reason="sql_check")
+            _run_sql_check(container=container, check=check)
+    finally:
+        pause_local_database_container(project_id=project_id)
 
 
 def _run_sql_check(*, container: str, check: SqlCheck) -> None:
@@ -256,6 +314,11 @@ def _quote_identifier(value: str) -> str:
     if not candidate:
         raise ValueError("SQL role identifier cannot be empty.")
     return '"' + candidate.replace('"', '""') + '"'
+
+
+def _sql_auto_pause_enabled() -> bool:
+    raw = str(os.getenv("FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE", "1")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _quote_literal(value: str) -> str:

@@ -7,8 +7,12 @@ from flow_healer.sql_validation import (
     SqlCheck,
     build_sql_check_script,
     database_is_ready,
+    database_container_is_paused,
     database_container_for_project,
+    pause_local_database_container,
+    resume_local_database_container,
     load_sql_checks,
+    run_sql_checks,
     project_id_for_project_dir,
     reset_local_database,
     wait_for_database_ready,
@@ -176,6 +180,81 @@ def test_database_is_ready_checks_psql_probe(monkeypatch) -> None:
 
     assert database_is_ready(project_id="demo123") is True
     assert any(cmd[:3] == ["docker", "exec", "-i"] for cmd in calls)
+
+
+def test_database_container_is_paused_reads_docker_state(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["docker", "ps", "--format"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="supabase_db_demo123\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert database_container_is_paused(project_id="demo123") is True
+
+
+def test_resume_local_database_container_unpauses_and_waits(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "--format"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="supabase_db_demo123\n", stderr="")
+        if cmd[:3] == ["docker", "inspect", "-f"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("flow_healer.sql_validation.wait_for_database_ready", lambda **kwargs: True)
+
+    assert resume_local_database_container(project_id="demo123") is True
+    assert ["docker", "unpause", "supabase_db_demo123"] in calls
+
+
+def test_pause_local_database_container_pauses_when_enabled(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "--format"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="supabase_db_demo123\n", stderr="")
+        if cmd[:3] == ["docker", "inspect", "-f"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="false\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert pause_local_database_container(project_id="demo123") is True
+    assert ["docker", "pause", "supabase_db_demo123"] in calls
+
+
+def test_run_sql_checks_auto_pauses_after_work(monkeypatch, tmp_path: Path) -> None:
+    paused: list[str] = []
+    resumed: list[str] = []
+    check_file = tmp_path / "supabase" / "assertions" / "schema.sql"
+    check_file.parent.mkdir(parents=True)
+    check_file.write_text("select 1;\n", encoding="utf-8")
+
+    monkeypatch.setattr("flow_healer.sql_validation.ensure_local_supabase_stack", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation.project_id_for_project_dir", lambda _project_dir: "demo123")
+    monkeypatch.setattr("flow_healer.sql_validation.resume_local_database_container", lambda *, project_id: resumed.append(project_id) or True)
+    monkeypatch.setattr("flow_healer.sql_validation.pause_local_database_container", lambda *, project_id: paused.append(project_id) or True)
+    monkeypatch.setattr("flow_healer.sql_validation.database_container_for_project", lambda *, project_id: "supabase_db_demo123")
+    monkeypatch.setattr("flow_healer.sql_validation.record_docker_activity", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "flow_healer.sql_validation.load_sql_checks",
+        lambda **kwargs: [SqlCheck(name="schema", path=check_file.resolve())],
+    )
+    monkeypatch.setattr("flow_healer.sql_validation._run_sql_check", lambda **kwargs: None)
+
+    run_sql_checks(
+        project_dir=tmp_path,
+        manifest_path=tmp_path / "supabase" / "assertions" / "manifest.json",
+        reset=False,
+    )
+
+    assert resumed == ["demo123"]
+    assert paused == ["demo123"]
 
 
 def test_wait_for_database_ready_polls_until_success(monkeypatch) -> None:

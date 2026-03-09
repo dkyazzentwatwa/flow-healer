@@ -16,6 +16,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .config import RelaySettings
+from .docker_runtime import docker_idle_shutdown_enabled, maybe_shutdown_idle_docker_runtime
 from .healer_dispatcher import HealerDispatcher
 from .healer_locks import canonicalize_lock_keys, diff_paths_to_lock_keys, predict_lock_set
 from .healer_memory import HealerMemoryService
@@ -447,6 +448,7 @@ class AutonomousHealerLoop:
             self._reconcile_pr_outcomes()
             processed += 1
         self.store.update_runtime_status(status="idle", last_error="", touch_tick_finished=True)
+        self._maybe_shutdown_idle_docker_runtime()
 
     def _record_worker_heartbeat(
         self,
@@ -491,6 +493,15 @@ class AutonomousHealerLoop:
         self.store.set_state("healer_last_reconcile_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
         for key, value in summary.items():
             self.store.set_state(f"healer_reconcile_{key}", str(max(0, int(value))))
+
+    def _maybe_shutdown_idle_docker_runtime(self) -> None:
+        if not docker_idle_shutdown_enabled():
+            return
+        try:
+            if maybe_shutdown_idle_docker_runtime():
+                logger.info("Stopped idle Docker runtime after healer inactivity window elapsed.")
+        except Exception as exc:
+            logger.warning("Failed to stop idle Docker runtime: %s", exc)
 
     def _maybe_recycle_helpers(self) -> bool:
         requested_at = str(self.store.get_state("healer_helper_recycle_requested_at") or "").strip()
