@@ -70,11 +70,12 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param("", 1, id="rejects_empty_string_operand"),
     pytest.param("   ", 1, id="rejects_whitespace_only_string_operand"),
     pytest.param("not-a-number", 1, id="rejects_non_numeric_string_operand"),
+    pytest.param(float("nan"), 1, id="rejects_nan_float_operand"),
     pytest.param(float("inf"), 1, id="rejects_infinite_float_operand"),
 )
 
 EXPECTED_ADD_SUCCESS_CASE_COUNT = 15
-EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
+EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 5
 
 
 def _call_add(left: object, right: object) -> int:

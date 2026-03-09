@@ -1,6 +1,7 @@
 """Focused addition helper exercised by the Python smoke tests."""
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import math
 import operator
 import sys
 from numbers import Integral
@@ -61,6 +62,9 @@ def _normalize_bool_operand(value: bool) -> int:
 
 def _normalize_float_operand(value: float) -> int:
     """Round finite float operands with deterministic half-up semantics."""
+    if not math.isfinite(value):
+        raise _operand_type_error()
+
     try:
         rounded_value = Decimal(str(value)).to_integral_value(
             rounding=ROUND_HALF_UP,
