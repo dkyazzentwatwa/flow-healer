@@ -218,6 +218,11 @@ test('add supports variadic invocation helpers without changing promotion rules'
   assert.equal(add.call(null, ...mixedInputs), 10n);
 });
 
+test('add.call keeps number semantics after safe-range cancellation from a prior overflow boundary', () => {
+  assert.equal(add.call(null, Number.MAX_SAFE_INTEGER, 1, -1), Number.MAX_SAFE_INTEGER);
+  assert.equal(typeof add.call(null, Number.MAX_SAFE_INTEGER, 1, -1), 'number');
+});
+
 test('add preserves two-operand promotion rules through spread invocation', () => {
   const pairInputs = [Number.MAX_SAFE_INTEGER, 2];
 

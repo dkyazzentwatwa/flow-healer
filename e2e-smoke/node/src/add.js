@@ -123,6 +123,7 @@ function sumOperands(operands) {
 }
 
 export function add(...operands) {
+  // Preserve identity-like behavior for empty and single-operand calls.
   const operandCount = operands.length;
 
   if (operandCount <= 1) {
