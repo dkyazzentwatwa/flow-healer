@@ -1,13 +1,11 @@
 """Focused addition helper exercised by the Python smoke tests."""
 
 import operator
-import re
 import sys
 from numbers import Integral
 
 
 ERROR_MESSAGE = "add() operands must be integers or integer strings"
-_INTEGER_STRING_PATTERN = re.compile(r"[+-]?[0-9]+")
 _ASCII_WHITESPACE = " \t\n\r\v\f"
 
 
@@ -35,7 +33,7 @@ def _normalize_string_operand(value: str) -> int:
     if not normalized_value or "\x00" in normalized_value:
         raise _operand_type_error()
 
-    if not _INTEGER_STRING_PATTERN.fullmatch(normalized_value):
+    if not _is_supported_integer_string(normalized_value):
         raise _operand_type_error()
 
     if not _fits_python_integer_string_limit(normalized_value):
@@ -63,6 +61,15 @@ def _normalize_bool_operand(value: bool) -> int:
 def _strip_ascii_whitespace(value: str) -> str:
     """Trim ASCII whitespace without altering non-string operand handling."""
     return value.strip(_ASCII_WHITESPACE)
+
+
+def _is_supported_integer_string(value: str) -> bool:
+    """Accept signed decimal digit strings that Python itself can parse as ints."""
+    unsigned_value = value.removeprefix("+").removeprefix("-")
+    if not unsigned_value:
+        return False
+
+    return all(character.isdecimal() for character in unsigned_value)
 
 
 def _normalize_operand(value: int | str) -> int:

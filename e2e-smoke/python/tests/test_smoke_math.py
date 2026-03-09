@@ -55,6 +55,7 @@ ADD_SUCCESS_CASES = (
     pytest.param(-2, -3, -5, id="adds_negative_integers"),
     pytest.param(" 2 ", "3", 5, id="adds_integer_strings_with_whitespace"),
     pytest.param(" +2 ", " -3 ", -1, id="adds_signed_integer_strings"),
+    pytest.param("١٢", "３", 15, id="adds_unicode_decimal_digit_strings"),
     pytest.param(True, False, 1, id="adds_boolean_operands"),
     pytest.param(FancyInt(7), 3, 10, id="adds_integer_subclass_operand"),
     pytest.param(IndexStableInt(4), -1, 3, id="uses_exact_index_for_int_subclass"),
@@ -68,7 +69,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(1.5, 1, id="rejects_float_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 10
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 11
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
 
 
