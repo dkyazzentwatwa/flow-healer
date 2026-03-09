@@ -93,6 +93,23 @@ test("complete is idempotent for already-completed items", () => {
   assert.equal(secondCompletion?.completedAt, firstCompletion?.completedAt);
 });
 
+test("complete can target numeric id 0 values", () => {
+  const service = new TodoService([
+    {
+      id: 0,
+      title: "Legacy zero id",
+      completed: false,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: null,
+    },
+  ]);
+
+  const completed = service.complete(0);
+
+  assert.equal(completed?.id, "0");
+  assert.equal(completed?.completed, true);
+});
+
 test("list returns a defensive copy to prevent mutation leaks", () => {
   const service = new TodoService();
   service.create("Run canary");
