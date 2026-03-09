@@ -189,11 +189,13 @@ Use [docs/README.md](docs/README.md) as the active doc map for setup, usage, ope
 | --- | --- |
 | `flow-healer doctor [--repo NAME]` | Validate repo path, git, Docker, Codex, and token setup |
 | `flow-healer status [--repo NAME]` | Show current issue counts, pause state, and recent attempts |
-| `flow-healer start [--repo NAME] [--once]` | Start the healing loop or run a single iteration |
+| `flow-healer start [--repo NAME] [--once]` | Start the always-on runtime (healer loop + web dashboard + pollers) or run a single iteration |
 | `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo |
 | `flow-healer resume [--repo NAME]` | Resume autonomous processing |
 | `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic scan checks with optional no-write mode |
 | `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Run healer loop + web dashboard + Apple Mail/Calendar pollers |
+
+`flow-healer start` now launches the same always-on runtime as `flow-healer serve` so the dashboard stays up with the service. `flow-healer start --once` remains the one-pass maintenance path.
 
 ## Runtime Ops
 

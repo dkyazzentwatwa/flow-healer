@@ -89,7 +89,7 @@ def test_parse_log_activity_row_extracts_issue_and_attempt_metadata() -> None:
     assert row["jump_urls"][0]["url"].endswith("/issues/576")
 
 
-def test_collect_activity_includes_commands_attempts_and_logs(tmp_path: Path) -> None:
+def test_collect_activity_includes_commands_events_attempts_and_logs(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
     store_path = config.repo_db_path("demo")
     state_root = Path(config.service.state_root).expanduser().resolve()
@@ -111,6 +111,11 @@ def test_collect_activity_includes_commands_attempts_and_logs(tmp_path: Path) ->
         raw_command="FH: pause repo=demo",
         parsed_command="pause",
         status="succeeded",
+    )
+    store.create_healer_event(
+        event_type="worker_pulse",
+        message="Worker pulse: idle.",
+        payload={"status": "idle"},
     )
     store.upsert_healer_issue(
         issue_id="576",
@@ -143,7 +148,7 @@ def test_collect_activity_includes_commands_attempts_and_logs(tmp_path: Path) ->
     activity = _collect_activity(config, service)
     kinds = {row["kind"] for row in activity}
 
-    assert {"command", "attempt", "log"}.issubset(kinds)
+    assert {"command", "event", "attempt", "log"}.issubset(kinds)
 
 
 def test_render_dashboard_includes_activity_console_and_inspector(tmp_path: Path) -> None:

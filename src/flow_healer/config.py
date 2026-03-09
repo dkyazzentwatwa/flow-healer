@@ -79,6 +79,7 @@ class RelaySettings:
     enable_autonomous_healer: bool = True
     healer_mode: str = "guarded_pr"
     healer_poll_interval_seconds: float = 30.0
+    healer_pulse_interval_seconds: float = 60.0
     healer_max_concurrent_issues: int = 3
     healer_max_wall_clock_seconds_per_issue: int = 300
     healer_issue_required_labels: list[str] = field(default_factory=lambda: ["healer:ready"])
@@ -190,6 +191,7 @@ class AppConfig:
                     healer_poll_interval_seconds=float(
                         item.get("poll_interval_seconds") or service.poll_interval_seconds
                     ),
+                    healer_pulse_interval_seconds=float(item.get("pulse_interval_seconds") or 60.0),
                     healer_max_concurrent_issues=int(item.get("max_concurrent_issues") or 3),
                     healer_max_wall_clock_seconds_per_issue=int(
                         item.get("max_wall_clock_seconds_per_issue") or service.connector_timeout_seconds

@@ -751,10 +751,12 @@ def _collect_activity(
 ) -> list[dict[str, Any]]:
     status_rows = service.status_rows(None)
     command_rows = service.control_command_rows(None, limit=max(120, limit))
+    event_rows = service.healer_event_rows(None, limit=max(120, limit))
     logs_payload = logs or _collect_recent_logs(config, max_lines=max(160, limit))
     repo_slug_by_name = _repo_slug_by_name(config)
     activity: list[dict[str, Any]] = []
     activity.extend(_normalize_command_activity_rows(command_rows, repo_slug_by_name=repo_slug_by_name))
+    activity.extend(_normalize_event_activity_rows(event_rows, repo_slug_by_name=repo_slug_by_name))
     activity.extend(_normalize_attempt_activity_rows(status_rows, repo_slug_by_name=repo_slug_by_name))
     activity.extend(_normalize_log_activity_rows(logs_payload.get("lines", []), repo_slug_by_name=repo_slug_by_name))
     activity.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
@@ -919,6 +921,51 @@ def _normalize_attempt_activity_rows(
                     "jump_urls": _github_jump_urls(repo_slug, issue_id=issue_id, pr_id=""),
                 }
             )
+    return activity
+
+
+def _normalize_event_activity_rows(
+    event_rows: list[dict[str, Any]],
+    *,
+    repo_slug_by_name: dict[str, str],
+) -> list[dict[str, Any]]:
+    activity: list[dict[str, Any]] = []
+    for row in event_rows:
+        repo_name = str(row.get("repo_name") or "").strip()
+        repo_slug = repo_slug_by_name.get(repo_name, "")
+        event_type = str(row.get("event_type") or "").strip().lower()
+        level = str(row.get("level") or "").strip().lower()
+        message = str(row.get("message") or "").strip() or event_type.replace("_", " ")
+        payload = row.get("payload") or {}
+        signal = "failure" if level in {"error", "warning"} else "running" if event_type == "worker_pulse" else "ok"
+        raw_text_parts = [message]
+        if payload:
+            raw_text_parts.append(json.dumps(payload, indent=2, default=str))
+        activity.append(
+            {
+                "id": str(row.get("event_id") or f"event:{repo_name}:{event_type}:{row.get('created_at') or ''}"),
+                "kind": "event",
+                "timestamp": str(row.get("created_at") or ""),
+                "repo": repo_name,
+                "issue_id": str(row.get("issue_id") or "").strip(),
+                "pr_id": "",
+                "attempt_id": str(row.get("attempt_id") or "").strip(),
+                "branch": "",
+                "subsystem": "healer runtime" if event_type == "worker_pulse" else (event_type or "healer event"),
+                "summary": _truncate_text(message, 180),
+                "message": event_type or "event",
+                "raw_text": "\n\n".join(part for part in raw_text_parts if part),
+                "status": level or "info",
+                "signal": signal,
+                "level": level.upper() if level else "",
+                "source_file": "healer_events",
+                "jump_urls": _github_jump_urls(
+                    repo_slug,
+                    issue_id=str(row.get("issue_id") or "").strip(),
+                    pr_id="",
+                ),
+            }
+        )
     return activity
 
 

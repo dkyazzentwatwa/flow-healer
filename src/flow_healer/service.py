@@ -403,6 +403,21 @@ class FlowHealerService:
             rows = rows[:limit]
         return rows
 
+    def healer_event_rows(self, repo_name: str | None = None, *, limit: int = 100) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for repo in self.config.select_repos(repo_name):
+            store = SQLiteStore(self.config.repo_db_path(repo.repo_name))
+            store.bootstrap()
+            for entry in store.list_healer_events(limit=limit):
+                row = dict(entry)
+                row.setdefault("repo_name", repo.repo_name)
+                rows.append(row)
+            store.close()
+        rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        if len(rows) > limit:
+            rows = rows[:limit]
+        return rows
+
     @staticmethod
     def _close_runtime(runtime: RepoRuntime) -> None:
         closed: set[int] = set()
@@ -465,10 +480,17 @@ def _app_server_metrics(store: SQLiteStore) -> dict[str, object]:
 
 
 def _worker_runtime_state(store: SQLiteStore) -> dict[str, object]:
+    runtime = store.get_runtime_status() or {}
     return {
         "active_worker_id": store.get_state("healer_active_worker_id") or "",
         "last_heartbeat_at": store.get_state("healer_active_worker_heartbeat_at") or "",
+        "last_pulse_at": store.get_state("healer_last_pulse_at") or "",
         "last_reconcile_at": store.get_state("healer_last_reconcile_at") or "",
+        "runtime_status": str(runtime.get("status") or ""),
+        "runtime_last_error": str(runtime.get("last_error") or ""),
+        "runtime_heartbeat_at": str(runtime.get("heartbeat_at") or ""),
+        "last_tick_started_at": str(runtime.get("last_tick_started_at") or ""),
+        "last_tick_finished_at": str(runtime.get("last_tick_finished_at") or ""),
         "recovered_stale_active_issues": _safe_state_int(store, "healer_reconcile_recovered_stale_active_issues"),
         "recovered_leases": _safe_state_int(store, "healer_reconcile_recovered_leases"),
         "interrupted_inactive_attempts": _safe_state_int(store, "healer_reconcile_interrupted_inactive_attempts"),

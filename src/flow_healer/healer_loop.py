@@ -336,16 +336,39 @@ class AutonomousHealerLoop:
             try:
                 await asyncio.to_thread(self._tick_once)
             except Exception as exc:
+                self.store.update_runtime_status(
+                    status="error",
+                    last_error=str(exc),
+                    touch_heartbeat=True,
+                    touch_tick_finished=True,
+                )
                 logger.exception("Autonomous healer tick failed: %s", exc)
-            await asyncio.sleep(max(5.0, self.settings.healer_poll_interval_seconds))
+            await self._sleep_until_next_tick(is_shutdown=is_shutdown)
+
+    async def _sleep_until_next_tick(self, *, is_shutdown: Callable[[], bool]) -> None:
+        remaining = max(5.0, float(self.settings.healer_poll_interval_seconds))
+        pulse_interval = max(15.0, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)))
+        while remaining > 0 and not is_shutdown():
+            delay = min(remaining, pulse_interval)
+            await asyncio.sleep(delay)
+            remaining -= delay
+            if remaining > 0 and not is_shutdown():
+                await asyncio.to_thread(self._record_worker_heartbeat, status="idle")
 
     def _tick_once(self) -> None:
-        self._record_worker_heartbeat()
+        self.store.update_runtime_status(
+            status="ticking",
+            last_error="",
+            touch_heartbeat=True,
+            touch_tick_started=True,
+        )
+        self._record_worker_heartbeat(status="ticking")
         reconcile_summary = self.reconciler.reconcile()
         self._record_reconcile_summary(reconcile_summary)
         self._maybe_recycle_helpers()
         if self.store.get_state("healer_paused") == "true":
             logger.info("Autonomous healer paused via system command; housekeeping complete, skipping cycle.")
+            self.store.update_runtime_status(status="paused", last_error="", touch_tick_finished=True)
             return
         if not bool(getattr(self.tracker, "enabled", False)):
             failure_class = "github_auth_missing"
@@ -353,6 +376,7 @@ class AutonomousHealerLoop:
             self.store.set_state("healer_tracker_available", "false")
             self._record_tracker_error(failure_class=failure_class, failure_reason=failure_reason)
             logger.warning("Autonomous healer tracker unavailable; skipping cycle. %s", failure_reason)
+            self.store.update_runtime_status(status="tracker_unavailable", last_error=failure_reason, touch_tick_finished=True)
             return
         self.store.set_state("healer_tracker_available", "true")
         self._maybe_run_scan()
@@ -379,6 +403,7 @@ class AutonomousHealerLoop:
                 breaker.threshold,
                 breaker.cooldown_remaining_seconds,
             )
+            self.store.update_runtime_status(status="cooldown", last_error="", touch_tick_finished=True)
             return
         if self._infra_pause_active():
             pause_until = self.store.get_state("healer_infra_pause_until") or ""
@@ -388,6 +413,7 @@ class AutonomousHealerLoop:
                 pause_until,
                 pause_reason,
             )
+            self.store.update_runtime_status(status="infra_pause", last_error=str(pause_reason or ""), touch_tick_finished=True)
             return
         connector_health = self._connector_health_snapshot()
         self._record_connector_health(connector_health)
@@ -396,6 +422,11 @@ class AutonomousHealerLoop:
                 "Healer connector unavailable; skipping claim cycle. reason=%s command=%s",
                 str(connector_health.get("availability_reason") or ""),
                 str(connector_health.get("configured_command") or ""),
+            )
+            self.store.update_runtime_status(
+                status="connector_unavailable",
+                last_error=str(connector_health.get("availability_reason") or ""),
+                touch_tick_finished=True,
             )
             return
         processed = 0
@@ -415,10 +446,40 @@ class AutonomousHealerLoop:
             self._process_claimed_issue(issue)
             self._reconcile_pr_outcomes()
             processed += 1
+        self.store.update_runtime_status(status="idle", last_error="", touch_tick_finished=True)
 
-    def _record_worker_heartbeat(self) -> None:
+    def _record_worker_heartbeat(
+        self,
+        *,
+        status: str = "idle",
+        issue_id: str = "",
+        attempt_id: str = "",
+    ) -> None:
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         self.store.set_state("healer_active_worker_id", self.worker_id)
-        self.store.set_state("healer_active_worker_heartbeat_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+        self.store.set_state("healer_active_worker_heartbeat_at", now)
+        self.store.update_runtime_status(status=status, last_error="", touch_heartbeat=True)
+        pulse_interval_minutes = max(0.25, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)) / 60.0)
+        last_pulse_at = str(self.store.get_state("healer_last_pulse_at") or "").strip()
+        if last_pulse_at and _minutes_since(last_pulse_at) < pulse_interval_minutes:
+            return
+        message = f"Worker pulse: {status}."
+        if issue_id:
+            message += f" Active issue #{issue_id}."
+        self.store.create_healer_event(
+            event_type="worker_pulse",
+            level="info",
+            message=message,
+            issue_id=issue_id,
+            attempt_id=attempt_id,
+            payload={
+                "repo": self.settings.repo_name,
+                "worker_id": self.worker_id,
+                "status": status,
+                "heartbeat_at": now,
+            },
+        )
+        self.store.set_state("healer_last_pulse_at", now)
 
     def _record_reconcile_summary(self, summary: dict[str, int]) -> None:
         self.store.set_state("healer_last_reconcile_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
@@ -1666,6 +1727,7 @@ class AutonomousHealerLoop:
         if not self._claim_is_actionable(issue):
             return
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
+        self._record_worker_heartbeat(status="processing", issue_id=issue.issue_id)
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
         if task_spec.parse_confidence < 0.3:
             clarification_key = f"healer_clarification_posted:{issue.issue_id}"
@@ -2517,7 +2579,10 @@ class AutonomousHealerLoop:
         stop_event: threading.Event,
         lease_lost: threading.Event,
     ) -> None:
-        interval = max(15.0, float(self.dispatcher.lease_seconds) / 2.0)
+        interval = min(
+            max(15.0, float(self.dispatcher.lease_seconds) / 2.0),
+            max(15.0, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0))),
+        )
         while not stop_event.wait(interval):
             renewed = self.store.renew_healer_issue_lease(
                 issue_id=issue_id,
@@ -2528,6 +2593,7 @@ class AutonomousHealerLoop:
                 logger.warning("Lease heartbeat stopped for issue #%s; lease could not be renewed.", issue_id)
                 lease_lost.set()
                 return
+            self._record_worker_heartbeat(status="processing", issue_id=issue_id)
 
     def _backoff_or_fail(
         self,

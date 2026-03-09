@@ -56,7 +56,16 @@ def main() -> None:
     service = FlowHealerService(config)
 
     if args.command == "start":
-        service.start(args.repo, once=bool(args.once))
+        if args.once:
+            service.start(args.repo, once=True)
+        else:
+            run_serve(
+                config=config,
+                service=service,
+                repo_name=args.repo,
+                host=None,
+                port=None,
+            )
         return
     if args.command == "status":
         for row in service.status_rows(args.repo):

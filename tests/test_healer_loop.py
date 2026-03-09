@@ -38,6 +38,7 @@ def _make_loop(store, **overrides):
         healer_repo_path="/tmp",
         enable_autonomous_healer=True,
         healer_poll_interval_seconds=60,
+        healer_pulse_interval_seconds=overrides.get("healer_pulse_interval_seconds", 60),
         healer_mode="guarded_pr",
         healer_max_concurrent_issues=1,
         healer_max_wall_clock_seconds_per_issue=300,
@@ -416,6 +417,56 @@ def test_failure_user_hint_avoids_required_outputs_advice_when_issue_is_structur
 
     assert "Required code outputs" not in hint
     assert "structured issue contract" in hint
+
+
+def test_record_worker_heartbeat_emits_visible_pulse_event(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_pulse_interval_seconds=60)
+
+    loop._record_worker_heartbeat(status="idle")
+
+    events = store.list_healer_events(limit=5)
+    runtime = store.get_runtime_status()
+
+    assert events
+    assert events[0]["event_type"] == "worker_pulse"
+    assert events[0]["payload"]["status"] == "idle"
+    assert runtime is not None
+    assert runtime["status"] == "idle"
+    assert runtime["heartbeat_at"]
+
+
+def test_lease_heartbeat_emits_processing_pulse(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, lease_seconds=30, healer_pulse_interval_seconds=15)
+    store.upsert_healer_issue(
+        issue_id="777",
+        repo="owner/repo",
+        title="Issue 777",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id=loop.worker_id, lease_seconds=30, max_active_issues=1)
+    assert claimed is not None
+    stop_event = threading.Event()
+    lease_lost = threading.Event()
+
+    thread = threading.Thread(
+        target=loop._lease_heartbeat,
+        args=("777", stop_event, lease_lost),
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=16)
+    stop_event.set()
+    thread.join(timeout=2)
+
+    events = store.list_healer_events(limit=5)
+    assert any(event["event_type"] == "worker_pulse" and event["issue_id"] == "777" for event in events)
 
 
 def test_backoff_or_fail_uses_explicit_issue_body_for_hint(tmp_path):

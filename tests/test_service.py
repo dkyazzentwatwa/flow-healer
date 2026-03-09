@@ -89,7 +89,11 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     worker = rows[0]["worker"]
     assert "active_worker_id" in worker
     assert "last_heartbeat_at" in worker
+    assert "last_pulse_at" in worker
     assert "last_reconcile_at" in worker
+    assert "runtime_status" in worker
+    assert "last_tick_started_at" in worker
+    assert "last_tick_finished_at" in worker
     assert "recovered_stale_active_issues" in worker
     recent_attempt = rows[0]["recent_attempts"][0]
     assert recent_attempt["diagnosis"] == "product_bug"

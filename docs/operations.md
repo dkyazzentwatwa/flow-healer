@@ -78,6 +78,8 @@ After shipping code that adds the recycle handler, restart the main `local.flow-
 launchctl kickstart -k gui/$(id -u)/local.flow-healer
 ~~~
 
+The continuous `start` command now boots the same always-on runtime as `serve`, so the web dashboard should be available whenever `local.flow-healer` is running.
+
 ### 6) Clear stale running attempts
 
 If an issue remains `running` after daemon restart, requeue expired leases:
