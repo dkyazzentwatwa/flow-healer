@@ -31,7 +31,7 @@ function hasBigIntOperand(a, b) {
 }
 
 function getInitialAccumulatedSum(operands) {
-  return normalizeZero(operands[0] ?? 0);
+  return operands.length === 0 ? 0 : normalizeZero(operands[0]);
 }
 
 function shouldPromoteSafeIntegerSum(a, b, numericSum) {
