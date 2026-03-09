@@ -90,6 +90,22 @@ test("create ignores non-numeric existing ids when computing next id", () => {
   assert.equal(created.id, "1");
 });
 
+test("create advances past existing ids with a leading plus sign", () => {
+  const service = new TodoService([
+    {
+      id: "+7",
+      title: "Positive sign id",
+      completed: false,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: null,
+    },
+  ]);
+
+  const created = service.create("Normalize plus id sequence");
+
+  assert.equal(created.id, "8");
+});
+
 test("complete marks an item complete and records completedAt", () => {
   const service = new TodoService();
   const created = service.create("Harden retries");
@@ -97,6 +113,23 @@ test("complete marks an item complete and records completedAt", () => {
 
   assert.equal(completed?.completed, true);
   assert.ok(completed?.completedAt);
+});
+
+test("complete resolves ids with a leading plus sign", () => {
+  const service = new TodoService([
+    {
+      id: "3",
+      title: "Legacy plus sign id",
+      completed: false,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: null,
+    },
+  ]);
+
+  const completed = service.complete("+3");
+
+  assert.equal(completed?.id, "3");
+  assert.equal(completed?.completed, true);
 });
 
 test("complete is idempotent for already-completed items", () => {
