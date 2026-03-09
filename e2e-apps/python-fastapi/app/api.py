@@ -39,7 +39,7 @@ def _service_for(request_service: TodoService | None) -> TodoService:
 
 
 def list_todos(todo_service: TodoService | None = None) -> dict[str, object]:
-    return {"items": [item.as_dict() for item in _service_for(todo_service).list_todos()]}
+    return {"todos": [item.as_dict() for item in _service_for(todo_service).list_todos()]}
 
 
 def create_todo(
