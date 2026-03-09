@@ -1331,6 +1331,18 @@ class SQLiteStore:
             conn.commit()
             return "claimed"
 
+    def get_healer_mutation(self, mutation_key: str) -> dict[str, Any] | None:
+        key = str(mutation_key or "").strip()
+        if not key:
+            return None
+        conn = self._connect()
+        with self._lock:
+            row = conn.execute(
+                "SELECT * FROM healer_mutation_log WHERE mutation_key = ?",
+                (key,),
+            ).fetchone()
+        return self._row_to_dict(row)
+
     def complete_healer_mutation(self, *, mutation_key: str, success: bool) -> None:
         key = str(mutation_key or "").strip()
         if not key:
