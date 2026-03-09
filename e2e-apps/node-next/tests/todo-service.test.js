@@ -47,6 +47,33 @@ test("create assigns ids and trims title", () => {
   assert.equal(second.id, "2");
 });
 
+test("create advances past the highest existing todo id", () => {
+  const service = new TodoService([
+    {
+      id: "2",
+      title: "Already there",
+      completed: false,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: null,
+    },
+    {
+      id: "7",
+      title: "Highest id wins",
+      completed: true,
+      createdAt: "2026-03-08T12:01:00.000Z",
+      completedAt: "2026-03-08T12:02:00.000Z",
+    },
+  ]);
+
+  const created = service.create("Add the next item");
+
+  assert.equal(created.id, "8");
+  assert.deepEqual(
+    service.list().map((todo) => todo.id),
+    ["2", "7", "8"],
+  );
+});
+
 test("complete marks an item complete and records completedAt", () => {
   const service = new TodoService();
   const created = service.create("Harden retries");
