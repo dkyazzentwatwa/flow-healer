@@ -12,6 +12,17 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 import { format, eachDayOfInterval, endOfMonth, startOfMonth } from "date-fns";
 import { useSearchParams } from "react-router-dom";
 
+function getBoundedUsagePercent(count: number, limit: number | null): number {
+  if (!limit || !Number.isFinite(limit) || limit <= 0) {
+    return 0;
+  }
+
+  const safeCount = Number.isFinite(count) ? count : 0;
+  const percent = Math.round((safeCount / limit) * 100);
+
+  return Math.min(Math.max(percent, 0), 100);
+}
+
 const BillingPage = () => {
   const { activeBusiness: business } = useActiveBusiness();
   const [billingCycle, setBillingCycle] = useState<"monthly" | "annual">("monthly");
@@ -101,7 +112,7 @@ const BillingPage = () => {
 
   const chatLimit = planConfig.limits.chats;
   const leadLimit = planConfig.limits.leads;
-  const chatPct = chatLimit ? Math.round((chatCount / chatLimit) * 100) : 0;
+  const chatPct = getBoundedUsagePercent(chatCount, chatLimit);
 
   const handleCheckout = async (planKey: PlanKey) => {
     if (planKey === "free") return;
@@ -206,8 +217,9 @@ const BillingPage = () => {
           {chatLimit && (
             <div className="mt-2 h-1.5 rounded-full bg-secondary">
               <div
+                data-testid="chat-usage-meter"
                 className={`h-1.5 rounded-full transition-all ${chatPct >= 100 ? "bg-destructive" : chatPct >= 80 ? "bg-chart-4" : "bg-foreground"}`}
-                style={{ width: `${Math.min(chatPct, 100)}%` }}
+                style={{ width: `${chatPct}%` }}
               />
             </div>
           )}
