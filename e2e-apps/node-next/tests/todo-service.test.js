@@ -224,6 +224,23 @@ test("POST returns the same stable public todo fields as GET", async () => {
   });
 });
 
+test("POSTed todos are immediately visible in GET with stable fields", async () => {
+  const createResponse = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "  Route list consistency check  " }),
+    }),
+  );
+  const created = await createResponse.json();
+  const listResponse = await GET();
+  const listPayload = await listResponse.json();
+  const listedTodo = listPayload.todos.at(-1);
+
+  assert.equal(listResponse.status, 200);
+  assert.deepEqual(listedTodo, created.item);
+});
+
 test("complete route returns the stable public todo fields", async () => {
   const createdResponse = await POST(
     new Request("http://localhost/api/todos", {
