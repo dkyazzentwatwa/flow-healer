@@ -48,3 +48,5 @@ config.yaml
 *.patch
 *.orig
 *.rej
+e2e-apps/prosper-chat/supabase/.branches/
+e2e-apps/prosper-chat/supabase/.temp/

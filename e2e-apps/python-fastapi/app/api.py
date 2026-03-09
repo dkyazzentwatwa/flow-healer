@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from .service import TodoService
+from collections.abc import Mapping
+from .service import TodoItem, TodoService
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -39,18 +40,34 @@ def _service_for(request_service: TodoService | None) -> TodoService:
 
 
 def list_todos(todo_service: TodoService | None = None) -> dict[str, object]:
-    return {"todos": [item.as_dict() for item in _service_for(todo_service).list_todos()]}
+    return {"todos": [_serialize_todo(item) for item in _service_for(todo_service).list_todos()]}
+
+
+def _serialize_todo(item: TodoItem) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "completed": item.completed,
+        "completed_at": item.completed_at,
+    }
+
+
+def _extract_title(payload: Mapping[str, object]) -> str:
+    raw_title = payload.get("title", "")
+    if not isinstance(raw_title, str):
+        return ""
+    return raw_title.strip()
 
 
 def create_todo(
-    payload: dict[str, object],
+    payload: Mapping[str, object],
     todo_service: TodoService | None = None,
 ) -> dict[str, object]:
     try:
-        created = _service_for(todo_service).create_todo(str(payload.get("title", "")))
+        created = _service_for(todo_service).create_todo(_extract_title(payload))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"item": created.as_dict()}
+    return {"item": _serialize_todo(created)}
 
 
 def complete_todo(todo_id: str, todo_service: TodoService | None = None) -> dict[str, object]:
@@ -59,7 +76,7 @@ def complete_todo(todo_id: str, todo_service: TodoService | None = None) -> dict
     except KeyError as exc:
         detail = str(exc.args[0]) if exc.args else "todo_not_found"
         raise HTTPException(status_code=404, detail=detail) from exc
-    return {"item": item.as_dict()}
+    return {"item": _serialize_todo(item)}
 
 
 def create_app() -> FastAPI:

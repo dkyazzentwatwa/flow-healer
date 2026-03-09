@@ -145,8 +145,24 @@ _FAILURE_USER_HINTS: dict[str, str] = {
 }
 
 
-def _failure_user_hint(failure_class: str) -> str:
-    return _FAILURE_USER_HINTS.get(str(failure_class or "").strip(), "")
+def _failure_user_hint(failure_class: str, *, issue_body: str = "") -> str:
+    normalized = str(failure_class or "").strip()
+    hint = _FAILURE_USER_HINTS.get(normalized, "")
+    issue_text = str(issue_body or "").lower()
+    if normalized in {"no_patch", "no_workspace_change", "empty_diff"}:
+        has_required_outputs = "required code outputs:" in issue_text
+        has_validation = "validation:" in issue_text
+        if has_required_outputs and has_validation:
+            return (
+                "The AI agent returned no usable file changes despite a structured issue contract. "
+                "Retrying with stricter patch guidance."
+            )
+        if has_required_outputs:
+            return (
+                "The AI agent returned no usable file changes. "
+                "The output targets are present, so add or tighten a `Validation:` section if the retry keeps stalling."
+            )
+    return hint
 
 
 def _minutes_since(timestamp_str: str) -> float:
@@ -1504,7 +1520,7 @@ class AutonomousHealerLoop:
         issues = self.tracker.list_ready_issues(
             required_labels=self.settings.healer_issue_required_labels,
             trusted_actors=self.settings.healer_trusted_actors,
-            limit=max(10, self.settings.healer_max_concurrent_issues * 5),
+            limit=max(50, self.settings.healer_max_concurrent_issues * 20),
         )
         for issue in issues:
             task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
@@ -2011,6 +2027,7 @@ class AutonomousHealerLoop:
                     attempt_no=attempt_no,
                     failure_class=run_result.failure_class,
                     failure_reason=run_result.failure_reason,
+                    issue_body=issue.body,
                 )
                 return
 
@@ -2519,6 +2536,7 @@ class AutonomousHealerLoop:
         attempt_no: int,
         failure_class: str,
         failure_reason: str,
+        issue_body: str = "",
         feedback_context_override: str = "",
     ) -> str:
         is_infra = failure_class in _INFRA_FAILURE_CLASSES
@@ -2562,7 +2580,7 @@ class AutonomousHealerLoop:
                 backoff_until,
                 failure_class,
             )
-            _hint = _failure_user_hint(failure_class)
+            _hint = _failure_user_hint(failure_class, issue_body=issue_body)
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
@@ -2626,7 +2644,7 @@ class AutonomousHealerLoop:
                 backoff_until,
                 failure_class,
             )
-        _hint = _failure_user_hint(failure_class)
+        _hint = _failure_user_hint(failure_class, issue_body=issue_body)
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(

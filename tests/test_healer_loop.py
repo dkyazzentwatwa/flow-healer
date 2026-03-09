@@ -8,6 +8,7 @@ from flow_healer.healer_loop import (
     AutonomousHealerLoop,
     _FAILURE_CLASS_STRATEGY,
     _collect_targeted_tests,
+    _failure_user_hint,
     _sanitize_execution_root,
     _push_issue_branch,
 )
@@ -397,6 +398,60 @@ def test_ingest_ready_issues_adds_eyes_reaction_for_new_issue(tmp_path):
     issue = store.get_healer_issue("501")
     assert issue is not None
     loop.tracker.add_issue_reaction.assert_called_once_with(issue_id="501", reaction="eyes")
+    _, kwargs = loop.tracker.list_ready_issues.call_args
+    assert kwargs["limit"] == 50
+
+
+def test_failure_user_hint_avoids_required_outputs_advice_when_issue_is_structured():
+    hint = _failure_user_hint(
+        "empty_diff",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n"
+            "- e2e-smoke/node/test/add.test.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+        ),
+    )
+
+    assert "Required code outputs" not in hint
+    assert "structured issue contract" in hint
+
+
+def test_backoff_or_fail_uses_explicit_issue_body_for_hint(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="900",
+        repo="owner/repo",
+        title="Issue 900",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+
+    loop = _make_loop(store, healer_retry_budget=2, healer_backoff_initial_seconds=60)
+    posted: list[str] = []
+    loop._post_issue_status = lambda issue_id, body: posted.append(body)
+
+    state = loop._backoff_or_fail(
+        issue_id="900",
+        attempt_no=1,
+        failure_class="empty_diff",
+        failure_reason="Proposer returned an empty diff fenced block.",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n"
+            "- e2e-smoke/node/test/add.test.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+        ),
+    )
+
+    assert state == "queued"
+    assert posted
+    assert "structured issue contract" in posted[0]
 
 
 def test_ingest_ready_issues_skips_duplicate_eyes_reaction(tmp_path):

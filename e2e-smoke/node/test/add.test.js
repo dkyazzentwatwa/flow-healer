@@ -69,6 +69,12 @@ const addTestCases = [
     expected: -9007199254740993n,
   },
   {
+    name: 'promotes negative safe integers that cross the lower boundary',
+    left: Number.MIN_SAFE_INTEGER,
+    right: -1,
+    expected: -9007199254740992n,
+  },
+  {
     name: 'promotes two large safe integers when their combined sum exceeds safe precision',
     left: Number.MAX_SAFE_INTEGER,
     right: Number.MAX_SAFE_INTEGER,
@@ -333,7 +339,7 @@ test('add returns to number semantics when negative inputs bring an overflow-pro
   assert.equal(typeof add(0, Number.MIN_SAFE_INTEGER, -1, 1), 'number');
 });
 
-test('add returns to number semantics when positive overflow is restored by subtraction', () => {
+test('add returns to number semantics when positive inputs bring an overflow-promoted sum back to safety', () => {
   assert.equal(add(0, Number.MAX_SAFE_INTEGER, 1, -1), Number.MAX_SAFE_INTEGER);
   assert.equal(typeof add(0, Number.MAX_SAFE_INTEGER, 1, -1), 'number');
 });

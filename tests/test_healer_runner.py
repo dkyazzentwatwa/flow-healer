@@ -6,6 +6,7 @@ from pathlib import Path
 from flow_healer.healer_runner import (
     HealerRunner,
     ResolvedExecution,
+    _apply_unified_diff_patch,
     _build_proposer_prompt,
     _build_retry_prompt,
     _validate_artifact_outputs,
@@ -2026,6 +2027,20 @@ def test_run_attempt_retries_malformed_diff_before_git_apply(tmp_path):
 
     assert result.success is False
     assert "invalid patch syntax" in connector.turns[1][1]
+
+
+def test_apply_unified_diff_patch_returns_error_when_workspace_is_missing(tmp_path):
+    missing_workspace = tmp_path / "missing-worktree"
+
+    applied, error = _apply_unified_diff_patch(
+        workspace=missing_workspace,
+        patch="diff --git a/demo.py b/demo.py\n--- a/demo.py\n+++ b/demo.py\n@@ -1 +1 @@\n-a\n+b\n",
+        timeout_seconds=30,
+    )
+
+    assert applied is False
+    assert "workspace missing before git apply" in error
+    assert not missing_workspace.exists()
 
 
 def test_run_attempt_rejects_unsupported_issue_language(tmp_path):

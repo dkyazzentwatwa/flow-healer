@@ -30,6 +30,8 @@ class HealerIssue:
     labels: list[str]
     priority: int
     html_url: str
+    created_at: str = ""
+    updated_at: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -106,39 +108,53 @@ class GitHubHealerTracker:
         if not self.enabled:
             return []
         labels_query = ",".join(sorted({label.strip() for label in required_labels if label.strip()}))
-        payload = self._request_json(
-            f"/repos/{self.repo_slug}/issues?state=open&per_page={int(max(1, limit))}"
-            + (f"&labels={quote(labels_query)}" if labels_query else "")
-        )
         trusted = {actor.strip().lower() for actor in trusted_actors if actor.strip()}
+        request_limit = max(1, int(limit))
+        per_page = min(max(20, request_limit), 100)
+        page = 1
         out: list[HealerIssue] = []
-        for item in payload if isinstance(payload, list) else []:
-            if not isinstance(item, dict):
-                continue
-            if "pull_request" in item:
-                continue
-            author = str(((item.get("user") or {}).get("login")) or "").strip()
-            if trusted and author.lower() not in trusted:
-                continue
-            label_names = [
-                str((label or {}).get("name") or "").strip()
-                for label in (item.get("labels") or [])
-                if isinstance(label, dict)
-            ]
-            if required_labels and not all(req in label_names for req in required_labels):
-                continue
-            issue = HealerIssue(
-                issue_id=str(item.get("number")),
-                repo=self.repo_slug,
-                title=str(item.get("title") or ""),
-                body=str(item.get("body") or ""),
-                author=author,
-                labels=label_names,
-                priority=self._priority_from_labels(label_names),
-                html_url=str(item.get("html_url") or ""),
+        while len(out) < request_limit:
+            payload = self._request_json(
+                f"/repos/{self.repo_slug}/issues?state=open&page={page}&per_page={per_page}"
+                + (f"&labels={quote(labels_query)}" if labels_query else "")
             )
-            out.append(issue)
-        return out
+            items = payload if isinstance(payload, list) else []
+            if not items:
+                break
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if "pull_request" in item:
+                    continue
+                author = str(((item.get("user") or {}).get("login")) or "").strip()
+                if trusted and author.lower() not in trusted:
+                    continue
+                label_names = [
+                    str((label or {}).get("name") or "").strip()
+                    for label in (item.get("labels") or [])
+                    if isinstance(label, dict)
+                ]
+                if required_labels and not all(req in label_names for req in required_labels):
+                    continue
+                out.append(
+                    HealerIssue(
+                        issue_id=str(item.get("number")),
+                        repo=self.repo_slug,
+                        title=str(item.get("title") or ""),
+                        body=str(item.get("body") or ""),
+                        author=author,
+                        labels=label_names,
+                        priority=self._priority_from_labels(label_names),
+                        html_url=str(item.get("html_url") or ""),
+                        created_at=str(item.get("created_at") or ""),
+                        updated_at=str(item.get("updated_at") or ""),
+                    )
+                )
+            if len(items) < per_page:
+                break
+            page += 1
+        out.sort(key=self._issue_sort_key)
+        return out[:request_limit]
 
     def issue_has_label(self, *, issue_id: str, label: str) -> bool:
         if not self.enabled:
@@ -711,6 +727,17 @@ class GitHubHealerTracker:
         if "priority:p2" in lowered:
             return 20
         return 100
+
+    @staticmethod
+    def _issue_sort_key(issue: HealerIssue) -> tuple[int, str, str, int]:
+        created = str(issue.created_at or "").strip()
+        updated = str(issue.updated_at or "").strip()
+        timestamp = created or updated or "9999-12-31T23:59:59Z"
+        try:
+            issue_number = int(issue.issue_id)
+        except ValueError:
+            issue_number = 0
+        return (int(issue.priority), timestamp, updated, issue_number)
 
     @staticmethod
     def _infer_repo_slug(repo_path: Path) -> str:

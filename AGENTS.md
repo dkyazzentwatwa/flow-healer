@@ -122,6 +122,17 @@ flow-healer status --repo <repo-name>
 
 If you are debugging issue parsing, compare the issue body against the expectations in `tests/test_healer_task_spec.py` and `tests/e2e/test_flow_healer_e2e.py` before changing code.
 
+## Branch & Workspace Hygiene
+When working alongside Flow Healer, keep human and healer changes separated so branch state stays predictable.
+
+- Let healer-managed issue work stay on `healer/issue-*` branches and worktrees.
+- Do your human changes on a normal branch based on `origin/main`.
+- Do not edit inside `.apple-flow-healer/` unless you are specifically debugging healer internals or a broken worktree.
+- When an issue PR merges, prefer `git worktree remove <path>` or the reconciler's normal cleanup over manual deletion.
+- Do not `rm -rf` valid healer worktrees; only remove them manually if they are already stale or corrupt.
+- Periodically clean up stale remote `healer/issue-*` branches after merge if they accumulate.
+- Before rebasing or pulling from `origin/main`, make sure `git status` is clean or that any remaining changes are intentionally staged or stashed.
+
 ## Commit & Pull Request Guidelines
 This repository currently has no commit history, so use Conventional Commit-style messages such as `feat: add repo health check` or `fix: close store after scan`. Keep pull requests small and reviewable. Include a short summary, test evidence (`pytest`, CLI smoke commands), linked issues, and terminal output or screenshots when changing user-visible CLI behavior.
 

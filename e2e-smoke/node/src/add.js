@@ -125,16 +125,8 @@ function sumOperands(operands) {
 export function add(...operands) {
   const operandCount = operands.length;
 
-  if (operandCount === 0) {
-    return 0;
-  }
-
-  if (operandCount === 1) {
+  if (operandCount <= 1) {
     return getInitialAccumulatedSum(operands);
-  }
-
-  if (operandCount === 2) {
-    return addPair(operands[0], operands[1]);
   }
 
   return sumOperands(operands);

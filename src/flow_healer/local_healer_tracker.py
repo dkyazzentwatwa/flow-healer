@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
+from .healer_tracker import GitHubHealerTracker, HealerIssue, PullRequestDetails, PullRequestResult
 
 
 def _utc_now_iso() -> str:
@@ -64,11 +64,12 @@ class LocalHealerTracker:
                     labels=labels,
                     priority=self._priority_from_labels(labels),
                     html_url=str(issue.get("html_url") or ""),
+                    created_at=str(issue.get("created_at") or ""),
+                    updated_at=str(issue.get("updated_at") or ""),
                 )
             )
-            if len(out) >= max(1, int(limit)):
-                break
-        return out
+        out.sort(key=GitHubHealerTracker._issue_sort_key)
+        return out[: max(1, int(limit))]
 
     def issue_has_label(self, *, issue_id: str, label: str) -> bool:
         issue = self.get_issue(issue_id=issue_id)

@@ -3125,8 +3125,13 @@ def _looks_like_unified_diff(patch: str) -> bool:
 
 
 def _apply_unified_diff_patch(*, workspace: Path, patch: str, timeout_seconds: int) -> tuple[bool, str]:
+    if not workspace.is_dir():
+        return False, f"workspace missing before git apply: {workspace}"
     patch_path = workspace / ".apple-flow-healer.patch"
-    patch_path.write_text(patch, encoding="utf-8")
+    try:
+        patch_path.write_text(patch, encoding="utf-8")
+    except OSError as exc:
+        return False, f"failed to write patch file in workspace {workspace}: {exc}"
     try:
         apply_proc = subprocess.run(
             ["git", "-C", str(workspace), "apply", "--index", "--reject", str(patch_path)],

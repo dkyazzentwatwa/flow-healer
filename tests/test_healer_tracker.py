@@ -5,6 +5,105 @@ from pathlib import Path
 from flow_healer.healer_tracker import GitHubHealerTracker
 
 
+def test_list_ready_issues_paginates_and_sorts_oldest_first(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    calls: list[str] = []
+    page_one: list[dict[str, object]] = []
+    for issue_number in range(30, 49):
+        page_one.append(
+            {
+                "number": issue_number,
+                "title": f"Issue {issue_number}",
+                "body": "details",
+                "created_at": f"2026-03-09T02:{issue_number - 30:02d}:00Z",
+                "updated_at": f"2026-03-09T02:{issue_number - 30:02d}:30Z",
+                "html_url": f"https://github.com/owner/repo/issues/{issue_number}",
+                "user": {"login": "alice"},
+                "labels": [{"name": "healer:ready"}],
+            }
+        )
+    page_one.append(
+        {
+            "number": 13,
+            "title": "PR entry",
+            "body": "skip me",
+            "created_at": "2026-03-09T02:30:00Z",
+            "updated_at": "2026-03-09T02:31:00Z",
+            "html_url": "https://github.com/owner/repo/issues/13",
+            "user": {"login": "alice"},
+            "labels": [{"name": "healer:ready"}],
+            "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/13"},
+        }
+    )
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append(path)
+        assert method == "GET"
+        if "page=1" in path:
+            return page_one
+        if "page=2" in path:
+            return [
+                {
+                    "number": 11,
+                    "title": "Older issue",
+                    "body": "details",
+                    "created_at": "2026-03-09T01:00:00Z",
+                    "updated_at": "2026-03-09T01:10:00Z",
+                    "html_url": "https://github.com/owner/repo/issues/11",
+                    "user": {"login": "alice"},
+                    "labels": [{"name": "healer:ready"}],
+                }
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    issues = tracker.list_ready_issues(required_labels=["healer:ready"], trusted_actors=[], limit=20)
+
+    assert [issue.issue_id for issue in issues[:2]] == ["11", "30"]
+    assert calls == [
+        "/repos/owner/repo/issues?state=open&page=1&per_page=20&labels=healer%3Aready",
+        "/repos/owner/repo/issues?state=open&page=2&per_page=20&labels=healer%3Aready",
+    ]
+
+
+def test_list_ready_issues_prefers_priority_before_age(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert method == "GET"
+        return [
+            {
+                "number": 50,
+                "title": "Older normal issue",
+                "body": "",
+                "created_at": "2026-03-09T01:00:00Z",
+                "updated_at": "2026-03-09T01:05:00Z",
+                "html_url": "https://github.com/owner/repo/issues/50",
+                "user": {"login": "alice"},
+                "labels": [{"name": "healer:ready"}],
+            },
+            {
+                "number": 51,
+                "title": "Priority issue",
+                "body": "",
+                "created_at": "2026-03-09T02:00:00Z",
+                "updated_at": "2026-03-09T02:05:00Z",
+                "html_url": "https://github.com/owner/repo/issues/51",
+                "user": {"login": "alice"},
+                "labels": [{"name": "healer:ready"}, {"name": "priority:p1"}],
+            },
+        ]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    issues = tracker.list_ready_issues(required_labels=["healer:ready"], trusted_actors=[], limit=2)
+
+    assert [issue.issue_id for issue in issues] == ["51", "50"]
+
+
 def test_find_open_issue_by_fingerprint_uses_search(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
