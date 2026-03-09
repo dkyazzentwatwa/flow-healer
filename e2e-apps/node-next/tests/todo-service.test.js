@@ -74,6 +74,22 @@ test("create advances past the highest existing todo id", () => {
   );
 });
 
+test("create ignores non-numeric existing ids when computing next id", () => {
+  const service = new TodoService([
+    {
+      id: "task-09",
+      title: "Malformed id",
+      completed: false,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: null,
+    },
+  ]);
+
+  const created = service.create("Recover id sequence");
+
+  assert.equal(created.id, "1");
+});
+
 test("complete marks an item complete and records completedAt", () => {
   const service = new TodoService();
   const created = service.create("Harden retries");
