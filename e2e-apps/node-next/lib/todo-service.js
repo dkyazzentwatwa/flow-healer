@@ -1,6 +1,9 @@
 export class TodoService {
   constructor(todos = []) {
-    this._todos = todos.map((todo) => ({ ...todo }));
+    this._todos = todos.map((todo) => ({
+      ...todo,
+      id: String(todo?.id ?? ""),
+    }));
     this._nextId = getNextTodoId(this._todos);
   }
 
@@ -23,8 +26,8 @@ export class TodoService {
   }
 
   complete(id) {
-    const key = String(id || "").trim();
-    const todo = this._todos.find((item) => item.id === key);
+    const key = String(id ?? "").trim();
+    const todo = this._todos.find((item) => String(item.id) === key);
     if (!todo) {
       return null;
     }
