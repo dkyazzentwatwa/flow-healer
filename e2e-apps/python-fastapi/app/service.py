@@ -8,6 +8,8 @@ from app.repository import ServiceRecord, ServiceRepository
 
 from .repository import InMemoryTodoRepository, TodoRecord
 
+TODO_NOT_FOUND = "todo_not_found"
+
 
 class DomainService:
     def __init__(self, repository: ServiceRepository) -> None:
@@ -37,7 +39,10 @@ class TodoService:
         return [self._to_item(row) for row in self._repository.list_all()]
 
     def create_todo(self, title: str) -> TodoItem:
-        normalized = str(title or "").strip()
+        if not isinstance(title, str):
+            raise ValueError("title_required")
+
+        normalized = title.strip()
         if not normalized:
             raise ValueError("title_required")
         item = TodoRecord(id=str(self._next_id), title=normalized)
@@ -48,8 +53,8 @@ class TodoService:
     def complete_todo(self, todo_id: str) -> TodoItem:
         existing = self._repository.get(str(todo_id))
         if existing is None:
-            raise KeyError("todo_not_found")
-        if not existing.completed or existing.completed_at is None:
+            raise KeyError(TODO_NOT_FOUND)
+        if not existing.completed or not existing.completed_at:
             existing.completed = True
             existing.completed_at = datetime.now(UTC).isoformat()
             self._repository.put(existing)
