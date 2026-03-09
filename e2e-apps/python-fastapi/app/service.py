@@ -51,10 +51,17 @@ class TodoService:
         return self._to_item(item)
 
     def complete_todo(self, todo_id: str) -> TodoItem:
-        existing = self._repository.get(str(todo_id))
+        if not isinstance(todo_id, str):
+            raise KeyError(TODO_NOT_FOUND)
+
+        normalized_id = todo_id.strip()
+        if not normalized_id:
+            raise KeyError(TODO_NOT_FOUND)
+
+        existing = self._repository.get(normalized_id)
         if existing is None:
             raise KeyError(TODO_NOT_FOUND)
-        if not existing.completed or not existing.completed_at:
+        if not existing.completed or not (existing.completed_at and existing.completed_at.strip()):
             existing.completed = True
             existing.completed_at = datetime.now(UTC).isoformat()
             self._repository.put(existing)
