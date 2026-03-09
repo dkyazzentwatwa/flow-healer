@@ -327,3 +327,8 @@ test('add keeps the overflow-boundary guard on negative sums after returning nea
     },
   );
 });
+
+test('add returns to number semantics when negative inputs bring an overflow-promoted sum back to safety', () => {
+  assert.equal(add(0, Number.MIN_SAFE_INTEGER, -1, 1), Number.MIN_SAFE_INTEGER);
+  assert.equal(typeof add(0, Number.MIN_SAFE_INTEGER, -1, 1), 'number');
+});
