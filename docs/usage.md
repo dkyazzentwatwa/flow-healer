@@ -51,6 +51,25 @@ flow-healer start --repo my-project --once
 flow-healer status --repo my-project
 ~~~
 
+## Bulk Sandbox Issue Creation
+
+When you want to generate stress issues (for example: "make 20 GitHub issues"), use the sandbox-only helper:
+
+~~~bash
+scripts/create_sandbox_issues.sh 20 "Sandbox stress task"
+~~~
+
+This script only creates issues whose `Required code outputs` and `Validation` stay inside:
+
+- `e2e-smoke/*`
+- `e2e-apps/*`
+
+Optional labels:
+
+~~~bash
+EXTRA_LABELS="kind:scan,priority:medium" scripts/create_sandbox_issues.sh 20 "Sandbox stress task"
+~~~
+
 ## Scanner Behavior
 
 The scanner identifies deterministic breakage patterns (e.g., failed CI, linting errors). If `scan_enable_issue_creation` is set to `true`, it will create deduplicated GitHub issues for these findings, labeled with `kind:scan` and `healer:ready` to trigger the healing loop automatically.
