@@ -61,7 +61,7 @@ class TodoService:
         existing = self._repository.get(normalized_id)
         if existing is None:
             raise KeyError(TODO_NOT_FOUND)
-        if not existing.completed or not (existing.completed_at and existing.completed_at.strip()):
+        if not existing.completed or self._is_missing_timestamp(existing.completed_at):
             existing.completed = True
             existing.completed_at = datetime.now(UTC).isoformat()
             self._repository.put(existing)
@@ -76,11 +76,15 @@ class TodoService:
             completed_at=record.completed_at,
         )
 
+    @staticmethod
+    def _is_missing_timestamp(value: object) -> bool:
+        return not isinstance(value, str) or not value.strip()
+
     def _compute_next_id(self) -> int:
         next_id = 1
         for row in self._repository.list_all():
             try:
-                numeric_id = int(row.id)
+                numeric_id = int(str(row.id).strip())
             except (TypeError, ValueError):
                 continue
             next_id = max(next_id, numeric_id + 1)
