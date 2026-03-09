@@ -130,6 +130,14 @@ test('add preserves regular number semantics for non-integer inputs', () => {
   assert.equal(decimalResult, 0.30000000000000004);
 });
 
+test('add preserves NaN semantics across mixed-number and bigint tails', () => {
+  const mixedTailResult = add(1, Number.NaN, 2n);
+  const leadingNaNResult = add(Number.NaN, 1n);
+
+  assert.ok(Number.isNaN(mixedTailResult));
+  assert.ok(Number.isNaN(leadingNaNResult));
+});
+
 test('add keeps a leading undefined input on normal NaN semantics in longer lists', () => {
   assert.ok(Number.isNaN(add(undefined, 1, 2)));
 });

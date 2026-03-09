@@ -100,6 +100,10 @@ function sumOperands(operands) {
   for (let index = 1; index < operands.length; index += 1) {
     const operand = operands[index];
 
+    if (typeof accumulatedSum === 'number' && Number.isNaN(accumulatedSum)) {
+      return Number.NaN;
+    }
+
     if (typeof operand === 'bigint' && hasUnsafeIntegerOperand) {
       throwBigIntUnsafeIntegerError();
     }
