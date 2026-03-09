@@ -2,7 +2,7 @@ export class TodoService {
   constructor(todos = []) {
     this._todos = todos.map((todo) => ({
       ...todo,
-      id: String(todo?.id ?? ""),
+      id: String(todo?.id ?? "").trim(),
     }));
     this._nextId = getNextTodoId(this._todos);
   }
@@ -58,7 +58,11 @@ function getNextTodoId(todos) {
   let maxId = 0;
 
   for (const todo of todos) {
-    const numericId = Number.parseInt(String(todo?.id ?? ""), 10);
+    const rawId = String(todo?.id ?? "").trim();
+    if (!/^-?\d+$/.test(rawId)) {
+      continue;
+    }
+    const numericId = Number.parseInt(rawId, 10);
     if (Number.isSafeInteger(numericId) && numericId > maxId) {
       maxId = numericId;
     }
