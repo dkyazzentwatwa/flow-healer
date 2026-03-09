@@ -63,6 +63,7 @@ ADD_SUCCESS_CASES = (
     pytest.param(FancyInt(7), 3, 10, id="adds_integer_subclass_operand"),
     pytest.param(IndexStableInt(4), -1, 3, id="uses_exact_index_for_int_subclass"),
     pytest.param(OverflowingInt(6), "-2", 4, id="ignores_overflowing_int_hook"),
+    pytest.param("1_000", "2_000", 3000, id="adds_underscored_integer_strings"),
 )
 
 ADD_TYPE_ERROR_CASES = (
@@ -72,7 +73,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(float("inf"), 1, id="rejects_infinite_float_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 14
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 15
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
 
 
@@ -124,7 +125,9 @@ def test_add_type_error_cases_raise_type_error(
     ("left", "right"),
     (
         pytest.param("1.0", 1, id="rejects_decimal_string_operand"),
-        pytest.param("1_000", 1, id="rejects_underscored_integer_string_operand"),
+        pytest.param("1__0", 1, id="rejects_double_underscore_integer_string_operand"),
+        pytest.param("_1_000", 1, id="rejects_leading_underscore_integer_string_operand"),
+        pytest.param("1_000_", 1, id="rejects_trailing_underscore_integer_string_operand"),
         pytest.param(b"2", 1, id="rejects_bytes_operand"),
         pytest.param(object(), 1, id="rejects_object_operand"),
         pytest.param(
