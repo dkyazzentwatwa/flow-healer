@@ -10,7 +10,7 @@ export function listTodos() {
 }
 
 export async function GET() {
-  return Response.json(toTodoListPayload(todoService.list()), { status: 200 });
+  return Response.json({ todos: listTodos() }, { status: 200 });
 }
 
 export async function POST(request) {
