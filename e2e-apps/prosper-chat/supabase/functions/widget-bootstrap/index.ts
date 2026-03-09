@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.2";
 import { buildCorsHeaders } from "../_shared/cors.ts";
-import { signWidgetToken } from "../_shared/widgetToken.ts";
+import { normalizeOptionalWidgetField, signWidgetToken } from "../_shared/widgetToken.ts";
 
 interface BotRow {
   id: string;
@@ -135,9 +135,9 @@ serve(async (req) => {
       business: {
         id: business.id,
         name: business.name,
-        phone: business.phone,
-        email: business.email,
-        address: business.address,
+        phone: normalizeOptionalWidgetField(business.phone),
+        email: normalizeOptionalWidgetField(business.email),
+        address: normalizeOptionalWidgetField(business.address),
       },
       faqs: faqs.map((faq) => ({ question: faq.question, answer: faq.answer })),
       services: services.map((svc) => ({ id: svc.id, name: svc.name, duration_minutes: svc.duration_minutes, price_text: svc.price_text })),

@@ -8,6 +8,15 @@ export interface WidgetClaims {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+export function normalizeOptionalWidgetField(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
