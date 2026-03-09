@@ -51,8 +51,25 @@ function throwVariadicOverflowUnsafeIntegerError() {
   throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
 }
 
+function isStringOperand(value) {
+  if (typeof value === 'string') {
+    return true;
+  }
+
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+
+  try {
+    String.prototype.valueOf.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hasStringOperand(a, b) {
-  return typeof a === 'string' || typeof b === 'string';
+  return isStringOperand(a) || isStringOperand(b);
 }
 
 function throwStringOperandTypeError() {
