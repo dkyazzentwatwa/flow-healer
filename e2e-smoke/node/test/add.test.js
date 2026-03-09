@@ -356,3 +356,22 @@ test('add returns to number semantics when positive inputs bring an overflow-pro
   assert.equal(add(0, Number.MAX_SAFE_INTEGER, 1, -1), Number.MAX_SAFE_INTEGER);
   assert.equal(typeof add(0, Number.MAX_SAFE_INTEGER, 1, -1), 'number');
 });
+
+test('add keeps zero and mixed-sign overflow cancellation on number semantics', () => {
+  assert.equal(
+    add(0, Number.MAX_SAFE_INTEGER, 1, -1, 0),
+    Number.MAX_SAFE_INTEGER,
+  );
+  assert.equal(
+    typeof add(0, Number.MAX_SAFE_INTEGER, 1, -1, 0),
+    'number',
+  );
+  assert.equal(
+    add(0, Number.MIN_SAFE_INTEGER, -1, 1, 0),
+    Number.MIN_SAFE_INTEGER,
+  );
+  assert.equal(
+    typeof add(0, Number.MIN_SAFE_INTEGER, -1, 1, 0),
+    'number',
+  );
+});
