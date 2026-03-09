@@ -956,6 +956,87 @@ def test_process_claimed_issue_uses_tracker_error_details_when_pr_open_fails(tmp
     assert store.get_state("healer_tracker_last_error_class") == "github_auth_missing"
 
 
+def test_process_claimed_issue_reconciles_pending_pr_mutation_after_restart(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50443",
+        repo="owner/repo",
+        title="Issue 50443",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-50443"
+    workspace.mkdir(parents=True)
+    loop._workspace_head_sha = MagicMock(return_value="abc123")
+    loop.tracker.get_issue.return_value = {"issue_id": "50443", "state": "open", "labels": ["healer:ready"]}
+    loop.tracker.find_pr_for_issue.side_effect = [
+        None,
+        PullRequestResult(
+            number=245,
+            state="open",
+            html_url="https://github.com/owner/repo/pull/245",
+        ),
+    ]
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50443")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="ok",
+        verdict="pass",
+        hard_failure=False,
+        parse_error=False,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+
+    pr_body = loop._format_pr_description(
+        issue_id="50443",
+        verifier_summary="ok",
+        test_summary={"failed_tests": 0},
+    )
+    mutation_key = loop._mutation_key(
+        action="open_pr:healer/issue-50443:abc123",
+        issue_id="50443",
+        body=pr_body,
+    )
+    assert (
+        store.claim_healer_mutation(
+            mutation_key=mutation_key,
+            lease_owner="worker-crashed",
+            lease_seconds=300,
+        )
+        == "claimed"
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50443")
+    mutation = store.get_healer_mutation(mutation_key)
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 245
+    assert mutation is not None
+    assert mutation["status"] == "success"
+    loop.tracker.open_or_update_pr.assert_not_called()
+
+
 def test_process_claimed_issue_blocks_when_required_verifier_soft_fails(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

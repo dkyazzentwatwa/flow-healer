@@ -758,6 +758,94 @@ class AutonomousHealerLoop:
         if not deleted:
             logger.warning("Managed remote branch %s could not be deleted cleanly.", normalized)
 
+    @staticmethod
+    def _workspace_head_sha(workspace: Path) -> str:
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(workspace),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception:
+            return ""
+        if proc.returncode != 0:
+            return ""
+        return proc.stdout.strip()
+
+    def _open_or_reconcile_pr(
+        self,
+        *,
+        issue_id: str,
+        branch: str,
+        title: str,
+        body: str,
+        base: str,
+        workspace: Path,
+    ) -> PullRequestResult | None:
+        head_sha = self._workspace_head_sha(workspace)
+        mutation_key = self._mutation_key(
+            action=f"open_pr:{branch}:{head_sha}",
+            issue_id=issue_id,
+            body=body,
+        )
+        mutation = self.store.get_healer_mutation(mutation_key)
+        if mutation is not None and str(mutation.get("status") or "").strip().lower() in {"pending", "success"}:
+            discovered = self._discover_open_pr_for_issue(issue_id=issue_id)
+            if discovered is not None:
+                self.store.complete_healer_mutation(mutation_key=mutation_key, success=True)
+                return discovered
+            if str(mutation.get("status") or "").strip().lower() == "success":
+                self.store.complete_healer_mutation(mutation_key=mutation_key, success=False)
+
+        claim = self.store.claim_healer_mutation(
+            mutation_key=mutation_key,
+            lease_owner=self.worker_id,
+            lease_seconds=max(300, int(getattr(self.dispatcher, "lease_seconds", 300))),
+        )
+        if claim in {"already_success", "inflight"}:
+            discovered = self._discover_open_pr_for_issue(issue_id=issue_id)
+            if discovered is not None:
+                self.store.complete_healer_mutation(mutation_key=mutation_key, success=True)
+                return discovered
+            if claim == "already_success":
+                self.store.complete_healer_mutation(mutation_key=mutation_key, success=False)
+            else:
+                logger.info(
+                    "Issue #%s PR mutation is already in flight and no PR is visible yet; deferring retry.",
+                    issue_id,
+                )
+                return None
+            claim = self.store.claim_healer_mutation(
+                mutation_key=mutation_key,
+                lease_owner=self.worker_id,
+                lease_seconds=max(300, int(getattr(self.dispatcher, "lease_seconds", 300))),
+            )
+        if claim != "claimed":
+            return None
+
+        pr = None
+        try:
+            pr = self.tracker.open_or_update_pr(
+                issue_id=issue_id,
+                branch=branch,
+                title=title,
+                body=body,
+                base=base,
+            )
+            if pr is None or int(getattr(pr, "number", 0) or 0) <= 0:
+                discovered = self._discover_open_pr_for_issue(issue_id=issue_id)
+                if discovered is not None:
+                    pr = discovered
+        finally:
+            self.store.complete_healer_mutation(
+                mutation_key=mutation_key,
+                success=pr is not None and int(getattr(pr, "number", 0) or 0) > 0,
+            )
+        return pr
+
     def _close_conflicted_pr_and_requeue_issue(self, *, issue_id: str, pr_number: int, head_ref: str = "") -> bool:
         close_pr_comment = self._format_flow_status_comment(
             "Closing stale conflicted pull request",
@@ -1972,16 +2060,19 @@ class AutonomousHealerLoop:
             if _abort_for_lost_lease():
                 return
 
-            pr = self.tracker.open_or_update_pr(
+            pr_title = f"healer: fix issue #{issue.issue_id} - {issue.title[:80]}"
+            pr_body = self._format_pr_description(
+                issue_id=issue.issue_id,
+                verifier_summary=verification.summary,
+                test_summary=run_result.test_summary,
+            )
+            pr = self._open_or_reconcile_pr(
                 issue_id=issue.issue_id,
                 branch=workspace.branch,
-                title=f"healer: fix issue #{issue.issue_id} - {issue.title[:80]}",
-                body=self._format_pr_description(
-                    issue_id=issue.issue_id,
-                    verifier_summary=verification.summary,
-                    test_summary=run_result.test_summary,
-                ),
+                title=pr_title,
+                body=pr_body,
                 base=self.settings.healer_default_branch,
+                workspace=workspace.path,
             )
             pr_number = int(getattr(pr, "number", 0) or 0) if pr is not None else 0
             if pr is None or pr_number <= 0:
