@@ -56,6 +56,7 @@ ADD_SUCCESS_CASES = (
     pytest.param(2.5, 3, 6, id="adds_float_using_half_up_rounding"),
     pytest.param(-2.5, 3, 0, id="adds_negative_float_using_half_up_rounding"),
     pytest.param(" 2 ", "3", 5, id="adds_integer_strings_with_whitespace"),
+    pytest.param("\u2003+2\u2003", "\u00a03\u00a0", 5, id="adds_integer_strings_with_unicode_whitespace"),
     pytest.param(" +2 ", " -3 ", -1, id="adds_signed_integer_strings"),
     pytest.param("١٢", "３", 15, id="adds_unicode_decimal_digit_strings"),
     pytest.param(True, False, 1, id="adds_boolean_operands"),
@@ -71,7 +72,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(float("inf"), 1, id="rejects_infinite_float_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 13
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 14
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
 
 

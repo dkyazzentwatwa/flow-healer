@@ -7,7 +7,6 @@ from numbers import Integral
 
 
 ERROR_MESSAGE = "add() operands must be integers or integer strings"
-_ASCII_WHITESPACE = " \t\n\r\v\f"
 
 
 def _operand_type_error(*, cause: Exception | None = None) -> TypeError:
@@ -76,8 +75,8 @@ def _normalize_float_operand(value: float) -> int:
 
 
 def _strip_ascii_whitespace(value: str) -> str:
-    """Trim ASCII whitespace without altering non-string operand handling."""
-    return value.strip(_ASCII_WHITESPACE)
+    """Trim the same leading and trailing whitespace that int() accepts."""
+    return value.strip()
 
 
 def _is_supported_integer_string(value: str) -> bool:
