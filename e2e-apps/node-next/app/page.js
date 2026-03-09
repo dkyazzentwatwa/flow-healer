@@ -1,13 +1,12 @@
 export default function HomePage() {
   return (
-    <main>
-      <h1>Flow Healer Todo Sandbox</h1>
-      <p>This Next.js fixture is intentionally small but production-shaped.</p>
+    <section aria-labelledby="todo-routes-heading">
+      <h2 id="todo-routes-heading">Available todo routes</h2>
       <ul>
         <li>GET /api/todos</li>
         <li>POST /api/todos</li>
         <li>POST /api/todos/:id/complete</li>
       </ul>
-    </main>
+    </section>
   );
 }
