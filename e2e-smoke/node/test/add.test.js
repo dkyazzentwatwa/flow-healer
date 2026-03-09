@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import addDefault, { add } from '../src/add.js';
 
@@ -158,6 +159,43 @@ test('add rejects string operands for variadic calls', () => {
     name: 'TypeError',
     message: 'add() does not accept string operands.',
   });
+});
+
+test('add rejects cross-realm boxed string operands for two-argument calls', () => {
+  const boxedString = vm.runInNewContext('Object("2")');
+
+  assert.throws(() => add(boxedString, 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(2, boxedString), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
+test('add rejects cross-realm boxed string operands for variadic calls', () => {
+  const boxedString = vm.runInNewContext('Object("2")');
+
+  assert.throws(() => add(1, boxedString, 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(...[1, 2, boxedString]), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
+test('add keeps ordinary objects with numeric valueOf on the addition path', () => {
+  const numericObject = {
+    valueOf() {
+      return 2;
+    },
+  };
+
+  assert.equal(add(numericObject, 3), 5);
+  assert.equal(add(1, numericObject, 3), 6);
 });
 
 test('add keeps a leading undefined input on normal NaN semantics in longer lists', () => {
