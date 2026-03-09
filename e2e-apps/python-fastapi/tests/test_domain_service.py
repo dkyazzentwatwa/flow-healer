@@ -90,6 +90,14 @@ def test_create_todo_uses_next_numeric_id_from_existing_rows() -> None:
     assert created.id == "8"
 
 
+def test_create_todo_from_explicit_empty_repository_starts_at_one() -> None:
+    service = TodoService(repository=InMemoryTodoRepository([]))
+
+    created = service.create_todo("New task")
+
+    assert created.id == "1"
+
+
 def test_complete_todo_raises_for_unknown_id() -> None:
     service = TodoService(repository=InMemoryTodoRepository())
 

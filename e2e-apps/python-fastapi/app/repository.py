@@ -35,8 +35,10 @@ class TodoRecord:
 
 
 class InMemoryTodoRepository:
-    def __init__(self) -> None:
+    def __init__(self, rows: list[TodoRecord] | None = None) -> None:
         self._rows: dict[str, TodoRecord] = {}
+        for row in rows or []:
+            self.put(row)
 
     def list_all(self) -> list[TodoRecord]:
         return [self._clone(row) for row in self._rows.values()]
