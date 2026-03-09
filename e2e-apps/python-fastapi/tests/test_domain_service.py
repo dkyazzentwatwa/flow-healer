@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.repository import InMemoryTodoRepository, ServiceRecord, ServiceRepository
+from app.repository import InMemoryTodoRepository, ServiceRecord, ServiceRepository, TodoRecord
 from app.service import DomainService, TodoService
 
 
@@ -76,6 +76,18 @@ def test_complete_todo_marks_item_done_with_timestamp() -> None:
 
     assert completed.completed is True
     assert completed.completed_at is not None
+
+
+def test_create_todo_uses_next_numeric_id_from_existing_rows() -> None:
+    repository = InMemoryTodoRepository()
+    repository.put(TodoRecord(id="2", title="Existing task"))
+    repository.put(TodoRecord(id="7", title="Another task"))
+    repository.put(TodoRecord(id="legacy", title="Imported task"))
+    service = TodoService(repository=repository)
+
+    created = service.create_todo("New task")
+
+    assert created.id == "8"
 
 
 def test_complete_todo_raises_for_unknown_id() -> None:
