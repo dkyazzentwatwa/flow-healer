@@ -437,6 +437,17 @@ def test_record_worker_heartbeat_emits_visible_pulse_event(tmp_path):
     assert runtime["heartbeat_at"]
 
 
+def test_record_worker_heartbeat_logs_pulse_message(tmp_path, caplog):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_pulse_interval_seconds=60)
+    caplog.set_level("INFO", logger="apple_flow.healer_loop")
+
+    loop._record_worker_heartbeat(status="idle")
+
+    assert "Worker pulse emitted" in caplog.text
+
+
 def test_lease_heartbeat_emits_processing_pulse(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

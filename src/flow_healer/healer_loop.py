@@ -480,6 +480,12 @@ class AutonomousHealerLoop:
             },
         )
         self.store.set_state("healer_last_pulse_at", now)
+        logger.info(
+            "Worker pulse emitted (repo=%s status=%s issue=%s)",
+            self.settings.repo_name,
+            status,
+            issue_id or "-",
+        )
 
     def _record_reconcile_summary(self, summary: dict[str, int]) -> None:
         self.store.set_state("healer_last_reconcile_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))

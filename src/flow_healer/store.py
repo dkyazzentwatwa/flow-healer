@@ -704,8 +704,10 @@ class SQLiteStore:
                 UPDATE healer_issues
                 SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE state IN ('claimed', 'running', 'verify_pending')
-                  AND lease_expires_at IS NOT NULL
-                  AND lease_expires_at <= CURRENT_TIMESTAMP
+                  AND (
+                    (lease_expires_at IS NOT NULL AND lease_expires_at <= CURRENT_TIMESTAMP)
+                    OR ((lease_owner IS NULL OR TRIM(lease_owner) = '') AND lease_expires_at IS NULL)
+                  )
                 """
             )
             conn.commit()

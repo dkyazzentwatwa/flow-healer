@@ -95,6 +95,17 @@ def test_reconcile_interrupts_superseded_running_attempt(tmp_path) -> None:
         priority=5,
     )
     store.set_healer_issue_state(issue_id="3", state="running")
+    with store._lock:
+        conn = store._connect()
+        conn.execute(
+            "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = ? WHERE issue_id = ?",
+            (
+                "worker-a",
+                (datetime.now(tz=UTC) + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "3",
+            ),
+        )
+        conn.commit()
     store.create_healer_attempt(
         attempt_id="ha_old",
         issue_id="3",
@@ -191,6 +202,37 @@ def test_reconcile_recovers_stale_active_issue_from_previous_worker_session(tmp_
     assert attempts[0]["state"] == "interrupted"
     assert store.list_healer_locks(issue_id="7") == []
     assert not stale_workspace.exists()
+
+
+def test_reconcile_requeues_active_issue_without_any_lease(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        current_worker_id="healer_new",
+    )
+
+    store.upsert_healer_issue(
+        issue_id="17",
+        repo="owner/repo",
+        title="Issue 17",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="17", state="claimed")
+
+    summary = reconciler.reconcile()
+    issue = store.get_healer_issue("17")
+
+    assert summary["recovered_leases"] == 1
+    assert issue is not None
+    assert issue["state"] == "queued"
 
 
 def test_sweep_orphan_workspaces_skips_store_scan_when_root_missing(tmp_path, monkeypatch) -> None:
