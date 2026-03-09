@@ -79,11 +79,20 @@ function isVariadicOverflowPromotion(accumulatedSum, operand) {
   return !Number.isSafeInteger(accumulatedSum + operand);
 }
 
+function shouldDemoteOverflowPromotedBigInt(sum, hasExplicitBigIntOperand) {
+  if (hasExplicitBigIntOperand || typeof sum !== 'bigint') {
+    return false;
+  }
+
+  return sum >= BigInt(Number.MIN_SAFE_INTEGER) && sum <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
 function sumOperands(operands) {
   // Start from the original first operand so oversized numbers keep plain-number
   // semantics until a later bigint operand intentionally promotes the result.
   let accumulatedSum = getInitialAccumulatedSum(operands);
   let hasOverflowBoundaryPromotion = false;
+  let hasExplicitBigIntOperand = typeof accumulatedSum === 'bigint';
   let hasUnsafeIntegerOperand = isUnsafeIntegerNumber(accumulatedSum);
 
   for (let index = 1; index < operands.length; index += 1) {
@@ -99,8 +108,13 @@ function sumOperands(operands) {
 
     hasOverflowBoundaryPromotion = hasOverflowBoundaryPromotion
       || isVariadicOverflowPromotion(accumulatedSum, operand);
+    hasExplicitBigIntOperand = hasExplicitBigIntOperand || typeof operand === 'bigint';
     hasUnsafeIntegerOperand = hasUnsafeIntegerOperand || isUnsafeIntegerNumber(operand);
     accumulatedSum = addPair(accumulatedSum, operand);
+
+    if (shouldDemoteOverflowPromotedBigInt(accumulatedSum, hasExplicitBigIntOperand)) {
+      accumulatedSum = normalizeZero(Number(accumulatedSum));
+    }
   }
 
   return accumulatedSum;
