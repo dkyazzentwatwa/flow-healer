@@ -301,6 +301,7 @@ def test_coerce_operands_prefers_exact_index_over_custom_int_rounding() -> None:
         pytest.param(2.49, 2, id="rounds_positive_fraction_down"),
         pytest.param(-2.49, -2, id="rounds_negative_fraction_toward_zero"),
         pytest.param(1.005, 1, id="uses_decimal_string_coercion_for_stable_rounding"),
+        pytest.param(1e100, 10**100, id="handles_large_float_scientific_notation"),
     ),
 )
 def test_normalize_operand_rounds_float_inputs_deterministically(
