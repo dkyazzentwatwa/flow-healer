@@ -249,3 +249,32 @@ test("complete route stays idempotent across repeated requests", async () => {
   assert.equal(secondResponse.status, 200);
   assert.deepEqual(await secondResponse.json(), await firstResponse.json());
 });
+
+test("complete route normalizes the path id and persists the completed state", async () => {
+  const createdResponse = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Trim the dynamic route id" }),
+    }),
+  );
+  const createdPayload = await createdResponse.json();
+
+  const response = await completeTodo(undefined, {
+    params: Promise.resolve({ id: `  ${createdPayload.item.id}  ` }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    item: {
+      id: createdPayload.item.id,
+      title: "Trim the dynamic route id",
+      completed: true,
+    },
+  });
+  assert.deepEqual(listTodos().at(-1), {
+    id: createdPayload.item.id,
+    title: "Trim the dynamic route id",
+    completed: true,
+  });
+});
