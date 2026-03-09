@@ -23,6 +23,13 @@ export interface PlanConfig {
   cta: string;
 }
 
+export type BillingCycle = "monthly" | "annual";
+
+export interface PlanBillingSummary {
+  billedUpfront: number | null;
+  monthlyEquivalent: number;
+}
+
 export const PLANS: Record<PlanKey, PlanConfig> = {
   free: {
     name: "Starter",
@@ -80,6 +87,23 @@ export const PLANS: Record<PlanKey, PlanConfig> = {
 };
 
 export const PLAN_KEYS: PlanKey[] = ["free", "pro", "agency"];
+
+export function getPlanBillingSummary(
+  plan: PlanConfig,
+  billingCycle: BillingCycle,
+): PlanBillingSummary {
+  if (billingCycle === "annual") {
+    return {
+      billedUpfront: plan.annualPrice || null,
+      monthlyEquivalent: Math.round(plan.annualPrice / 12),
+    };
+  }
+
+  return {
+    billedUpfront: null,
+    monthlyEquivalent: plan.monthlyPrice,
+  };
+}
 
 export const COMPARISON_FEATURES = [
   { label: "Businesses", free: "1", pro: "1", agency: "Up to 10" },
