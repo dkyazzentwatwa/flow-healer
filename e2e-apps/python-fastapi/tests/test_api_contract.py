@@ -32,6 +32,16 @@ def _route_endpoint_for(app, path: str, method: str):
     return matches[0]
 
 
+def _route_for(app, path: str, method: str):
+    matches = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == path and method in getattr(route, "methods", set())
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def test_health_returns_ok_status() -> None:
     assert health() == {"status": "ok"}
 
@@ -45,8 +55,8 @@ def test_create_todo_rejects_blank_titles() -> None:
     assert error.detail == "title_required"
 
 
-def test_create_todo_rejects_non_string_title_payloads() -> None:
-    for payload in ({"title": None}, {"title": 123}):
+def test_create_todo_rejects_non_text_title_payloads() -> None:
+    for payload in (None, {}, {"title": None}, {"title": 123}, {"text": "Ship"}):
         with pytest.raises(HTTPException) as exc_info:
             create_todo(payload)
 
@@ -106,6 +116,13 @@ def test_create_app_keeps_todo_state_isolated_per_app_instance() -> None:
     assert created == {"item": expected_todo}
     assert first_list() == {"todos": [expected_todo]}
     assert second_list()["todos"] == []
+
+
+def test_create_todo_route_uses_created_status_code() -> None:
+    app = create_app()
+    create_route = _route_for(app, "/todos", "POST")
+
+    assert create_route.status_code == 201
 
 
 def test_complete_todo_returns_completed_todo_payload() -> None:

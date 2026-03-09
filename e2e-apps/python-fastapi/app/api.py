@@ -6,6 +6,8 @@ from .service import TodoItem, TodoService
 try:
     from fastapi import FastAPI, HTTPException
 except Exception:  # pragma: no cover - lightweight fallback for minimal environments
+    from types import SimpleNamespace
+
     class HTTPException(Exception):
         def __init__(self, *, status_code: int, detail: str) -> None:
             super().__init__(detail)
@@ -15,15 +17,26 @@ except Exception:  # pragma: no cover - lightweight fallback for minimal environ
     class FastAPI:  # type: ignore[override]
         def __init__(self, *, title: str) -> None:
             self.title = title
+            self.routes: list[SimpleNamespace] = []
+
+        def _route(self, path: str, methods: set[str], endpoint: object, status_code: int = 200) -> None:
+            self.routes.append(
+                SimpleNamespace(path=path, methods=methods, endpoint=endpoint, status_code=status_code)
+            )
 
         def get(self, _path: str):
             def decorator(func):
+                self._route(_path, {"GET"}, func, status_code=200)
                 return func
 
             return decorator
 
-        def post(self, _path: str):
+        def post(self, _path: str, **_kwargs: object):
             def decorator(func):
+                status_code = _kwargs.get("status_code", 200)
+                if not isinstance(status_code, int):
+                    status_code = 200
+                self._route(_path, {"POST"}, func, status_code=status_code)
                 return func
 
             return decorator
@@ -52,7 +65,10 @@ def _serialize_todo(item: TodoItem) -> dict[str, object]:
     }
 
 
-def _extract_title(payload: Mapping[str, object]) -> str:
+def _extract_title(payload: object) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+
     raw_title = payload.get("title", "")
     if not isinstance(raw_title, str):
         return ""
@@ -60,7 +76,7 @@ def _extract_title(payload: Mapping[str, object]) -> str:
 
 
 def create_todo(
-    payload: Mapping[str, object],
+    payload: Mapping[str, object] | None = None,
     todo_service: TodoService | None = None,
 ) -> dict[str, object]:
     try:
@@ -94,7 +110,7 @@ def create_app() -> FastAPI:
 
     app.get("/health")(health)
     app.get("/todos")(app_list_todos)
-    app.post("/todos")(app_create_todo)
+    app.post("/todos", status_code=201)(app_create_todo)
     app.post("/todos/{todo_id}/complete")(app_complete_todo)
     return app
 
