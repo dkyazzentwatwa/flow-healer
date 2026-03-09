@@ -48,4 +48,12 @@ export function normalizeTodoTitle(title) {
   return normalized;
 }
 
+export function toPublicTodo(todo) {
+  return {
+    id: Number(todo.id),
+    title: todo.title,
+    completed: todo.completed,
+  };
+}
+
 export const todoService = new TodoService();

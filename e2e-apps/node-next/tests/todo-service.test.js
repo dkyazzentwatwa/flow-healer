@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { GET, POST, listTodos } from "../app/api/todos/route.js";
-import { TodoService } from "../lib/todo-service.js";
+import { POST as completeTodo } from "../app/api/todos/[id]/complete/route.js";
+import { TodoService, toPublicTodo } from "../lib/todo-service.js";
 
 test("listTodos returns todo objects with the stable fields the API exposes", () => {
   const todos = listTodos();
@@ -66,6 +67,23 @@ test("create rejects blank and non-string titles", () => {
   assert.throws(() => service.create({ text: "Ship it" }), /title_required/);
 });
 
+test("toPublicTodo strips internal fields and normalizes the id type", () => {
+  assert.deepEqual(
+    toPublicTodo({
+      id: "7",
+      title: "Ship it",
+      completed: true,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: "2026-03-08T12:05:00.000Z",
+    }),
+    {
+      id: 7,
+      title: "Ship it",
+      completed: true,
+    },
+  );
+});
+
 test("POST rejects blank and malformed titles", async () => {
   const todosBefore = listTodos().length;
   const blankResponse = await POST(
@@ -88,4 +106,48 @@ test("POST rejects blank and malformed titles", async () => {
   assert.equal(malformedResponse.status, 400);
   assert.deepEqual(await malformedResponse.json(), { error: "title_required" });
   assert.equal(listTodos().length, todosBefore);
+});
+
+test("POST returns the same stable public todo fields as GET", async () => {
+  const response = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "  Ship stable payload  " }),
+    }),
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("content-type"), "application/json");
+  assert.deepEqual(await response.json(), {
+    item: {
+      id: listTodos().at(-1)?.id,
+      title: "Ship stable payload",
+      completed: false,
+    },
+  });
+});
+
+test("complete route returns the stable public todo fields", async () => {
+  const createdResponse = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Close the loop" }),
+    }),
+  );
+  const createdPayload = await createdResponse.json();
+
+  const response = await completeTodo(undefined, {
+    params: { id: String(createdPayload.item.id) },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    item: {
+      id: createdPayload.item.id,
+      title: "Close the loop",
+      completed: true,
+    },
+  });
 });
