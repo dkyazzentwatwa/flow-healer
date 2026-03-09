@@ -2,7 +2,7 @@ export class TodoService {
   constructor(todos = []) {
     this._todos = todos.map((todo) => ({
       ...todo,
-      id: String(todo?.id ?? "").trim(),
+      id: normalizeTodoId(todo?.id),
     }));
     this._nextId = getNextTodoId(this._todos);
   }
@@ -26,8 +26,8 @@ export class TodoService {
   }
 
   complete(id) {
-    const key = String(id ?? "").trim();
-    const todo = this._todos.find((item) => String(item.id) === key);
+    const key = normalizeTodoId(id);
+    const todo = this._todos.find((item) => normalizeTodoId(item.id) === key);
     if (!todo) {
       return null;
     }
@@ -58,7 +58,7 @@ function getNextTodoId(todos) {
   let maxId = 0;
 
   for (const todo of todos) {
-    const rawId = String(todo?.id ?? "").trim();
+    const rawId = normalizeTodoId(todo?.id);
     if (!/^-?\d+$/.test(rawId)) {
       continue;
     }
@@ -69,6 +69,11 @@ function getNextTodoId(todos) {
   }
 
   return maxId + 1;
+}
+
+function normalizeTodoId(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized.startsWith("+") ? normalized.slice(1) : normalized;
 }
 
 export function toPublicTodo(todo) {
