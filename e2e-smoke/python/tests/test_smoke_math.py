@@ -53,6 +53,8 @@ ADD_SUCCESS_CASES = (
     pytest.param(-2, 3, 1, id="adds_negative_and_positive_integers"),
     pytest.param(2, -3, -1, id="adds_positive_and_negative_integers"),
     pytest.param(-2, -3, -5, id="adds_negative_integers"),
+    pytest.param(2.5, 3, 6, id="adds_float_using_half_up_rounding"),
+    pytest.param(-2.5, 3, 0, id="adds_negative_float_using_half_up_rounding"),
     pytest.param(" 2 ", "3", 5, id="adds_integer_strings_with_whitespace"),
     pytest.param(" +2 ", " -3 ", -1, id="adds_signed_integer_strings"),
     pytest.param("١٢", "３", 15, id="adds_unicode_decimal_digit_strings"),
@@ -66,10 +68,10 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param("", 1, id="rejects_empty_string_operand"),
     pytest.param("   ", 1, id="rejects_whitespace_only_string_operand"),
     pytest.param("not-a-number", 1, id="rejects_non_numeric_string_operand"),
-    pytest.param(1.5, 1, id="rejects_float_operand"),
+    pytest.param(float("inf"), 1, id="rejects_infinite_float_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 11
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 13
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 4
 
 
@@ -285,6 +287,24 @@ def test_coerce_operands_normalizes_bool_before_integral_fallback() -> None:
 def test_coerce_operands_prefers_exact_index_over_custom_int_rounding() -> None:
     """Integral normalization should preserve exact integer semantics."""
     assert _coerce_operands(IndexStableInt(-4), " 1 ") == (-4, 1)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        pytest.param(2.5, 3, id="rounds_positive_half_up"),
+        pytest.param(-2.5, -3, id="rounds_negative_half_up"),
+        pytest.param(2.49, 2, id="rounds_positive_fraction_down"),
+        pytest.param(-2.49, -2, id="rounds_negative_fraction_toward_zero"),
+        pytest.param(1.005, 1, id="uses_decimal_string_coercion_for_stable_rounding"),
+    ),
+)
+def test_normalize_operand_rounds_float_inputs_deterministically(
+    value: float,
+    expected: int,
+) -> None:
+    """Float operands should round predictably before addition."""
+    assert _normalize_operand(value) == expected
 
 
 def test_coerce_operands_ignores_overflowing_int_hook_for_integral_subclass() -> None:

@@ -1,5 +1,6 @@
 """Focused addition helper exercised by the Python smoke tests."""
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import operator
 import sys
 from numbers import Integral
@@ -58,6 +59,22 @@ def _normalize_bool_operand(value: bool) -> int:
     return int(value)
 
 
+def _normalize_float_operand(value: float) -> int:
+    """Round finite float operands with deterministic half-up semantics."""
+    try:
+        rounded_value = Decimal(str(value)).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise _operand_type_error(cause=exc)
+
+    try:
+        return int(rounded_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _operand_type_error(cause=exc)
+
+
 def _strip_ascii_whitespace(value: str) -> str:
     """Trim ASCII whitespace without altering non-string operand handling."""
     return value.strip(_ASCII_WHITESPACE)
@@ -79,6 +96,9 @@ def _normalize_operand(value: int | str) -> int:
 
     if isinstance(value, Integral):
         return _normalize_integral_operand(value)
+
+    if isinstance(value, float):
+        return _normalize_float_operand(value)
 
     if isinstance(value, str):
         return _normalize_string_operand(value)
