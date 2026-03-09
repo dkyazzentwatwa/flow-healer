@@ -58,4 +58,16 @@ export function toPublicTodo(todo) {
   };
 }
 
+export function toPublicTodoList(todos) {
+  return todos.map((todo) => toPublicTodo(todo));
+}
+
+export function toTodoListPayload(todos) {
+  return { todos: toPublicTodoList(todos) };
+}
+
+export function toTodoItemPayload(todo) {
+  return { item: toPublicTodo(todo) };
+}
+
 export const todoService = new TodoService();

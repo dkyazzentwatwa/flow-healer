@@ -1,11 +1,16 @@
-import { normalizeTodoTitle, todoService, toPublicTodo } from "../../../lib/todo-service.js";
+import {
+  normalizeTodoTitle,
+  toTodoItemPayload,
+  toTodoListPayload,
+  todoService,
+} from "../../../lib/todo-service.js";
 
 export function listTodos() {
-  return todoService.list().map(toPublicTodo);
+  return toTodoListPayload(todoService.list()).todos;
 }
 
 export async function GET() {
-  return Response.json({ todos: listTodos() }, { status: 200 });
+  return Response.json(toTodoListPayload(todoService.list()), { status: 200 });
 }
 
 export async function POST(request) {
@@ -21,7 +26,7 @@ export async function POST(request) {
 
   try {
     const created = todoService.create(normalizeTodoTitle(payload.title));
-    return Response.json({ item: toPublicTodo(created) }, { status: 201 });
+    return Response.json(toTodoItemPayload(created), { status: 201 });
   } catch (error) {
     return Response.json({ error: String(error.message || "create_failed") }, { status: 400 });
   }
