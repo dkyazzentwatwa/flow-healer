@@ -15,15 +15,19 @@ class ServiceRecord:
 
 class ServiceRepository:
     def __init__(self, services: list[ServiceRecord] | None = None) -> None:
-        self._services = deepcopy(services) if services is not None else []
+        self._services = [self._clone(service) for service in services or []]
 
     def add(self, service: ServiceRecord) -> ServiceRecord:
-        stored_service = deepcopy(service)
+        stored_service = self._clone(service)
         self._services.append(stored_service)
-        return deepcopy(stored_service)
+        return self._clone(stored_service)
 
     def list_services(self) -> list[ServiceRecord]:
-        return deepcopy(self._services)
+        return [self._clone(service) for service in self._services]
+
+    @staticmethod
+    def _clone(service: ServiceRecord) -> ServiceRecord:
+        return deepcopy(service)
 
 
 @dataclass(slots=True)
