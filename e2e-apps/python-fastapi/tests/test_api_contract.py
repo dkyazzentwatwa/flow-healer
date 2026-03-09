@@ -24,6 +24,37 @@ def test_list_todos_returns_stable_todos_payload() -> None:
     assert list_todos() == {"todos": [created["item"]]}
 
 
+def test_todo_payload_mutations_do_not_leak_back_into_repository_state() -> None:
+    app = create_app()
+    create = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/todos" and "POST" in getattr(route, "methods", set())
+    )
+    list_items = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", None) == "/todos" and "GET" in getattr(route, "methods", set())
+    )
+
+    created = create({"title": "Ship fix"})
+    created["item"]["title"] = "Mutated outside the API"
+
+    listed = list_items()
+    listed["todos"][0]["completed"] = True
+
+    assert list_items() == {
+        "todos": [
+            {
+                "id": "1",
+                "title": "Ship fix",
+                "completed": False,
+                "completed_at": None,
+            }
+        ]
+    }
+
+
 def test_complete_todo_raises_not_found_for_unknown_id() -> None:
     with pytest.raises(Exception) as exc_info:
         complete_todo("404")

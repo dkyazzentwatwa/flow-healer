@@ -54,9 +54,4 @@ class InMemoryTodoRepository:
 
     @staticmethod
     def _clone(record: TodoRecord) -> TodoRecord:
-        return TodoRecord(
-            id=record.id,
-            title=record.title,
-            completed=record.completed,
-            completed_at=record.completed_at,
-        )
+        return deepcopy(record)
