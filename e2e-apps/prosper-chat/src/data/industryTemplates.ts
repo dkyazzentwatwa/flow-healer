@@ -24,7 +24,25 @@ export interface IndustryTemplate {
   faqs: TemplateFaq[];
 }
 
-export const industryTemplates: IndustryTemplate[] = [
+export function normalizeIndustryTemplate(template: IndustryTemplate): IndustryTemplate {
+  return {
+    ...template,
+    id: template.id.trim(),
+    name: template.name.trim(),
+    services: template.services.map((service) => ({
+      ...service,
+      name: service.name.trim(),
+      price_text: service.price_text.trim(),
+      description: service.description?.trim() || undefined,
+    })),
+    faqs: template.faqs.map((faq) => ({
+      question: faq.question.trim(),
+      answer: faq.answer.trim(),
+    })),
+  };
+}
+
+const rawIndustryTemplates: IndustryTemplate[] = [
   {
     id: "spa-wellness",
     name: "Spa / Wellness",
@@ -191,3 +209,5 @@ export const industryTemplates: IndustryTemplate[] = [
     ],
   },
 ];
+
+export const industryTemplates = rawIndustryTemplates.map(normalizeIndustryTemplate);
