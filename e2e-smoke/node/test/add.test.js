@@ -119,6 +119,10 @@ test('add preserves regular number semantics for non-integer inputs', () => {
   assert.equal(decimalResult, 0.30000000000000004);
 });
 
+test('add keeps a leading undefined input on normal NaN semantics in longer lists', () => {
+  assert.ok(Number.isNaN(add(undefined, 1, 2)));
+});
+
 test('add applies the same promotion rules to longer input lists', async (t) => {
   for (const testCase of longerInputListCases) {
     await t.test(testCase.name, () =>
