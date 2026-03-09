@@ -255,6 +255,36 @@ class GitHubHealerTracker:
         )
         return isinstance(payload, dict) and str(payload.get("state") or "").lower() == "closed"
 
+    def add_issue_label(self, *, issue_id: str, label: str) -> bool:
+        normalized_issue = str(issue_id or "").strip()
+        normalized_label = str(label or "").strip()
+        if not self.enabled or not normalized_issue or not normalized_label:
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/issues/{quote(normalized_issue)}/labels",
+            method="POST",
+            body={"labels": [normalized_label]},
+        )
+        if not isinstance(payload, list):
+            return False
+        labels = {
+            str((entry or {}).get("name") or "").strip().lower()
+            for entry in payload
+            if isinstance(entry, dict)
+        }
+        return normalized_label.lower() in labels
+
+    def remove_issue_label(self, *, issue_id: str, label: str) -> bool:
+        normalized_issue = str(issue_id or "").strip()
+        normalized_label = str(label or "").strip()
+        if not self.enabled or not normalized_issue or not normalized_label:
+            return False
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/issues/{quote(normalized_issue)}/labels/{quote(normalized_label, safe='')}",
+            method="DELETE",
+        )
+        return isinstance(payload, list)
+
     def find_pr_for_issue(self, *, issue_id: str, limit: int = 100) -> PullRequestResult | None:
         if not self.enabled or not issue_id.strip():
             return None

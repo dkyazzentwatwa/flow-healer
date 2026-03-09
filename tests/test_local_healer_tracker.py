@@ -50,3 +50,17 @@ def test_local_tracker_open_update_and_close_pr(tmp_path) -> None:
     assert details is not None
     assert details.state == "merged"
 
+
+def test_local_tracker_adds_and_removes_issue_labels(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    tracker = LocalHealerTracker(repo_path=repo_path, state_root=tmp_path / "state")
+
+    issue = tracker.create_issue(title="Bug", body="body", labels=["healer:ready"])
+    assert issue is not None
+
+    assert tracker.add_issue_label(issue_id=str(issue["number"]), label="agent:blocked") is True
+    assert tracker.issue_has_label(issue_id=str(issue["number"]), label="agent:blocked") is True
+
+    assert tracker.remove_issue_label(issue_id=str(issue["number"]), label="agent:blocked") is True
+    assert tracker.issue_has_label(issue_id=str(issue["number"]), label="agent:blocked") is False

@@ -180,6 +180,34 @@ def test_close_issue(monkeypatch):
     assert ok is True
 
 
+def test_add_issue_label(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123/labels"
+        assert method == "POST"
+        assert body == {"labels": ["agent:blocked"]}
+        return [{"name": "healer:ready"}, {"name": "agent:blocked"}]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    assert tracker.add_issue_label(issue_id="123", label="agent:blocked") is True
+
+
+def test_remove_issue_label(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/issues/123/labels/agent%3Ablocked"
+        assert method == "DELETE"
+        assert body is None
+        return [{"name": "healer:ready"}]
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+    assert tracker.remove_issue_label(issue_id="123", label="agent:blocked") is True
+
+
 def test_close_pr_posts_comment_and_closes(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"

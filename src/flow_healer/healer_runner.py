@@ -767,6 +767,25 @@ class HealerRunner:
                 test_summary={},
                 workspace_status=workspace_status,
             )
+        scope_violations = _scope_violation_paths(
+            diff_paths,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+        )
+        if scope_violations:
+            return HealerRunResult(
+                success=False,
+                failure_class="scope_violation",
+                failure_reason=_scope_violation_reason(scope_violations),
+                failure_fingerprint="",
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
+                test_summary={},
+                workspace_status=workspace_status,
+            )
         if diff_files > max_diff_files or diff_lines > max_diff_lines:
             return HealerRunResult(
                 success=False,
@@ -885,6 +904,29 @@ class HealerRunner:
                     diff_lines=0,
                     test_summary=_with_workspace_status(
                         {},
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            scope_violations = _scope_violation_paths(
+                diff_paths,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+            )
+            if scope_violations:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="scope_violation",
+                    failure_reason=_scope_violation_reason(scope_violations),
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=_with_workspace_status(
+                        test_summary,
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -1039,11 +1081,15 @@ class HealerRunner:
         ensure_supported_language(issue_language, source="issue instructions")
         if config_override_allowed:
             ensure_supported_language(self._language, source="repo config")
+        detected_language = ""
+        if execution_detection.language and execution_detection.language != "unknown":
+            detected_language = execution_detection.language
+        elif repo_detection.language and repo_detection.language != "unknown":
+            detected_language = repo_detection.language
         effective_language = (
             issue_language
             or (self._language if config_override_allowed else "")
-            or execution_detection.language
-            or repo_detection.language
+            or detected_language
         )
         if is_removed_language(effective_language):
             raise UnsupportedLanguageError(
@@ -1058,9 +1104,6 @@ class HealerRunner:
             test_command=self._test_command if config_override_allowed else "",
             install_command=self._install_command if config_override_allowed else "",
         )
-        detected_language = execution_detection.language
-        if detected_language == "unknown":
-            detected_language = repo_detection.language
         return ResolvedExecution(
             language_detected=detected_language,
             language_effective=effective_language,
@@ -1147,6 +1190,49 @@ def _changed_paths(workspace: Path) -> list[str]:
     if proc.returncode != 0:
         return []
     return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def _enforces_exact_output_targets(task_spec: HealerTaskSpec) -> bool:
+    if not task_spec.output_targets:
+        return False
+    return task_spec.validation_profile != "artifact_only"
+
+
+def _scope_violation_paths(
+    diff_paths: list[str],
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec,
+) -> list[str]:
+    if not _enforces_exact_output_targets(task_spec):
+        return []
+    unexpected: list[str] = []
+    for path in diff_paths:
+        normalized = str(path or "").strip().lstrip("./")
+        if not normalized:
+            continue
+        if _is_explicit_output_target(normalized, task_spec):
+            continue
+        if _issue_allows_lockfile_change(
+            normalized,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+        ):
+            continue
+        unexpected.append(normalized)
+    return sorted(set(unexpected))
+
+
+def _scope_violation_reason(paths: list[str]) -> str:
+    preview = ", ".join(paths[:5])
+    if len(paths) > 5:
+        preview += ", ..."
+    return (
+        "Tracked changes escaped the exact issue output targets: "
+        f"{preview}. Keep edits limited to the declared output files."
+    )
 
 
 def _diff_stats(workspace: Path) -> tuple[int, int]:
@@ -2586,10 +2672,15 @@ def _is_explicit_output_target(path: str, task_spec: HealerTaskSpec | None) -> b
     if not normalized:
         return False
     for target in task_spec.output_targets:
-        normalized_target = str(target or "").strip().lstrip("./").lower().rstrip("/")
+        raw_target = str(target or "").strip().lstrip("./")
+        normalized_target = raw_target.lower().rstrip("/")
         if not normalized_target:
             continue
-        if normalized == normalized_target or normalized.startswith(f"{normalized_target}/"):
+        if raw_target.endswith("/"):
+            if normalized == normalized_target or normalized.startswith(f"{normalized_target}/"):
+                return True
+            continue
+        if normalized == normalized_target:
             return True
     return False
 

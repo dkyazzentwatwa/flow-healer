@@ -68,6 +68,7 @@ _ALWAYS_REQUEUE_FAILURE_CLASSES = {
     "patch_apply_failed",
     "push_non_fast_forward",
     "no_code_diff",
+    "scope_violation",
 }
 _EXECUTION_CONTRACT_FAILURE_CLASSES = {
     "empty_diff",
@@ -78,6 +79,7 @@ _EXECUTION_CONTRACT_FAILURE_CLASSES = {
 }
 _QUARANTINE_NEUTRAL_FAILURE_CLASSES = {"interrupted", "lease_expired"}
 _STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
+_AGENT_BLOCKED_LABEL = "agent:blocked"
 
 _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "tests_failed":          {"backoff_multiplier": 0.5, "feedback_hint": "Previous attempt's tests failed. Focus on the failing test output and adjust the fix."},
@@ -89,6 +91,7 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "github_network_error":  {"backoff_multiplier": 1.5, "feedback_hint": "GitHub network call failed while opening the PR."},
     "github_api_error":      {"backoff_multiplier": 1.5, "feedback_hint": "GitHub API rejected the PR open request."},
     "lock_upgrade_conflict": {"backoff_multiplier": 1.0, "feedback_hint": "Previous fix expanded beyond predicted scope. Keep changes narrow."},
+    "scope_violation":       {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt edited files outside the declared output targets. Keep the patch strictly scoped."},
     "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
     "generated_artifact_contamination": {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt left generated artifacts in the worktree. Clean workspace noise before retrying."},
 }
@@ -341,6 +344,7 @@ class AutonomousHealerLoop:
         self._reconcile_pr_outcomes()
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback()
+        self._reconcile_blocked_issue_labels()
         breaker = self._circuit_breaker_status()
         if breaker.open and resumed_approved == 0:
             logger.warning(
@@ -681,6 +685,7 @@ class AutonomousHealerLoop:
                 pr_state="merged",
                 clear_lease=True,
             )
+            self._sync_blocked_issue_label(issue_id=issue_id, state="resolved")
             self._cleanup_managed_remote_branch(branch=head_ref)
             self._post_issue_status(
                 issue_id=issue_id,
@@ -732,6 +737,7 @@ class AutonomousHealerLoop:
             last_failure_reason=reason[:500],
             clear_lease=True,
         )
+        self._sync_blocked_issue_label(issue_id=issue_id, state="blocked")
         self._post_issue_status(
             issue_id=issue_id,
             body=self._format_flow_status_comment(
@@ -1526,6 +1532,7 @@ class AutonomousHealerLoop:
                 backoff_until="",
                 clear_lease=True,
             )
+            self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
             self._post_issue_status(
                 issue_id=issue_id,
                 body=self._format_flow_status_comment(
@@ -2321,6 +2328,37 @@ class AutonomousHealerLoop:
         }
         return required_label in pr_labels
 
+    def _sync_blocked_issue_label(self, *, issue_id: str, state: str) -> None:
+        if not issue_id or not bool(getattr(self.tracker, "enabled", False)):
+            return
+        try:
+            issue = self.tracker.get_issue(issue_id=issue_id)
+        except Exception as exc:
+            logger.warning("Failed to load issue #%s while syncing blocked label: %s", issue_id, exc)
+            return
+        remote_state = str((issue or {}).get("state") or "").strip().lower()
+        remote_labels = self._normalize_labels((issue or {}).get("labels"))
+        should_have_label = str(state or "").strip().lower() == "blocked" and remote_state != "closed"
+        has_label = _AGENT_BLOCKED_LABEL in remote_labels
+        if should_have_label == has_label:
+            return
+        try:
+            if should_have_label:
+                self.tracker.add_issue_label(issue_id=issue_id, label=_AGENT_BLOCKED_LABEL)
+            elif has_label:
+                self.tracker.remove_issue_label(issue_id=issue_id, label=_AGENT_BLOCKED_LABEL)
+        except Exception as exc:
+            logger.warning("Failed to sync blocked label for issue #%s: %s", issue_id, exc)
+
+    def _reconcile_blocked_issue_labels(self) -> None:
+        if not bool(getattr(self.tracker, "enabled", False)):
+            return
+        for row in self.store.list_healer_issues(limit=5000):
+            issue_id = str(row.get("issue_id") or "").strip()
+            if not issue_id:
+                continue
+            self._sync_blocked_issue_label(issue_id=issue_id, state=str(row.get("state") or ""))
+
     @staticmethod
     def _normalize_labels(labels: object | None) -> set[str]:
         if labels is None:
@@ -2394,6 +2432,7 @@ class AutonomousHealerLoop:
                 last_failure_reason=failure_reason[:500],
                 clear_lease=True,
             )
+            self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
             if is_infra:
                 now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 self.store.set_state("healer_connector_last_error_class", failure_class)
@@ -2431,6 +2470,7 @@ class AutonomousHealerLoop:
                 last_failure_reason=failure_reason[:500],
                 clear_lease=True,
             )
+            self._sync_blocked_issue_label(issue_id=issue_id, state="failed")
             logger.info(
                 "Issue #%s reached retry budget and is now failed (%s): %s",
                 issue_id,
@@ -2461,6 +2501,7 @@ class AutonomousHealerLoop:
             feedback_context=retry_feedback_context if retry_feedback_context else None,
             clear_lease=True,
         )
+        self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
         logger.info(
                 "Issue #%s requeued after attempt %s with backoff until %s (%s)",
                 issue_id,
@@ -2644,6 +2685,7 @@ class AutonomousHealerLoop:
             feedback_context=f"Repeated failure fingerprint: {failure_fingerprint}"[:500],
             clear_lease=True,
         )
+        self._sync_blocked_issue_label(issue_id=issue_id, state="blocked")
         contamination = workspace_status or {}
         contamination_paths = contamination.get("contamination_paths") or contamination.get("cleaned_paths") or []
         details = [

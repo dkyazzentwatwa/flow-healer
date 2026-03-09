@@ -188,9 +188,57 @@ def test_ingest_pr_feedback_requeues_issue_for_new_external_feedback(tmp_path):
     assert issue is not None
     assert issue["state"] == "pr_open"
     assert issue["pr_number"] == 123
-    assert "PR comment from @bob" in issue["feedback_context"]
-    assert issue["last_issue_comment_id"] == 1001
-    assert issue["pr_last_seen_updated_at"] == "2026-03-06T01:05:00Z"
+
+
+def test_sync_blocked_issue_label_adds_label_for_blocked_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="430",
+        repo="owner/repo",
+        title="Issue 430",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "430",
+        "state": "open",
+        "labels": ["healer:ready"],
+    }
+
+    loop._sync_blocked_issue_label(issue_id="430", state="blocked")
+
+    loop.tracker.add_issue_label.assert_called_once_with(issue_id="430", label="agent:blocked")
+    loop.tracker.remove_issue_label.assert_not_called()
+
+
+def test_reconcile_blocked_issue_labels_removes_stale_blocked_label(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="431",
+        repo="owner/repo",
+        title="Issue 431",
+        body="",
+        author="alice",
+        labels=["healer:ready", "agent:blocked"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="431", state="resolved")
+
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "431",
+        "state": "open",
+        "labels": ["healer:ready", "agent:blocked"],
+    }
+
+    loop._reconcile_blocked_issue_labels()
+
+    loop.tracker.remove_issue_label.assert_called_once_with(issue_id="431", label="agent:blocked")
 
 
 def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):

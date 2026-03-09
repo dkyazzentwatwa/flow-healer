@@ -517,6 +517,25 @@ def test_resolve_execution_ignores_global_override_for_explicit_issue_language(t
     assert resolved.strategy.local_test_cmd == ["npm", "test", "--", "--passWithNoTests"]
 
 
+def test_resolve_execution_leaves_language_empty_for_ambiguous_repo_markers(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+
+    runner = HealerRunner(connector=None, timeout_seconds=30)  # type: ignore[arg-type]
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/demo.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    resolved = runner.resolve_execution(workspace=tmp_path, task_spec=task_spec)
+
+    assert resolved.language_detected == ""
+    assert resolved.language_effective == ""
+
+
 def test_stage_workspace_changes_excludes_python_packaging_artifacts(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -884,6 +903,69 @@ def test_run_attempt_uses_longer_turn_timeout_for_code_change(monkeypatch, tmp_p
 
     assert result.success is True
     assert connector.timeouts == [900]
+
+
+def test_run_attempt_rejects_regular_diff_with_extra_paths(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    (workspace / "other.py").write_text("VALUE = 0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "diff --git a/other.py b/other.py\n"
+        "--- a/other.py\n"
+        "+++ b/other.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 0\n"
+        "+VALUE = 1\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    monkeypatch.setattr(
+        "flow_healer.healer_runner._run_test_gates",
+        lambda *args, **kwargs: {
+            "mode": "local_only",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        },
+    )
+
+    result = runner.run_attempt(
+        issue_id="1242",
+        issue_title="Fix addition bug",
+        issue_body="Fix demo.py and pass tests.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=40,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "scope_violation"
+    assert "other.py" in result.failure_reason
 
 
 def test_run_attempt_recleans_regenerated_lockfile_contamination(monkeypatch, tmp_path):

@@ -93,6 +93,43 @@ class LocalHealerTracker:
             }
         return None
 
+    def add_issue_label(self, *, issue_id: str, label: str) -> bool:
+        normalized_issue = str(issue_id or "").strip()
+        normalized_label = str(label or "").strip()
+        if not normalized_issue or not normalized_label:
+            return False
+        data = self._read_state()
+        for issue in data["issues"]:
+            if str(issue.get("number")) != normalized_issue:
+                continue
+            labels = [str(entry).strip() for entry in issue.get("labels", []) if str(entry).strip()]
+            lowered = {entry.lower() for entry in labels}
+            if normalized_label.lower() not in lowered:
+                labels.append(normalized_label)
+                issue["labels"] = labels
+                issue["updated_at"] = _utc_now_iso()
+                self._write_state(data)
+            return True
+        return False
+
+    def remove_issue_label(self, *, issue_id: str, label: str) -> bool:
+        normalized_issue = str(issue_id or "").strip()
+        normalized_label = str(label or "").strip()
+        if not normalized_issue or not normalized_label:
+            return False
+        data = self._read_state()
+        for issue in data["issues"]:
+            if str(issue.get("number")) != normalized_issue:
+                continue
+            labels = [str(entry).strip() for entry in issue.get("labels", []) if str(entry).strip()]
+            filtered = [entry for entry in labels if entry.lower() != normalized_label.lower()]
+            if len(filtered) != len(labels):
+                issue["labels"] = filtered
+                issue["updated_at"] = _utc_now_iso()
+                self._write_state(data)
+            return True
+        return False
+
     def find_open_issue_by_fingerprint(self, fingerprint: str) -> dict[str, Any] | None:
         marker = f"flow-healer-fingerprint: `{str(fingerprint or '').strip()}`"
         if not str(fingerprint or "").strip():

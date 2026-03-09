@@ -14,15 +14,26 @@ def test_detect_language_returns_unknown_when_no_markers(tmp_path) -> None:
     assert detect_language(tmp_path) == "unknown"
 
 
-def test_detect_language_prefers_specific_marker_order(tmp_path) -> None:
+def test_detect_language_returns_unknown_for_mixed_top_level_markers(tmp_path) -> None:
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
 
     details = detect_language_details(tmp_path)
-    assert details.language == "node"
+    assert details.language == "unknown"
     assert details.ambiguous is True
     assert "package.json" in details.markers
     assert "pyproject.toml" in details.markers
+
+
+def test_detect_language_prefers_language_with_more_markers(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+
+    details = detect_language_details(tmp_path)
+
+    assert details.language == "python"
+    assert details.ambiguous is False
 
 
 def test_detect_language_recognizes_swift_package_manager_marker(tmp_path) -> None:
