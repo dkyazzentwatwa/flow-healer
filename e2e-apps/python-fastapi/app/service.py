@@ -31,7 +31,7 @@ class TodoItem:
 class TodoService:
     def __init__(self, repository: InMemoryTodoRepository | None = None) -> None:
         self._repository = repository or InMemoryTodoRepository()
-        self._next_id = 1
+        self._next_id = self._compute_next_id()
 
     def list_todos(self) -> list[TodoItem]:
         return [self._to_item(row) for row in self._repository.list_all()]
@@ -63,3 +63,13 @@ class TodoService:
             completed=record.completed,
             completed_at=record.completed_at,
         )
+
+    def _compute_next_id(self) -> int:
+        next_id = 1
+        for row in self._repository.list_all():
+            try:
+                numeric_id = int(row.id)
+            except (TypeError, ValueError):
+                continue
+            next_id = max(next_id, numeric_id + 1)
+        return next_id
