@@ -49,7 +49,7 @@ class TodoService:
         existing = self._repository.get(str(todo_id))
         if existing is None:
             raise KeyError("todo_not_found")
-        if not existing.completed:
+        if not existing.completed or existing.completed_at is None:
             existing.completed = True
             existing.completed_at = datetime.now(UTC).isoformat()
             self._repository.put(existing)
