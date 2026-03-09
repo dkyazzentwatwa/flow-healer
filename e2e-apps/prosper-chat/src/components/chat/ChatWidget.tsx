@@ -57,8 +57,13 @@ const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat-widget`
 const AVAILABILITY_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/check-availability`;
 const BOOK_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/book-appointment`;
 
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
 function formatTime(time: string): string {
-  const [h, m] = time.split(":").map(Number);
+  const [hourPart = "0", minutePart = "0"] = time.split(":");
+  const h = Number(hourPart);
+  const m = Number(minutePart);
   const ampm = h >= 12 ? "PM" : "AM";
   const hour = h % 12 || 12;
   return `${hour}:${m.toString().padStart(2, "0")} ${ampm}`;
@@ -66,8 +71,8 @@ function formatTime(time: string): string {
 
 function formatDate(dateStr: string): string {
   const [y, m, d] = dateStr.split("-").map(Number);
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return `${WEEKDAY_LABELS[date.getUTCDay()]}, ${MONTH_LABELS[date.getUTCMonth()]} ${date.getUTCDate()}`;
 }
 
 async function streamChat({
@@ -456,10 +461,12 @@ const ChatWidget = ({
   // Generate next 14 days for date picker
   const dateOptions = Array.from({ length: 14 }, (_, i) => {
     const d = new Date();
+    d.setHours(12, 0, 0, 0);
     d.setDate(d.getDate() + i);
+    const value = `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, "0")}-${d.getDate().toString().padStart(2, "0")}`;
     return {
-      value: `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, "0")}-${d.getDate().toString().padStart(2, "0")}`,
-      label: d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }),
+      value,
+      label: formatDate(value),
     };
   });
 
