@@ -62,9 +62,9 @@ def test_run_scan_creates_issues_over_threshold(monkeypatch, fake_store):
                 fingerprint="fp_p1",
                 scan_type="pytest",
                 severity="high",
-                title="Test failing: tests/test_x.py::test_y",
+                title="Test failing: e2e-smoke/node/test/add.test.js::test_y",
                 body="body",
-                payload={"selector": "tests/test_x.py::test_y"},
+                payload={"selector": "e2e-smoke/node/test/add.test.js::test_y"},
             )
         ]
 
@@ -76,6 +76,8 @@ def test_run_scan_creates_issues_over_threshold(monkeypatch, fake_store):
     assert len(summary["created_issues"]) == 2
     assert tracker.created[0]["labels"] == ["healer:ready", "kind:scan"]
     assert "flow-healer-fingerprint" in str(tracker.created[0]["body"])
+    assert "Required code outputs:" in str(tracker.created[1]["body"])
+    assert "e2e-smoke/node/test/add.test.js" in str(tracker.created[1]["body"])
 
 
 def test_run_scan_dedupes_existing_open_issue(monkeypatch, fake_store):
@@ -158,3 +160,40 @@ def test_run_scan_uses_unique_run_ids_for_back_to_back_scans(monkeypatch, tmp_pa
 
     assert first["run_id"] != second["run_id"]
     store.close()
+
+
+def test_run_scan_skips_non_sandbox_pytest_issue_creation(monkeypatch, fake_store):
+    tracker = _FakeTracker()
+    scanner = FlowHealerScanner(
+        repo_path=Path("/tmp"),
+        store=fake_store,
+        tracker=tracker,
+        severity_threshold="medium",
+        max_issues_per_run=5,
+        default_labels=["healer:ready", "kind:scan"],
+        enable_issue_creation=True,
+    )
+
+    monkeypatch.setattr(scanner, "_run_harness_eval", lambda _check_failures: [])
+    monkeypatch.setattr(
+        scanner,
+        "_run_pytest_suite",
+        lambda _check_failures: [
+            ScanFinding(
+                fingerprint="fp_py_non_sandbox",
+                scan_type="pytest",
+                severity="high",
+                title="Test failing: tests/test_x.py::test_y",
+                body="body",
+                payload={"selector": "tests/test_x.py::test_y"},
+            )
+        ],
+    )
+
+    summary = scanner.run_scan(dry_run=False)
+
+    assert summary["findings_total"] == 1
+    assert summary["created_issues"] == []
+    finding = fake_store.get_scan_finding("fp_py_non_sandbox")
+    assert finding is not None
+    assert finding["status"] == "skipped_non_sandbox"

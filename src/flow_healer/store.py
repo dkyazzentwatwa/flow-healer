@@ -414,7 +414,7 @@ class SQLiteStore:
             placeholders = ",".join("?" for _ in states)
             rows = conn.execute(
                 f"""
-                SELECT issue_id, state, workspace_path, branch_name
+                SELECT issue_id, state, workspace_path, branch_name, lease_owner, lease_expires_at
                 FROM healer_issues
                 WHERE state IN ({placeholders})
                   AND COALESCE(workspace_path, '') != ''

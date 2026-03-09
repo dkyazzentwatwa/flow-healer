@@ -10,6 +10,24 @@ from .store import SQLiteStore
 
 logger = logging.getLogger("apple_flow.healer_reconciler")
 
+_INACTIVE_CLEANUP_STATES = [
+    "queued",
+    "failed",
+    "resolved",
+    "archived",
+    "blocked",
+    "pr_pending_approval",
+    "pr_open",
+]
+_ACTIVE_WORKSPACE_STATES = [
+    "claimed",
+    "running",
+    "verify_pending",
+    "pr_pending_approval",
+    "pr_open",
+    "blocked",
+]
+
 
 class HealerReconciler:
     def __init__(self, *, store: SQLiteStore, workspace_manager: HealerWorkspaceManager) -> None:
@@ -81,7 +99,7 @@ class HealerReconciler:
 
     def _cleanup_inactive_issue_workspaces(self) -> int:
         inactive_rows = self.store.list_healer_issue_workspace_refs(
-            states=["queued", "failed", "resolved", "archived", "blocked", "pr_pending_approval", "pr_open"],
+            states=_INACTIVE_CLEANUP_STATES,
             limit=2000,
         )
         cleaned = 0
@@ -91,6 +109,8 @@ class HealerReconciler:
                 continue
             issue_id = str(row.get("issue_id") or "")
             state = str(row.get("state") or "queued")
+            if self._workspace_ref_has_active_lease(row):
+                continue
             try:
                 self.workspace_manager.remove_workspace(workspace_path=Path(workspace_raw))
             except Exception as exc:
@@ -110,13 +130,13 @@ class HealerReconciler:
             # Avoid a large issue-table scan on idle ticks when no healer worktrees exist.
             return 0
         active_rows = self.store.list_healer_issue_workspace_refs(
-            states=["queued", "claimed", "running", "verify_pending", "pr_pending_approval", "pr_open", "blocked"],
+            states=["queued", *_ACTIVE_WORKSPACE_STATES],
             limit=2000,
         )
         active_paths = {
             str(Path(row.get("workspace_path") or "").resolve())
             for row in active_rows
-            if (row.get("workspace_path") or "").strip()
+            if (row.get("workspace_path") or "").strip() and self._workspace_ref_should_be_preserved(row)
         }
         removed = 0
         for workspace in self.workspace_manager.list_workspaces():
@@ -128,6 +148,24 @@ class HealerReconciler:
             except Exception as exc:
                 logger.warning("Failed to remove orphan workspace %s: %s", workspace, exc)
         return removed
+
+    @staticmethod
+    def _workspace_ref_should_be_preserved(row: dict[str, object]) -> bool:
+        state = str(row.get("state") or "").strip()
+        if state in _ACTIVE_WORKSPACE_STATES:
+            return True
+        # Queued workspaces are only preserved when they still have an active lease.
+        return state == "queued" and HealerReconciler._workspace_ref_has_active_lease(row)
+
+    @staticmethod
+    def _workspace_ref_has_active_lease(row: dict[str, object]) -> bool:
+        lease_owner = str(row.get("lease_owner") or "").strip()
+        lease_expires_at = str(row.get("lease_expires_at") or "").strip()
+        if not lease_owner and not lease_expires_at:
+            return False
+        if not lease_expires_at:
+            return bool(lease_owner)
+        return not _is_expired_timestamp(lease_expires_at)
 
 
 def _is_expired_timestamp(raw: str) -> bool:

@@ -1,5 +1,83 @@
 # Operations
 
+## Split Service Cutover (Apple Flow + Flow Healer)
+
+Use this runbook when both daemons must stay always-on while remaining fully isolated (separate launch labels, DB roots, logs, and working directories).
+
+### 1) Backup DBs
+
+~~~bash
+mkdir -p ~/.apple-flow/backups ~/.flow-healer/backups
+cp -av ~/Documents/code/codex-flow/data/relay.db ~/.apple-flow/backups/relay.db.$(date +%Y%m%d%H%M%S).bak || true
+cp -av ~/.flow-healer/repos/flow-healer/state.db ~/.flow-healer/backups/flow-healer.state.$(date +%Y%m%d%H%M%S).bak || true
+~~~
+
+### 2) Stop both services
+
+~~~bash
+launchctl stop local.flow-healer || true
+launchctl stop local.apple-flow || true
+~~~
+
+### 3) Apple Flow DB migration
+
+~~~bash
+mkdir -p ~/.apple-flow
+cp -av ~/Documents/code/codex-flow/data/relay.db ~/.apple-flow/relay.db
+~~~
+
+Set Apple Flow env to prevent healer ownership drift:
+
+~~~bash
+perl -0pi -e 's/^apple_flow_enable_autonomous_healer=.*/apple_flow_enable_autonomous_healer=false/m' ~/Documents/code/codex-flow/.env
+perl -0pi -e 's/^apple_flow_enable_healer_scheduled_scans=.*/apple_flow_enable_healer_scheduled_scans=false/m' ~/Documents/code/codex-flow/.env
+perl -0pi -e 's|^apple_flow_db_path=.*|apple_flow_db_path=/Users/cypher-server/.apple-flow/relay.db|m' ~/Documents/code/codex-flow/.env
+~~~
+
+### 4) Ensure Flow Healer launch config is explicit
+
+`local.flow-healer.plist` should include:
+
+- `Label`: `local.flow-healer`
+- `WorkingDirectory`: `/Users/cypher-server/Documents/code/flow-healer`
+- `ProgramArguments`: `/Users/cypher-server/Documents/code/flow-healer/.venv/bin/python -m flow_healer.cli --config /Users/cypher-server/.flow-healer/config.yaml start`
+- `EnvironmentVariables.PYTHONPATH`: `/Users/cypher-server/Documents/code/flow-healer/src`
+- `StandardErrorPath` / `StandardOutPath` under `~/.flow-healer/`
+
+`local.apple-flow.plist` should include:
+
+- `Label`: `local.apple-flow`
+- `WorkingDirectory`: `/Users/cypher-server/Documents/code/codex-flow`
+- stdout/stderr paths under `~/.apple-flow/logs/`
+
+### 5) Start and enable boot/login persistence
+
+~~~bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.apple-flow.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.flow-healer.plist 2>/dev/null || true
+launchctl enable gui/$(id -u)/local.apple-flow
+launchctl enable gui/$(id -u)/local.flow-healer
+launchctl start local.apple-flow
+launchctl start local.flow-healer
+~~~
+
+### 6) Clear stale running attempts
+
+If an issue remains `running` after daemon restart, requeue expired leases:
+
+~~~bash
+sqlite3 ~/.flow-healer/repos/flow-healer/state.db "UPDATE healer_issues SET state='queued', lease_owner=NULL, lease_expires_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE state='running' AND lease_expires_at <= CURRENT_TIMESTAMP;"
+~~~
+
+### 7) Verify separation
+
+~~~bash
+scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml flow-healer
+scripts/verify_runtime.sh ~/.flow-healer/config.yaml flow-healer
+flow-healer --config ~/.flow-healer/config.yaml doctor --repo flow-healer
+flow-healer --config ~/.flow-healer/config.yaml status --repo flow-healer
+~~~
+
 ## Workspace Reconciliation
 
 The reconciler runs at the start of every tick and sweeps any workspace directory not associated with an active issue in the `healer_issues` table.

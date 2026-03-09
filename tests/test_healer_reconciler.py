@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from flow_healer.healer_reconciler import HealerReconciler
@@ -135,3 +136,96 @@ def test_sweep_orphan_workspaces_skips_store_scan_when_root_missing(tmp_path, mo
     monkeypatch.setattr(store, "list_healer_issue_workspace_refs", fail_if_called)
 
     assert reconciler._sweep_orphan_workspaces() == 0
+
+
+def test_reconcile_preserves_queued_workspace_with_active_lease(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(store=store, workspace_manager=workspace_manager)
+
+    queued_workspace = workspace_manager.worktrees_root / "issue-5-queued"
+    queued_workspace.mkdir(parents=True)
+    store.upsert_healer_issue(
+        issue_id="5",
+        repo="owner/repo",
+        title="Issue 5",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="5",
+        state="queued",
+        workspace_path=str(queued_workspace),
+        branch_name="healer/issue-5-queued",
+    )
+    with store._lock:
+        conn = store._connect()
+        conn.execute(
+            "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = ? WHERE issue_id = ?",
+            (
+                "worker-a",
+                (datetime.now(tz=UTC) + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "5",
+            ),
+        )
+        conn.commit()
+
+    summary = reconciler.reconcile()
+    issue = store.get_healer_issue("5")
+
+    assert summary["cleaned_inactive_workspaces"] == 0
+    assert summary["removed_orphans"] == 0
+    assert queued_workspace.exists()
+    assert issue is not None
+    assert issue["workspace_path"] == str(queued_workspace)
+
+
+def test_reconcile_cleans_queued_workspace_with_expired_lease(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(store=store, workspace_manager=workspace_manager)
+
+    queued_workspace = workspace_manager.worktrees_root / "issue-6-queued"
+    queued_workspace.mkdir(parents=True)
+    store.upsert_healer_issue(
+        issue_id="6",
+        repo="owner/repo",
+        title="Issue 6",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="6",
+        state="queued",
+        workspace_path=str(queued_workspace),
+        branch_name="healer/issue-6-queued",
+    )
+    with store._lock:
+        conn = store._connect()
+        conn.execute(
+            "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = ? WHERE issue_id = ?",
+            (
+                "worker-a",
+                (datetime.now(tz=UTC) - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "6",
+            ),
+        )
+        conn.commit()
+
+    summary = reconciler.reconcile()
+    issue = store.get_healer_issue("6")
+
+    assert summary["cleaned_inactive_workspaces"] == 1
+    assert not queued_workspace.exists()
+    assert issue is not None
+    assert issue["workspace_path"] == ""

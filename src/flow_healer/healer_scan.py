@@ -107,6 +107,17 @@ class FlowHealerScanner:
                 continue
 
             if not dry_run and self.enable_issue_creation:
+                if finding.scan_type == "pytest" and not self._finding_targets_are_sandbox_scoped(finding):
+                    if hasattr(self.store, "upsert_scan_finding"):
+                        self.store.upsert_scan_finding(
+                            fingerprint=finding.fingerprint,
+                            scan_type=finding.scan_type,
+                            severity=finding.severity,
+                            title=finding.title,
+                            status="skipped_non_sandbox",
+                            payload=finding.payload,
+                        )
+                    continue
                 if len(created) >= self.max_issues_per_run:
                     skipped_budget += 1
                     if hasattr(self.store, "upsert_scan_finding"):
@@ -282,8 +293,17 @@ class FlowHealerScanner:
 
     def _issue_body(self, finding: ScanFinding) -> str:
         payload_json = json.dumps(finding.payload, indent=2)
+        sandbox_targets = self._sandbox_targets_for_finding(finding)
+        required_outputs_block = ""
+        if finding.scan_type == "pytest" and sandbox_targets:
+            required_outputs_block = (
+                "Required code outputs:\n"
+                + "".join(f"- {target}\n" for target in sandbox_targets)
+                + "\n"
+            )
         return (
             f"{finding.body}\n\n"
+            f"{required_outputs_block}"
             "### Automation Metadata\n"
             f"- scan_type: `{finding.scan_type}`\n"
             f"- severity: `{finding.severity}`\n"
@@ -297,6 +317,46 @@ class FlowHealerScanner:
         value = _SEVERITY_ORDER.get((severity or "").strip().lower(), _SEVERITY_ORDER["medium"])
         threshold = _SEVERITY_ORDER.get(self.severity_threshold, _SEVERITY_ORDER["medium"])
         return value >= threshold
+
+    def _finding_targets_are_sandbox_scoped(self, finding: ScanFinding) -> bool:
+        targets = self._candidate_targets_for_finding(finding)
+        if not targets:
+            return False
+        return all(self._is_sandbox_target(path) for path in targets)
+
+    def _sandbox_targets_for_finding(self, finding: ScanFinding) -> list[str]:
+        return [target for target in self._candidate_targets_for_finding(finding) if self._is_sandbox_target(target)]
+
+    @staticmethod
+    def _candidate_targets_for_finding(finding: ScanFinding) -> list[str]:
+        payload = finding.payload if isinstance(finding.payload, dict) else {}
+        targets: list[str] = []
+
+        selector = str(payload.get("selector") or "").strip()
+        if selector:
+            selector_target = selector.split("::", 1)[0].strip().lstrip("./")
+            if selector_target:
+                targets.append(selector_target)
+
+        for raw in payload.get("selectors") or []:
+            candidate = str(raw or "").split("::", 1)[0].strip().lstrip("./")
+            if candidate:
+                targets.append(candidate)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for target in targets:
+            key = target.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(target)
+        return deduped
+
+    @staticmethod
+    def _is_sandbox_target(path: str) -> bool:
+        normalized = str(path or "").strip().lstrip("./").lower()
+        return normalized.startswith("e2e-smoke/") or normalized.startswith("e2e-apps/")
 
     @staticmethod
     def _extract_failed_pytest_selectors(output: str) -> list[str]:

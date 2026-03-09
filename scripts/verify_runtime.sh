@@ -26,9 +26,36 @@ trap 'rm -f "${doctor_file}" "${status_file}"' EXIT
 run_cli doctor "${repo_args[@]}" >"${doctor_file}"
 run_cli status "${repo_args[@]}" >"${status_file}"
 
+if command -v launchctl >/dev/null 2>&1; then
+  uid="$(id -u)"
+  for label in local.flow-healer local.apple-flow; do
+    if ! launchctl print "gui/${uid}/${label}" >/dev/null 2>&1; then
+      printf "Required launchd service is not loaded: %s\n" "${label}" >&2
+      exit 1
+    fi
+  done
+fi
+
+if [[ -f "${HOME}/Documents/code/codex-flow/.env" ]]; then
+  auto_healer="$(grep -E '^apple_flow_enable_autonomous_healer=' "${HOME}/Documents/code/codex-flow/.env" | tail -n 1 | cut -d'=' -f2- | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  scheduled_scans="$(grep -E '^apple_flow_enable_healer_scheduled_scans=' "${HOME}/Documents/code/codex-flow/.env" | tail -n 1 | cut -d'=' -f2- | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  if [[ "${auto_healer}" != "false" ]]; then
+    printf "apple_flow_enable_autonomous_healer must be false for service isolation.\n" >&2
+    exit 1
+  fi
+  if [[ "${scheduled_scans}" != "false" ]]; then
+    printf "apple_flow_enable_healer_scheduled_scans must be false for service isolation.\n" >&2
+    exit 1
+  fi
+fi
+
 python3 - "${doctor_file}" "${status_file}" <<'PY'
 import json
+import os
 import pathlib
+import re
+import shutil
+import subprocess
 import sys
 
 
@@ -72,6 +99,41 @@ for row in status_rows:
     breaker = row.get("circuit_breaker") if isinstance(row.get("circuit_breaker"), dict) else {}
     if bool(breaker.get("open")):
         failures.append(f"{repo}: status reports the circuit breaker as open")
+
+launch_snapshots: dict[str, str] = {}
+if shutil.which("launchctl"):
+    uid = os.getuid()
+    for label in ("local.flow-healer", "local.apple-flow"):
+        proc = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{label}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            failures.append(f"{label}: launchctl print failed")
+            continue
+        launch_snapshots[label] = proc.stdout or ""
+
+flow_dump = launch_snapshots.get("local.flow-healer", "")
+apple_dump = launch_snapshots.get("local.apple-flow", "")
+
+def extract(field: str, dump: str) -> str:
+    match = re.search(rf"^\s*{re.escape(field)} = (.+)$", dump, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+flow_working_dir = extract("working directory", flow_dump)
+apple_working_dir = extract("working directory", apple_dump)
+if not flow_working_dir:
+    failures.append("local.flow-healer: missing working directory in launchctl output")
+if not apple_working_dir:
+    failures.append("local.apple-flow: missing working directory in launchctl output")
+if flow_working_dir and apple_working_dir and flow_working_dir == apple_working_dir:
+    failures.append("launchd isolation failure: both services share the same working directory")
+if flow_working_dir and "flow-healer" not in flow_working_dir:
+    failures.append(f"local.flow-healer: unexpected working directory '{flow_working_dir}'")
+if apple_working_dir and "codex-flow" not in apple_working_dir:
+    failures.append(f"local.apple-flow: unexpected working directory '{apple_working_dir}'")
 
 if failures:
     print("Runtime verification failed:")

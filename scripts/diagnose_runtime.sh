@@ -32,13 +32,32 @@ done
 section "PATH"
 printf "%s\n" "${PATH}"
 
+section "Config Snapshot"
+if [[ -f "${CONFIG_PATH}" ]]; then
+  state_root_line="$(grep -E '^[[:space:]]*state_root:' "${CONFIG_PATH}" | head -n 1 || true)"
+  connector_line="$(grep -E '^[[:space:]]*connector_command:' "${CONFIG_PATH}" | head -n 1 || true)"
+  printf "flow_healer_%s\n" "${state_root_line:-state_root: <missing>}"
+  printf "flow_healer_%s\n" "${connector_line:-connector_command: <missing>}"
+else
+  printf "Config file not found at %s\n" "${CONFIG_PATH}"
+fi
+
+APPLE_FLOW_ENV="${HOME}/Documents/code/codex-flow/.env"
+if [[ -f "${APPLE_FLOW_ENV}" ]]; then
+  section "Apple Flow Env Snapshot"
+  for key in apple_flow_db_path apple_flow_enable_autonomous_healer apple_flow_enable_healer_scheduled_scans; do
+    value="$(grep -E "^${key}=" "${APPLE_FLOW_ENV}" | tail -n 1 || true)"
+    printf "%s\n" "${value:-${key}=<unset>}"
+  done
+fi
+
 if command -v launchctl >/dev/null 2>&1; then
   uid="$(id -u)"
   for label in local.flow-healer local.apple-flow; do
     section "launchctl ${label}"
     dump_file="$(mktemp)"
     if launchctl print "gui/${uid}/${label}" >"${dump_file}" 2>/dev/null; then
-      grep -E 'PATH =>|state =|pid =|last exit code' "${dump_file}" || true
+      grep -E 'state =|pid =|last exit code|working directory =|stdout path =|stderr path =|program =|PATH =>' "${dump_file}" || true
     else
       printf "not loaded\n"
     fi

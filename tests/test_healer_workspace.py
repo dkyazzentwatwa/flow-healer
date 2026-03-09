@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 
 from flow_healer.healer_workspace import HealerWorkspaceManager
@@ -100,3 +101,34 @@ def test_prepare_workspace_resets_issue_branch_to_latest_base(tmp_path):
     assert head == main_head
     assert status == ""
     assert not (workspace.path / "feature.txt").exists()
+
+
+def test_remove_workspace_unlocks_and_retries_when_locked(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    manager = HealerWorkspaceManager(repo_path=repo)
+    workspace = manager.ensure_workspace(issue_id="904", title="Locked worktree")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, check=False, capture_output=True, text=True, timeout=30):  # noqa: ANN001
+        cmd_list = [str(part) for part in cmd]
+        calls.append(cmd_list)
+        if cmd_list[-3:] == ["worktree", "remove", str(workspace.path)]:
+            return SimpleNamespace(returncode=1, stderr="fatal: cannot remove: is locked")
+        if cmd_list[-4:] == ["worktree", "remove", "-f", str(workspace.path)]:
+            # First remove fails, second succeeds after unlock+prune.
+            remove_calls = [row for row in calls if row[-4:] == ["worktree", "remove", "-f", str(workspace.path)]]
+            if len(remove_calls) == 1:
+                return SimpleNamespace(returncode=1, stderr="fatal: cannot remove: is locked")
+            return SimpleNamespace(returncode=0, stderr="")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    manager.remove_workspace(workspace_path=workspace.path)
+
+    assert any(row[-3:] == ["worktree", "unlock", str(workspace.path)] for row in calls)
+    assert any(row[-4:] == ["worktree", "prune", "--expire", "now"] for row in calls)
+    remove_attempts = [row for row in calls if row[-4:] == ["worktree", "remove", "-f", str(workspace.path)]]
+    assert len(remove_attempts) == 2

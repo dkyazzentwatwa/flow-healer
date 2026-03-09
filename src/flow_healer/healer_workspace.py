@@ -129,16 +129,47 @@ class HealerWorkspaceManager:
             raise ValueError(f"Refusing to remove workspace outside healer root: {ws}")
         if not ws.exists():
             return
-        proc = subprocess.run(
+        proc = self._run_git_worktree_remove(ws)
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            # Guard against stale lock metadata in .git/worktrees/* that can block clean removal.
+            if "locked" in stderr.lower():
+                self._run_git_worktree_unlock(ws)
+                self._run_git_worktree_prune()
+                retry = self._run_git_worktree_remove(ws)
+                if retry.returncode == 0:
+                    return
+                stderr = (retry.stderr or stderr).strip()
+            logger.warning("git worktree remove failed for %s: %s", ws, stderr)
+            self._run_git_worktree_prune()
+            shutil.rmtree(ws, ignore_errors=True)
+
+    def _run_git_worktree_remove(self, ws: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["git", "-C", str(self.repo_path), "worktree", "remove", "-f", str(ws)],
             check=False,
             capture_output=True,
             text=True,
             timeout=30,
         )
-        if proc.returncode != 0:
-            logger.warning("git worktree remove failed for %s: %s", ws, (proc.stderr or "").strip())
-            shutil.rmtree(ws, ignore_errors=True)
+
+    def _run_git_worktree_unlock(self, ws: Path) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo_path), "worktree", "unlock", str(ws)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def _run_git_worktree_prune(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo_path), "worktree", "prune", "--expire", "now"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
     def list_workspaces(self) -> list[Path]:
         if not self.worktrees_root.exists():
