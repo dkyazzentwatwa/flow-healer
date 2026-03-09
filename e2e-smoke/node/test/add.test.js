@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { add } from '../src/add.js';
+import addDefault, { add } from '../src/add.js';
 
 const addTestCases = [
   { name: 'returns 5 for two positive numbers', left: 2, right: 3, expected: 5 },
@@ -109,6 +109,11 @@ test('add returns the expected sum for each named scenario', async (t) => {
     const { name } = testCase;
     await t.test(name, () => assertAddResult(testCase));
   }
+});
+
+test('add keeps default and named exports aligned', () => {
+  assert.equal(addDefault, add);
+  assert.equal(addDefault(2, 3), 5);
 });
 
 test('add preserves regular number semantics for non-integer inputs', () => {

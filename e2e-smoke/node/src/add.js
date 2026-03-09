@@ -123,3 +123,5 @@ export function add(...operands) {
 
   return sumOperands(operands);
 }
+
+export default add;
