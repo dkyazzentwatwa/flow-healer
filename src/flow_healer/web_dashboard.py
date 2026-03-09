@@ -5,6 +5,7 @@ from html import escape
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 import threading
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -15,6 +16,17 @@ from .control_plane import ControlRouter, parse_command_subject
 from .service import FlowHealerService
 
 _REFRESH_MS = 5000
+_ACTIVITY_LIMIT = 240
+_LOG_LINE_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+"
+    r"(?P<level>[A-Z]+)\s+"
+    r"(?P<subsystem>[^:]+):\s*"
+    r"(?P<message>.*)$"
+)
+_ISSUE_ID_RE = re.compile(r"issue\s+#(?P<issue_id>\d+)", re.IGNORECASE)
+_PR_ID_RE = re.compile(r"PR\s+#(?P<pr_id>\d+)", re.IGNORECASE)
+_ATTEMPT_ID_RE = re.compile(r"\b(?P<attempt_id>hat_[a-z0-9]+)\b", re.IGNORECASE)
+_BRANCH_RE = re.compile(r"\b(?P<branch>healer/[A-Za-z0-9._/\-]+)\b")
 
 
 class DashboardServer:
@@ -68,6 +80,9 @@ class DashboardServer:
                 if parsed.path == "/api/logs":
                     lines = _parse_int((parse_qs(parsed.query).get("lines") or [""])[0], default=120, min_value=20, max_value=500)
                     self._write_json(_collect_recent_logs(server.config, max_lines=lines))
+                    return
+                if parsed.path == "/api/activity":
+                    self._write_json({"rows": _collect_activity(server.config, server.service)})
                     return
                 if parsed.path == "/api/overview":
                     self._write_json(_overview_payload(server.config, server.service))
@@ -142,64 +157,21 @@ class DashboardServer:
 
 def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str) -> str:
     payload = _overview_payload(config, service)
-
-    # Build repo action buttons as Alpine.js powered dropdowns
-    repo_actions = []
-    for repo in config.repos:
-        repo_actions.append(
-            f"""
-            <div class='border border-gray-800 rounded-lg p-4 bg-gray-900'>
-              <div class='flex items-center justify-between'>
-                <h3 class='text-sm font-semibold text-gray-100'>{escape(repo.repo_name)}</h3>
-                <button
-                  @click="activeActions === '{escape(repo.repo_name)}' ? activeActions = '' : activeActions = '{escape(repo.repo_name)}'"
-                  class='px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition'
-                >
-                  Actions
-                </button>
-              </div>
-              <div x-show="activeActions === '{escape(repo.repo_name)}'" class='mt-3 pt-3 border-t border-gray-800'>
-                <div class='space-y-2'>
-                  <form method='post' action='/action' class='contents'>
-                    <input type='hidden' name='repo' value='{escape(repo.repo_name)}'>
-                    <button type='submit' name='command' value='status' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
-                      Status
-                    </button>
-                    <button type='submit' name='command' value='doctor' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
-                      Doctor
-                    </button>
-                    <button type='submit' name='command' value='pause' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
-                      Pause
-                    </button>
-                    <button type='submit' name='command' value='resume' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
-                      Resume
-                    </button>
-                    <button type='submit' name='command' value='once' class='w-full text-left px-3 py-2 text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded transition'>
-                      Run Once
-                    </button>
-                    <div class='flex items-center gap-2 px-3 py-2'>
-                      <button type='submit' name='command' value='scan' class='flex-1 text-left text-xs bg-gray-800 hover:bg-gray-700 text-gray-100 rounded px-2 py-1 transition'>
-                        Scan
-                      </button>
-                      <label class='text-xs text-gray-400 flex items-center gap-1'>
-                        <input type='checkbox' name='dry_run' value='true' class='rounded'>
-                        dry
-                      </label>
-                    </div>
-                  </form>
-                </div>
-              </div>
-            </div>
-            """
-        )
-
-    notice_html = f"""
-    <div class='mb-4 p-3 bg-amber-900/30 border border-amber-800 rounded-lg text-amber-300 text-sm'>
-      {escape(notice)}
-    </div>
-    """ if notice else ""
-
+    repo_names = [repo.repo_name for repo in config.repos]
     initial = escape(json.dumps(payload, default=str))
+    repo_actions = _render_repo_action_cards(config)
+    repo_options = "".join(
+        f"<option value='{escape(repo_name)}'>{escape(repo_name)}</option>" for repo_name in repo_names
+    )
+    notice_html = (
+        f"""
+        <div class='mb-6 rounded-3xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 shadow-lg shadow-amber-950/30'>
+          {escape(notice)}
+        </div>
+        """
+        if notice
+        else ""
+    )
 
     return f"""
 <!doctype html>
@@ -214,123 +186,277 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
     tailwind.config = {{
       theme: {{
         extend: {{
-          colors: {{
-            dark: '#0f172a'
+          fontFamily: {{
+            display: ['ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['SFMono-Regular', 'ui-monospace', 'monospace']
+          }},
+          boxShadow: {{
+            glow: '0 20px 60px rgba(15, 23, 42, 0.45)'
           }}
         }}
       }}
     }}
   </script>
 </head>
-<body class='bg-gray-950 text-gray-100 font-sans'>
-  <header class='sticky top-0 z-10 bg-gray-900 border-b border-gray-800'>
-    <div class='px-6 py-4'>
-      <div class='flex items-center justify-between'>
-        <div>
-          <h1 class='text-lg font-bold text-gray-100'>Flow Healer Dashboard</h1>
-          <p class='text-xs text-gray-400 mt-1'>{escape(config.service.state_root)} • Auto-refresh every 5s</p>
-        </div>
-        <div class='flex items-center gap-3'>
-          <span class='inline-flex items-center gap-2 text-xs text-gray-400'>
-            <span class='inline-block w-2 h-2 bg-emerald-400 rounded-full'></span>
-            Live
-          </span>
-          <button
-            @click='refresh()'
-            class='px-3 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition'
-          >
-            Refresh Now
-          </button>
-        </div>
-      </div>
-    </div>
-  </header>
+<body class='min-h-screen bg-slate-950 text-slate-100'>
+  <div class='absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_30%),radial-gradient(circle_at_top_right,_rgba(244,114,182,0.14),_transparent_28%),linear-gradient(180deg,_#020617_0%,_#0f172a_52%,_#020617_100%)]'></div>
 
-  <main class='max-w-7xl mx-auto px-6 py-6' x-data='dashboardApp()' @load='init()'>
+  <main class='mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8' x-data='dashboardApp()' x-init='init()' @keydown.window.escape='closeInspector()'>
     {notice_html}
 
-    <!-- KPI Strip -->
-    <div class='grid grid-cols-2 md:grid-cols-5 gap-4 mb-6'>
-      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
-        <div class='text-xs text-gray-400 uppercase tracking-wide'>Repos</div>
-        <div class='text-2xl font-bold text-gray-100 mt-2' x-text='rows.length'></div>
-      </div>
-      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
-        <div class='text-xs text-gray-400 uppercase tracking-wide'>Total Issues</div>
-        <div class='text-2xl font-bold text-gray-100 mt-2' x-text='totalIssues'></div>
-      </div>
-      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
-        <div class='text-xs text-gray-400 uppercase tracking-wide'>Paused Repos</div>
-        <div class='text-2xl font-bold text-amber-400 mt-2' x-text='pausedRepos'></div>
-      </div>
-      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
-        <div class='text-xs text-gray-400 uppercase tracking-wide'>Connector Down</div>
-        <div class='text-2xl font-bold text-red-400 mt-2' x-text='connectorDown'></div>
-      </div>
-      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4'>
-        <div class='text-xs text-gray-400 uppercase tracking-wide'>Breaker Open</div>
-        <div class='text-2xl font-bold text-red-400 mt-2' x-text='breakerOpen'></div>
-      </div>
-    </div>
-
-    <!-- Repo Actions (Inline per repo) -->
-    <div class='mb-6'>
-      <h2 class='text-sm font-semibold text-gray-100 mb-4'>Repos</h2>
-      <div class='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
-        {''.join(repo_actions)}
-      </div>
-    </div>
-
-    <!-- Two-column layout: Commands & Logs -->
-    <div class='grid grid-cols-1 lg:grid-cols-3 gap-6'>
-      <!-- Recent Commands (spans 2 cols on desktop) -->
-      <div class='lg:col-span-2 bg-gray-900 border border-gray-800 rounded-lg p-4'>
-        <h2 class='text-sm font-semibold text-gray-100 mb-4'>Recent Commands</h2>
-        <div class='overflow-x-auto'>
-          <table class='w-full text-xs'>
-            <thead>
-              <tr class='border-b border-gray-800'>
-                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Time</th>
-                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Repo</th>
-                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Source</th>
-                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Command</th>
-                <th class='text-left px-3 py-2 text-gray-400 font-medium'>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for='cmd in commands' :key='cmd.created_at + cmd.parsed_command'>
-                <tr class='border-b border-gray-800 hover:bg-gray-800/50'>
-                  <td class='px-3 py-2 text-gray-400' x-text='cmd.created_at'></td>
-                  <td class='px-3 py-2 text-gray-200' x-text='cmd.repo_name'></td>
-                  <td class='px-3 py-2 text-gray-400' x-text='cmd.source'></td>
-                  <td class='px-3 py-2 text-gray-300' x-text='cmd.parsed_command'></td>
-                  <td class='px-3 py-2'>
-                    <span :class='statusClass(cmd.status)' x-text='cmd.status'></span>
-                  </td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-          <div x-show='!commands.length' class='text-center py-6 text-gray-400 text-xs'>
-            No recent commands
+    <header class='mb-6 rounded-[32px] border border-white/10 bg-slate-900/80 px-5 py-5 shadow-glow backdrop-blur-xl'>
+      <div class='flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between'>
+        <div class='space-y-3'>
+          <div class='inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-200'>
+            <span class='inline-block h-2 w-2 rounded-full bg-cyan-300'></span>
+            Live Operations Console
+          </div>
+          <div>
+            <h1 class='font-display text-3xl font-semibold tracking-tight text-white sm:text-4xl'>Flow Healer Activity Console</h1>
+            <p class='mt-2 max-w-3xl text-sm text-slate-300'>
+              Unified commands, attempts, and runtime logs in one place, with drilldown inspectors that make the ugly parts readable.
+            </p>
+          </div>
+        </div>
+        <div class='grid grid-cols-2 gap-3 sm:grid-cols-4'>
+          <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Refresh</div>
+            <div class='mt-2 text-lg font-semibold text-white'>5s</div>
+          </div>
+          <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Activity Rows</div>
+            <div class='mt-2 text-lg font-semibold text-white' x-text='activities.length'></div>
+          </div>
+          <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Log Files</div>
+            <div class='mt-2 text-lg font-semibold text-white' x-text='logFilesLabel'></div>
+          </div>
+          <div class='flex items-center justify-end'>
+            <button
+              @click='refresh()'
+              class='inline-flex items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/15 px-4 py-3 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/20'
+            >
+              Refresh now
+            </button>
           </div>
         </div>
       </div>
+    </header>
 
-      <!-- Log Viewer -->
-      <div class='bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col'>
-        <h2 class='text-sm font-semibold text-gray-100 mb-2'>Recent Logs</h2>
-        <div class='text-xs text-gray-500 mb-3' x-text='logMeta'></div>
-        <div class='flex-1 bg-gray-950 border border-gray-800 rounded p-3 overflow-y-auto font-mono text-xs leading-relaxed text-gray-300 whitespace-pre-wrap'>
-          <template x-if='logs.length'>
-            <div x-text='logs.join("\\n")'></div>
-          </template>
-          <template x-if='!logs.length'>
-            <div class='text-gray-500'>No recent logs found.</div>
-          </template>
+    <section class='mb-6 grid grid-cols-2 gap-4 xl:grid-cols-5'>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Repos</div>
+        <div class='mt-3 text-3xl font-semibold text-white' x-text='rows.length'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Open Issues</div>
+        <div class='mt-3 text-3xl font-semibold text-white' x-text='totalIssues'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Active Attempts</div>
+        <div class='mt-3 text-3xl font-semibold text-amber-300' x-text='activeAttempts'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failures</div>
+        <div class='mt-3 text-3xl font-semibold text-rose-300' x-text='failureCount'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Paused Repos</div>
+        <div class='mt-3 text-3xl font-semibold text-amber-300' x-text='pausedRepos'></div>
+      </div>
+    </section>
+
+    <section class='mb-6'>
+      <div class='mb-3 flex items-center justify-between'>
+        <h2 class='text-sm font-semibold uppercase tracking-[0.24em] text-slate-300'>Repo Controls</h2>
+        <p class='text-xs text-slate-400'>Inline ops stay available, but the main surface now prioritizes investigation.</p>
+      </div>
+      <div class='grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3'>
+        {repo_actions}
+      </div>
+    </section>
+
+    <section class='rounded-[32px] border border-white/10 bg-slate-900/80 shadow-glow backdrop-blur'>
+      <div class='border-b border-white/10 px-5 py-5'>
+        <div class='flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between'>
+          <div>
+            <h2 class='text-xl font-semibold text-white'>Activity Table</h2>
+            <p class='mt-1 text-sm text-slate-400'>Parsed rows across commands, attempts, and runtime logs. Click any row for full context.</p>
+          </div>
+          <div class='flex flex-wrap gap-2'>
+            <template x-for='tab in kindTabs' :key='tab.value'>
+              <button
+                type='button'
+                @click='kindFilter = tab.value'
+                :class='kindFilter === tab.value ? "bg-cyan-400/20 text-cyan-100 border-cyan-300/40" : "bg-white/5 text-slate-300 border-white/10 hover:bg-white/10"'
+                class='rounded-full border px-3 py-2 text-xs font-medium transition'
+                x-text='tab.label'
+              ></button>
+            </template>
+          </div>
+        </div>
+
+        <div class='mt-5 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.4fr)_220px_220px_auto]'>
+          <label class='rounded-2xl border border-white/10 bg-white/5 px-3 py-2'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-500'>Search</div>
+            <input x-model='searchText' type='text' placeholder='Issue id, branch, subsystem, summary...' class='mt-2 w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500'>
+          </label>
+          <label class='rounded-2xl border border-white/10 bg-white/5 px-3 py-2'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-500'>Repo</div>
+            <select x-model='repoFilter' class='mt-2 w-full bg-transparent text-sm text-white outline-none'>
+              <option value=''>All repos</option>
+              {repo_options}
+            </select>
+          </label>
+          <label class='rounded-2xl border border-white/10 bg-white/5 px-3 py-2'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-500'>Signal</div>
+            <select x-model='signalFilter' class='mt-2 w-full bg-transparent text-sm text-white outline-none'>
+              <option value=''>Any signal</option>
+              <option value='failure'>Failure / error</option>
+              <option value='running'>Running / pending</option>
+              <option value='ok'>Healthy / complete</option>
+            </select>
+          </label>
+          <button type='button' @click='clearFilters()' class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-slate-200 transition hover:bg-white/10'>
+            Clear filters
+          </button>
         </div>
       </div>
-    </div>
+
+      <div class='px-5 py-4'>
+        <div class='mb-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400'>
+          <div x-text='activitySummary'></div>
+          <div x-text='lastUpdatedLabel'></div>
+        </div>
+
+        <div class='overflow-hidden rounded-[28px] border border-white/10'>
+          <div class='max-h-[760px] overflow-auto'>
+            <table class='min-w-full divide-y divide-white/10 text-sm'>
+              <thead class='sticky top-0 z-10 bg-slate-950/95 backdrop-blur'>
+                <tr class='text-left text-[11px] uppercase tracking-[0.24em] text-slate-500'>
+                  <th class='px-4 py-3 font-medium'>Time</th>
+                  <th class='px-4 py-3 font-medium'>Type</th>
+                  <th class='px-4 py-3 font-medium'>Repo</th>
+                  <th class='px-4 py-3 font-medium'>Context</th>
+                  <th class='px-4 py-3 font-medium'>Subsystem</th>
+                  <th class='px-4 py-3 font-medium'>Summary</th>
+                  <th class='px-4 py-3 font-medium'>Signal</th>
+                </tr>
+              </thead>
+              <tbody class='divide-y divide-white/5'>
+                <template x-for='item in filteredActivities' :key='item.id'>
+                  <tr
+                    @click='openInspector(item.id)'
+                    :class='selectedActivityId === item.id ? "bg-cyan-400/10" : "bg-slate-950/20 hover:bg-white/5"'
+                    class='cursor-pointer transition'
+                  >
+                    <td class='px-4 py-3 align-top text-xs text-slate-400' x-text='item.timestamp || "Unknown"'></td>
+                    <td class='px-4 py-3 align-top'>
+                      <span class='rounded-full border px-2 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='kindBadgeClass(item.kind)' x-text='item.kind'></span>
+                    </td>
+                    <td class='px-4 py-3 align-top text-slate-200' x-text='item.repo || "—"'></td>
+                    <td class='px-4 py-3 align-top text-xs text-slate-300'>
+                      <div class='flex flex-wrap gap-1.5'>
+                        <template x-if='item.issue_id'><span class='rounded-full bg-white/5 px-2 py-1' x-text='`Issue #${{item.issue_id}}`'></span></template>
+                        <template x-if='item.pr_id'><span class='rounded-full bg-white/5 px-2 py-1' x-text='`PR #${{item.pr_id}}`'></span></template>
+                        <template x-if='item.attempt_id'><span class='rounded-full bg-white/5 px-2 py-1 font-mono' x-text='item.attempt_id'></span></template>
+                      </div>
+                    </td>
+                    <td class='px-4 py-3 align-top text-xs text-slate-400' x-text='item.subsystem || item.source_file || "—"'></td>
+                    <td class='max-w-[520px] px-4 py-3 align-top text-sm text-slate-100'>
+                      <div class='line-clamp-2' x-text='item.summary'></div>
+                    </td>
+                    <td class='px-4 py-3 align-top'>
+                      <span class='rounded-full border px-2 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='signalBadgeClass(item.signal)' x-text='item.signal || "info"'></span>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+
+            <div x-show='!filteredActivities.length' class='px-6 py-16 text-center'>
+              <div class='mx-auto max-w-md rounded-[28px] border border-dashed border-white/10 bg-white/[0.03] px-6 py-8'>
+                <div class='text-sm font-medium text-white'>No activity matched these filters.</div>
+                <p class='mt-2 text-sm text-slate-400'>Try widening the repo or signal filter, or clear search text.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <template x-if='selectedActivity'>
+      <div class='fixed inset-0 z-40'>
+        <div class='absolute inset-0 bg-slate-950/70 backdrop-blur-sm' @click='closeInspector()'></div>
+        <aside class='absolute inset-y-0 right-0 flex w-full max-w-3xl flex-col border-l border-white/10 bg-slate-950/95 shadow-2xl shadow-slate-950/80'>
+          <div class='flex items-start justify-between border-b border-white/10 px-5 py-5'>
+            <div class='pr-4'>
+              <div class='flex flex-wrap items-center gap-2'>
+                <span class='rounded-full border px-2 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='kindBadgeClass(selectedActivity.kind)' x-text='selectedActivity.kind'></span>
+                <span class='rounded-full border px-2 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='signalBadgeClass(selectedActivity.signal)' x-text='selectedActivity.signal || "info"'></span>
+              </div>
+              <h3 class='mt-3 text-xl font-semibold text-white' x-text='selectedActivity.summary'></h3>
+              <p class='mt-2 text-sm text-slate-400' x-text='selectedActivity.timestamp'></p>
+            </div>
+            <button type='button' @click='closeInspector()' class='rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition hover:bg-white/10'>
+              Close
+            </button>
+          </div>
+
+          <div class='flex-1 overflow-y-auto px-5 py-5'>
+            <section class='mb-5 rounded-[28px] border border-white/10 bg-white/[0.03] p-4'>
+              <h4 class='text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400'>Context</h4>
+              <div class='mt-3 flex flex-wrap gap-2 text-xs'>
+                <template x-for='chip in contextChips(selectedActivity)' :key='chip.label + chip.value'>
+                  <div class='rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-slate-200'>
+                    <span class='text-slate-400' x-text='`${{chip.label}}:`'></span>
+                    <span class='ml-1 font-medium' x-text='chip.value'></span>
+                  </div>
+                </template>
+              </div>
+            </section>
+
+            <section class='mb-5 rounded-[28px] border border-white/10 bg-white/[0.03] p-4'>
+              <div class='flex flex-wrap gap-2'>
+                <button type='button' @click='copyText(selectedActivity.raw_text || selectedActivity.summary || "")' class='rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-100 transition hover:bg-white/10'>
+                  Copy full text
+                </button>
+                <template x-if='selectedActivity.issue_id'>
+                  <button type='button' @click='copyText(String(selectedActivity.issue_id))' class='rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-100 transition hover:bg-white/10'>
+                    Copy issue id
+                  </button>
+                </template>
+                <template x-if='selectedActivity.attempt_id'>
+                  <button type='button' @click='copyText(selectedActivity.attempt_id)' class='rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-100 transition hover:bg-white/10'>
+                    Copy attempt id
+                  </button>
+                </template>
+                <template x-for='link in selectedActivity.jump_urls || []' :key='link.url'>
+                  <a :href='link.url' target='_blank' rel='noreferrer' class='rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs font-medium text-cyan-100 transition hover:bg-cyan-400/20' x-text='link.label'></a>
+                </template>
+              </div>
+            </section>
+
+            <section class='mb-5 rounded-[28px] border border-white/10 bg-white/[0.03] p-4'>
+              <h4 class='text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400'>Structured Detail</h4>
+              <dl class='mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2'>
+                <template x-for='entry in detailEntries(selectedActivity)' :key='entry.label'>
+                  <div class='rounded-2xl border border-white/5 bg-slate-900/50 px-3 py-3'>
+                    <dt class='text-[11px] uppercase tracking-[0.2em] text-slate-500' x-text='entry.label'></dt>
+                    <dd class='mt-2 break-words text-sm text-slate-100' x-text='entry.value'></dd>
+                  </div>
+                </template>
+              </dl>
+            </section>
+
+            <section class='rounded-[28px] border border-white/10 bg-slate-950/80 p-4'>
+              <h4 class='text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400'>Raw Text</h4>
+              <pre class='mt-4 max-h-[420px] overflow-auto whitespace-pre-wrap rounded-2xl border border-white/5 bg-black/30 p-4 font-mono text-xs leading-6 text-slate-200' x-text='selectedActivity.raw_text || "No raw text available."'></pre>
+            </section>
+          </div>
+        </aside>
+      </div>
+    </template>
   </main>
 
   <script id='initial-data' type='application/json'>{initial}</script>
@@ -338,11 +464,24 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
     function dashboardApp() {{
       return {{
         rows: [],
-        commands: [],
+        activity: [],
         logs: [],
-        logMeta: '',
         activeActions: '',
         refreshMs: {_REFRESH_MS},
+        kindFilter: 'all',
+        repoFilter: '',
+        signalFilter: '',
+        searchText: '',
+        selectedActivityId: '',
+        selectedActivitySnapshot: null,
+        generatedAt: '',
+        logFiles: [],
+        kindTabs: [
+          {{ value: 'all', label: 'All activity' }},
+          {{ value: 'log', label: 'Logs' }},
+          {{ value: 'command', label: 'Commands' }},
+          {{ value: 'attempt', label: 'Attempts' }}
+        ],
 
         get totalIssues() {{
           return this.rows.reduce((acc, row) => acc + Number(row.issues_total || 0), 0);
@@ -352,26 +491,84 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           return this.rows.filter((row) => !!row.paused).length;
         }},
 
-        get connectorDown() {{
-          return this.rows.filter((row) => !(row.connector || {{}}).available).length;
+        get activeAttempts() {{
+          return this.activity.filter((item) => item.kind === 'attempt' && ['running', 'pending'].includes((item.signal || '').toLowerCase())).length;
         }},
 
-        get breakerOpen() {{
-          return this.rows.filter((row) => !!((row.circuit_breaker || {{}}).open)).length;
+        get failureCount() {{
+          return this.activity.filter((item) => ['failure', 'error'].includes((item.signal || '').toLowerCase())).length;
         }},
 
-        statusClass(status) {{
-          const lower = (status || '').toLowerCase();
-          if (lower === 'ok' || lower === 'success' || lower === 'completed') {{
-            return 'text-emerald-400';
+        get filteredActivities() {{
+          const search = (this.searchText || '').trim().toLowerCase();
+          return this.activity.filter((item) => {{
+            if (this.kindFilter !== 'all' && item.kind !== this.kindFilter) {{
+              return false;
+            }}
+            if (this.repoFilter && item.repo !== this.repoFilter) {{
+              return false;
+            }}
+            if (this.signalFilter && !this.matchesSignalFilter(item, this.signalFilter)) {{
+              return false;
+            }}
+            if (!search) {{
+              return true;
+            }}
+            const haystack = [
+              item.summary,
+              item.raw_text,
+              item.repo,
+              item.subsystem,
+              item.issue_id,
+              item.pr_id,
+              item.attempt_id,
+              item.branch
+            ].join(' ').toLowerCase();
+            return haystack.includes(search);
+          }});
+        }},
+
+        get selectedActivity() {{
+          if (!this.selectedActivityId) {{
+            return null;
           }}
-          if (lower === 'error' || lower === 'failed') {{
-            return 'text-red-400';
-          }}
-          if (lower === 'pending' || lower === 'running') {{
-            return 'text-amber-400';
-          }}
-          return 'text-gray-400';
+          return this.activity.find((item) => item.id === this.selectedActivityId) || this.selectedActivitySnapshot;
+        }},
+
+        get activitySummary() {{
+          return `${{this.filteredActivities.length}} visible rows • ${{this.activity.length}} total in memory`;
+        }},
+
+        get lastUpdatedLabel() {{
+          return this.generatedAt ? `Updated ${{this.generatedAt}}` : 'Waiting for data';
+        }},
+
+        get logFilesLabel() {{
+          return this.logFiles.length ? this.logFiles.length : '0';
+        }},
+
+        kindBadgeClass(kind) {{
+          const lower = String(kind || '').toLowerCase();
+          if (lower === 'log') return 'border-rose-300/30 bg-rose-400/10 text-rose-100';
+          if (lower === 'command') return 'border-cyan-300/30 bg-cyan-400/10 text-cyan-100';
+          if (lower === 'attempt') return 'border-amber-300/30 bg-amber-400/10 text-amber-100';
+          return 'border-white/10 bg-white/5 text-slate-200';
+        }},
+
+        signalBadgeClass(signal) {{
+          const lower = String(signal || '').toLowerCase();
+          if (['failure', 'error'].includes(lower)) return 'border-rose-300/30 bg-rose-400/10 text-rose-100';
+          if (['running', 'pending'].includes(lower)) return 'border-amber-300/30 bg-amber-400/10 text-amber-100';
+          if (['ok', 'completed'].includes(lower)) return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-100';
+          return 'border-white/10 bg-white/5 text-slate-200';
+        }},
+
+        matchesSignalFilter(item, filterValue) {{
+          const signal = String(item.signal || '').toLowerCase();
+          if (filterValue === 'failure') return ['failure', 'error'].includes(signal);
+          if (filterValue === 'running') return ['running', 'pending'].includes(signal);
+          if (filterValue === 'ok') return ['ok', 'completed'].includes(signal);
+          return true;
         }},
 
         async init() {{
@@ -381,8 +578,8 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
               const initial = JSON.parse(script.textContent || '{{}}');
               this.updateFromPayload(initial);
             }}
-          }} catch (e) {{
-            console.error('Failed to parse initial data:', e);
+          }} catch (error) {{
+            console.error('Failed to parse initial payload', error);
           }}
           setInterval(() => this.refresh(), this.refreshMs);
         }},
@@ -394,18 +591,74 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
             const payload = await response.json();
             this.updateFromPayload(payload);
           }} catch (error) {{
-            console.error('Failed to refresh:', error);
+            console.error('Failed to refresh dashboard', error);
           }}
         }},
 
         updateFromPayload(payload) {{
           this.rows = Array.isArray(payload.rows) ? payload.rows : [];
-          this.commands = Array.isArray(payload.commands) ? payload.commands : [];
+          this.activity = Array.isArray(payload.activity) ? payload.activity : [];
           const logsData = payload.logs || {{}};
           this.logs = Array.isArray(logsData.lines) ? logsData.lines : [];
-          const files = Array.isArray(logsData.files) ? logsData.files : [];
-          const generated = payload.generated_at || '';
-          this.logMeta = `Files: ${{files.join(', ') || 'none'}} • Updated: ${{generated}}`;
+          this.logFiles = Array.isArray(logsData.files) ? logsData.files : [];
+          this.generatedAt = payload.generated_at || '';
+          if (this.selectedActivityId) {{
+            const live = this.activity.find((item) => item.id === this.selectedActivityId);
+            if (live) {{
+              this.selectedActivitySnapshot = live;
+            }}
+          }}
+        }},
+
+        openInspector(id) {{
+          this.selectedActivityId = id;
+          this.selectedActivitySnapshot = this.activity.find((item) => item.id === id) || null;
+        }},
+
+        closeInspector() {{
+          this.selectedActivityId = '';
+          this.selectedActivitySnapshot = null;
+        }},
+
+        clearFilters() {{
+          this.kindFilter = 'all';
+          this.repoFilter = '';
+          this.signalFilter = '';
+          this.searchText = '';
+        }},
+
+        async copyText(value) {{
+          const text = String(value || '');
+          if (!text) return;
+          try {{
+            await navigator.clipboard.writeText(text);
+          }} catch (_error) {{
+            console.warn('Clipboard write failed');
+          }}
+        }},
+
+        contextChips(item) {{
+          return [
+            item.repo ? {{ label: 'Repo', value: item.repo }} : null,
+            item.issue_id ? {{ label: 'Issue', value: `#${{item.issue_id}}` }} : null,
+            item.pr_id ? {{ label: 'PR', value: `#${{item.pr_id}}` }} : null,
+            item.attempt_id ? {{ label: 'Attempt', value: item.attempt_id }} : null,
+            item.branch ? {{ label: 'Branch', value: item.branch }} : null,
+            item.source_file ? {{ label: 'File', value: item.source_file }} : null
+          ].filter(Boolean);
+        }},
+
+        detailEntries(item) {{
+          return [
+            {{ label: 'Timestamp', value: item.timestamp || 'Unknown' }},
+            {{ label: 'Type', value: item.kind || 'Unknown' }},
+            {{ label: 'Signal', value: item.signal || 'info' }},
+            {{ label: 'Subsystem', value: item.subsystem || '—' }},
+            {{ label: 'Status', value: item.status || '—' }},
+            {{ label: 'Level', value: item.level || '—' }},
+            {{ label: 'Raw source', value: item.source_file || '—' }},
+            {{ label: 'Message', value: item.message || item.summary || '—' }}
+          ];
         }}
       }};
     }}
@@ -416,10 +669,12 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
 
 def _overview_payload(config: AppConfig, service: FlowHealerService) -> dict[str, Any]:
+    logs = _collect_recent_logs(config, max_lines=160)
     return {
         "rows": service.status_rows(None),
         "commands": service.control_command_rows(None, limit=120),
-        "logs": _collect_recent_logs(config, max_lines=160),
+        "logs": logs,
+        "activity": _collect_activity(config, service, logs=logs, limit=_ACTIVITY_LIMIT),
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -447,6 +702,7 @@ def _collect_recent_logs(config: AppConfig, *, max_lines: int = 120) -> dict[str
     return {
         "files": files,
         "lines": lines,
+        "events": _normalize_log_activity_rows(lines, repo_slug_by_name=_repo_slug_by_name(config)),
     }
 
 
@@ -484,3 +740,279 @@ def _parse_int(raw: str, *, default: int, min_value: int, max_value: int) -> int
     except ValueError:
         return default
     return max(min_value, min(max_value, value))
+
+
+def _collect_activity(
+    config: AppConfig,
+    service: FlowHealerService,
+    *,
+    logs: dict[str, Any] | None = None,
+    limit: int = _ACTIVITY_LIMIT,
+) -> list[dict[str, Any]]:
+    status_rows = service.status_rows(None)
+    command_rows = service.control_command_rows(None, limit=max(120, limit))
+    logs_payload = logs or _collect_recent_logs(config, max_lines=max(160, limit))
+    repo_slug_by_name = _repo_slug_by_name(config)
+    activity: list[dict[str, Any]] = []
+    activity.extend(_normalize_command_activity_rows(command_rows, repo_slug_by_name=repo_slug_by_name))
+    activity.extend(_normalize_attempt_activity_rows(status_rows, repo_slug_by_name=repo_slug_by_name))
+    activity.extend(_normalize_log_activity_rows(logs_payload.get("lines", []), repo_slug_by_name=repo_slug_by_name))
+    activity.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    if len(activity) > limit:
+        activity = activity[:limit]
+    return activity
+
+
+def _repo_slug_by_name(config: AppConfig) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for repo in config.repos:
+        slug = str(repo.healer_repo_slug or "").strip()
+        if slug:
+            mapping[repo.repo_name] = slug
+    return mapping
+
+
+def _render_repo_action_cards(config: AppConfig) -> str:
+    cards: list[str] = []
+    for repo in config.repos:
+        repo_name = escape(repo.repo_name)
+        cards.append(
+            f"""
+            <div class='rounded-[28px] border border-white/10 bg-slate-900/75 p-4 shadow-glow backdrop-blur'>
+              <div class='flex items-start justify-between gap-3'>
+                <div>
+                  <div class='text-xs uppercase tracking-[0.24em] text-slate-500'>Repo</div>
+                  <h3 class='mt-2 text-lg font-semibold text-white'>{repo_name}</h3>
+                </div>
+                <button
+                  type='button'
+                  @click="activeActions === '{repo_name}' ? activeActions = '' : activeActions = '{repo_name}'"
+                  class='rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-white/10'
+                >
+                  Actions
+                </button>
+              </div>
+
+              <div class='mt-4 text-xs text-slate-400'>Fast controls stay local to the repo card. Investigations happen in the activity console below.</div>
+
+              <div x-show="activeActions === '{repo_name}'" class='mt-4 grid grid-cols-2 gap-2 border-t border-white/10 pt-4'>
+                <form method='post' action='/action'>
+                  <input type='hidden' name='repo' value='{repo_name}'>
+                  <button type='submit' name='command' value='status' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Status</button>
+                </form>
+                <form method='post' action='/action'>
+                  <input type='hidden' name='repo' value='{repo_name}'>
+                  <button type='submit' name='command' value='doctor' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Doctor</button>
+                </form>
+                <form method='post' action='/action'>
+                  <input type='hidden' name='repo' value='{repo_name}'>
+                  <button type='submit' name='command' value='pause' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Pause</button>
+                </form>
+                <form method='post' action='/action'>
+                  <input type='hidden' name='repo' value='{repo_name}'>
+                  <button type='submit' name='command' value='resume' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Resume</button>
+                </form>
+                <form method='post' action='/action'>
+                  <input type='hidden' name='repo' value='{repo_name}'>
+                  <button type='submit' name='command' value='once' class='w-full rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-left text-xs text-cyan-100 transition hover:bg-cyan-400/15'>Run once</button>
+                </form>
+                <form method='post' action='/action' class='rounded-2xl border border-white/10 bg-white/5 px-3 py-2'>
+                  <input type='hidden' name='repo' value='{repo_name}'>
+                  <div class='flex items-center justify-between gap-2'>
+                    <button type='submit' name='command' value='scan' class='text-left text-xs text-slate-100'>Scan</button>
+                    <label class='flex items-center gap-1 text-[11px] uppercase tracking-[0.2em] text-slate-400'>
+                      <input type='checkbox' name='dry_run' value='true' class='rounded border-white/10 bg-white/10'>
+                      dry
+                    </label>
+                  </div>
+                </form>
+              </div>
+            </div>
+            """
+        )
+    return "".join(cards)
+
+
+def _normalize_command_activity_rows(
+    command_rows: list[dict[str, Any]],
+    *,
+    repo_slug_by_name: dict[str, str],
+) -> list[dict[str, Any]]:
+    activity: list[dict[str, Any]] = []
+    for row in command_rows:
+        status = str(row.get("status") or "").strip().lower()
+        repo_name = str(row.get("repo_name") or "").strip()
+        signal = "failure" if status in {"failed", "error"} else "running" if status in {"received", "running", "pending"} else "ok"
+        parsed_command = str(row.get("parsed_command") or "").strip()
+        raw_command = str(row.get("raw_command") or "").strip()
+        error_text = str(row.get("error_text") or "").strip()
+        result = row.get("result")
+        summary = parsed_command or raw_command or "Control command"
+        raw_text_parts = [raw_command or summary]
+        if result:
+            raw_text_parts.append(json.dumps(result, indent=2, default=str))
+        if error_text:
+            raw_text_parts.append(error_text)
+        activity.append(
+            {
+                "id": str(row.get("command_id") or f"command:{repo_name}:{parsed_command}"),
+                "kind": "command",
+                "timestamp": str(row.get("created_at") or row.get("updated_at") or ""),
+                "repo": repo_name,
+                "issue_id": "",
+                "pr_id": "",
+                "attempt_id": "",
+                "branch": "",
+                "subsystem": str(row.get("source") or "control"),
+                "summary": _truncate_text(summary, 160),
+                "message": parsed_command or raw_command,
+                "raw_text": "\n\n".join(part for part in raw_text_parts if part),
+                "status": status or "unknown",
+                "signal": signal,
+                "level": status.upper() if status else "",
+                "source_file": "control_commands",
+                "jump_urls": _github_jump_urls(repo_slug_by_name.get(repo_name, ""), issue_id="", pr_id=""),
+            }
+        )
+    return activity
+
+
+def _normalize_attempt_activity_rows(
+    status_rows: list[dict[str, Any]],
+    *,
+    repo_slug_by_name: dict[str, str],
+) -> list[dict[str, Any]]:
+    activity: list[dict[str, Any]] = []
+    for repo_row in status_rows:
+        repo_name = str(repo_row.get("repo") or "").strip()
+        repo_slug = repo_slug_by_name.get(repo_name, "")
+        for attempt in repo_row.get("recent_attempts") or []:
+            state = str(attempt.get("state") or "").strip().lower()
+            signal = "failure" if state in {"failed", "blocked"} else "running" if state in {"running", "claimed", "verify_pending"} else "ok"
+            issue_id = str(attempt.get("issue_id") or "").strip()
+            summary = str(attempt.get("failure_reason") or "").strip() or str(attempt.get("default_action") or "").strip() or f"Attempt {state or 'update'}"
+            raw_text_parts = [summary]
+            proposer_excerpt = str(attempt.get("proposer_output_excerpt") or "").strip()
+            if proposer_excerpt:
+                raw_text_parts.append(proposer_excerpt)
+            test_summary = attempt.get("test_summary") or {}
+            if test_summary:
+                raw_text_parts.append(json.dumps(test_summary, indent=2, default=str))
+            activity.append(
+                {
+                    "id": str(attempt.get("attempt_id") or f"attempt:{repo_name}:{issue_id}:{attempt.get('attempt_no') or ''}"),
+                    "kind": "attempt",
+                    "timestamp": str(attempt.get("finished_at") or attempt.get("started_at") or ""),
+                    "repo": repo_name,
+                    "issue_id": issue_id,
+                    "pr_id": "",
+                    "attempt_id": str(attempt.get("attempt_id") or ""),
+                    "branch": "",
+                    "subsystem": "healer attempt",
+                    "summary": _truncate_text(summary, 180),
+                    "message": str(attempt.get("failure_class") or state or "").strip(),
+                    "raw_text": "\n\n".join(part for part in raw_text_parts if part),
+                    "status": state or "unknown",
+                    "signal": signal,
+                    "level": str(attempt.get("failure_class") or "").upper(),
+                    "source_file": "recent_attempts",
+                    "jump_urls": _github_jump_urls(repo_slug, issue_id=issue_id, pr_id=""),
+                }
+            )
+    return activity
+
+
+def _normalize_log_activity_rows(
+    lines: list[str],
+    *,
+    repo_slug_by_name: dict[str, str],
+) -> list[dict[str, Any]]:
+    activity: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        row = _parse_log_activity_row(line, index=index, repo_slug_by_name=repo_slug_by_name)
+        activity.append(row)
+    return activity
+
+
+def _parse_log_activity_row(
+    line: str,
+    *,
+    index: int,
+    repo_slug_by_name: dict[str, str],
+) -> dict[str, Any]:
+    raw_line = str(line or "")
+    source_file = ""
+    line_text = raw_line
+    file_match = re.match(r"^\[(?P<source_file>[^\]]+)\]\s+(?P<rest>.*)$", raw_line)
+    if file_match:
+        source_file = str(file_match.group("source_file") or "")
+        line_text = str(file_match.group("rest") or "")
+    parsed = _LOG_LINE_RE.match(line_text)
+    timestamp = ""
+    level = ""
+    subsystem = source_file or "runtime log"
+    message = line_text
+    if parsed:
+        timestamp = str(parsed.group("timestamp") or "")
+        level = str(parsed.group("level") or "")
+        subsystem = str(parsed.group("subsystem") or subsystem)
+        message = str(parsed.group("message") or "")
+    issue_id = _extract_match(_ISSUE_ID_RE, message, "issue_id")
+    pr_id = _extract_match(_PR_ID_RE, message, "pr_id")
+    attempt_id = _extract_match(_ATTEMPT_ID_RE, message, "attempt_id")
+    branch = _extract_match(_BRANCH_RE, message, "branch")
+    repo_name = _extract_repo_name(message)
+    signal = "failure" if level in {"ERROR", "CRITICAL"} or "failed" in message.lower() else "running" if level in {"WARNING"} or "running" in message.lower() else "ok"
+    return {
+        "id": f"log:{source_file or 'runtime'}:{timestamp}:{index}",
+        "kind": "log",
+        "timestamp": timestamp,
+        "repo": repo_name,
+        "issue_id": issue_id,
+        "pr_id": pr_id,
+        "attempt_id": attempt_id,
+        "branch": branch,
+        "subsystem": subsystem,
+        "summary": _truncate_text(message, 180),
+        "message": message,
+        "raw_text": raw_line,
+        "status": level.lower() if level else "",
+        "signal": signal,
+        "level": level,
+        "source_file": source_file,
+        "jump_urls": _github_jump_urls(repo_slug_by_name.get(repo_name, ""), issue_id=issue_id, pr_id=pr_id),
+    }
+
+
+def _github_jump_urls(repo_slug: str, *, issue_id: str, pr_id: str) -> list[dict[str, str]]:
+    slug = str(repo_slug or "").strip()
+    if not slug:
+        return []
+    links: list[dict[str, str]] = []
+    if issue_id:
+        links.append({"label": f"Open issue #{issue_id}", "url": f"https://github.com/{slug}/issues/{issue_id}"})
+    if pr_id:
+        links.append({"label": f"Open PR #{pr_id}", "url": f"https://github.com/{slug}/pull/{pr_id}"})
+    return links
+
+
+def _extract_match(pattern: re.Pattern[str], text: str, group: str) -> str:
+    match = pattern.search(str(text or ""))
+    return str(match.group(group) or "").strip() if match else ""
+
+
+def _extract_repo_name(message: str) -> str:
+    repo_match = re.search(r"repo(?:=|\s)(?P<repo>[A-Za-z0-9._\-]+)", str(message or ""))
+    if repo_match:
+        return str(repo_match.group("repo") or "").strip()
+    path_match = re.search(r"/code/(?P<repo>[A-Za-z0-9._\-]+)/?", str(message or ""))
+    if path_match:
+        return str(path_match.group("repo") or "").strip()
+    return ""
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
