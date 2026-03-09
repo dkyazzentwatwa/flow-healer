@@ -27,7 +27,9 @@ def test_add_returns_the_sum_of_two_integers() -> None:
     (
         pytest.param(2.5, 3, id="rejects_float_operand"),
         pytest.param("2", 3, id="rejects_string_operand"),
-        pytest.param(True, 3, id="rejects_bool_operand"),
+        pytest.param(True, 3, id="rejects_bool_left_operand"),
+        pytest.param(3, False, id="rejects_bool_right_operand"),
+        pytest.param(True, False, id="rejects_bool_operands"),
     ),
 )
 def test_add_rejects_non_integer_operands(left: object, right: object) -> None:
