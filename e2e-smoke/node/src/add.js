@@ -84,6 +84,8 @@ function shouldDemoteOverflowPromotedBigInt(sum, hasExplicitBigIntOperand) {
     return false;
   }
 
+  // Once a prior boundary overflow is corrected back into Number-safe range without
+  // an explicit bigint operand, switch back to number semantics.
   return sum >= BigInt(Number.MIN_SAFE_INTEGER) && sum <= BigInt(Number.MAX_SAFE_INTEGER);
 }
 
