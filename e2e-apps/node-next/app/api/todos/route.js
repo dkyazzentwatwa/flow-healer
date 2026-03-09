@@ -1,11 +1,7 @@
-import { normalizeTodoTitle, todoService } from "../../../lib/todo-service.js";
+import { normalizeTodoTitle, todoService, toPublicTodo } from "../../../lib/todo-service.js";
 
 export function listTodos() {
-  return todoService.list().map((todo) => ({
-    id: Number(todo.id),
-    title: todo.title,
-    completed: todo.completed,
-  }));
+  return todoService.list().map(toPublicTodo);
 }
 
 export async function GET() {
@@ -25,7 +21,7 @@ export async function POST(request) {
 
   try {
     const created = todoService.create(normalizeTodoTitle(payload.title));
-    return Response.json({ item: created }, { status: 201 });
+    return Response.json({ item: toPublicTodo(created) }, { status: 201 });
   } catch (error) {
     return Response.json({ error: String(error.message || "create_failed") }, { status: 400 });
   }
