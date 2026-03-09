@@ -8,6 +8,9 @@ const BIGINT_UNSAFE_INTEGER_MESSAGE =
 const VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE =
   'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.';
 
+const STRING_OPERAND_TYPE_ERROR_MESSAGE =
+  'add() does not accept string operands.';
+
 function isUnsafeIntegerNumber(value) {
   return isIntegerNumber(value) && !Number.isSafeInteger(value);
 }
@@ -48,7 +51,19 @@ function throwVariadicOverflowUnsafeIntegerError() {
   throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
 }
 
+function hasStringOperand(a, b) {
+  return typeof a === 'string' || typeof b === 'string';
+}
+
+function throwStringOperandTypeError() {
+  throw new TypeError(STRING_OPERAND_TYPE_ERROR_MESSAGE);
+}
+
 function addPair(a, b) {
+  if (hasStringOperand(a, b)) {
+    throwStringOperandTypeError();
+  }
+
   const canPromoteOperandsToBigInt =
     canConvertToBigInt(a) && canConvertToBigInt(b);
 
