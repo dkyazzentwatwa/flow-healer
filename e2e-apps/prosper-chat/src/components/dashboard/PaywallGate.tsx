@@ -7,12 +7,28 @@ import { useActiveBusiness } from "@/contexts/BusinessContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PLANS, type PlanKey } from "@/lib/plans";
 
-const PLAN_RANK: Record<string, number> = { free: 0, pro: 1, agency: 2 };
+const PLAN_RANK: Record<PlanKey, number> = { free: 0, pro: 1, agency: 2 };
+
+function formatLimit(value: number | null, label: string) {
+  if (value === null) return `Unlimited ${label}`;
+  return `${value} ${label}`;
+}
+
+function getUsageSummary(planKey: PlanKey) {
+  const plan = PLANS[planKey];
+
+  return [
+    formatLimit(plan.limits.chats, "chats / month"),
+    formatLimit(plan.limits.leads, "leads / month"),
+    formatLimit(plan.limits.bots, "bot" + (plan.limits.bots === 1 ? "" : "s")),
+  ].join(", ");
+}
 
 interface PaywallGateProps {
   children: ReactNode;
-  requiredPlan?: "pro" | "agency";
+  requiredPlan?: Exclude<PlanKey, "free">;
 }
 
 const PaywallGate = ({ children, requiredPlan = "pro" }: PaywallGateProps) => {
@@ -33,8 +49,10 @@ const PaywallGate = ({ children, requiredPlan = "pro" }: PaywallGateProps) => {
     },
   });
 
-  const currentPlan = subscription?.plan ?? "free";
-  const hasAccess = (PLAN_RANK[currentPlan] ?? 0) >= (PLAN_RANK[requiredPlan] ?? 1);
+  const currentPlan = (subscription?.plan ?? "free") as PlanKey;
+  const currentPlanConfig = PLANS[currentPlan];
+  const requiredPlanConfig = PLANS[requiredPlan];
+  const hasAccess = PLAN_RANK[currentPlan] >= PLAN_RANK[requiredPlan];
 
   if (hasAccess) return <>{children}</>;
 
@@ -50,13 +68,14 @@ const PaywallGate = ({ children, requiredPlan = "pro" }: PaywallGateProps) => {
               <Lock className="h-6 w-6 text-muted-foreground" />
             </div>
             <Badge variant="secondary" className="uppercase text-xs tracking-wider">
-              {currentPlan} plan
+              {currentPlanConfig.name} plan
             </Badge>
             <h3 className="text-lg font-semibold">
-              Upgrade to {requiredPlan === "agency" ? "Agency" : "Pro"} to unlock Analytics
+              Upgrade to {requiredPlanConfig.name} to unlock Analytics
             </h3>
             <p className="text-sm text-muted-foreground">
-              Get detailed insights into conversations, leads, and customer intents.
+              Your {currentPlanConfig.name} plan includes {getUsageSummary(currentPlan)}.
+              Upgrade to {requiredPlanConfig.name} for {getUsageSummary(requiredPlan)} and analytics insights.
             </p>
             <Button asChild className="w-full mt-2">
               <Link to="/dashboard/billing">Upgrade Now</Link>
