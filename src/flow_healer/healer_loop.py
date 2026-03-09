@@ -80,6 +80,10 @@ _EXECUTION_CONTRACT_FAILURE_CLASSES = {
 _QUARANTINE_NEUTRAL_FAILURE_CLASSES = {"interrupted", "lease_expired"}
 _STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
 _AGENT_BLOCKED_LABEL = "agent:blocked"
+_SQL_VALIDATION_COMMAND_RE = re.compile(
+    r"(?:\./scripts/healer_validate\.sh\s+db\b|scripts/flow_healer_sql_validate\.py\b)",
+    re.IGNORECASE,
+)
 
 _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "tests_failed":          {"backoff_multiplier": 0.5, "feedback_hint": "Previous attempt's tests failed. Focus on the failing test output and adjust the fix."},
@@ -255,6 +259,7 @@ class AutonomousHealerLoop:
         self.reconciler = HealerReconciler(
             store=store,
             workspace_manager=self.workspace_manager,
+            current_worker_id=self.worker_id,
         )
         self.memory = HealerMemoryService(
             store=store,
@@ -319,7 +324,10 @@ class AutonomousHealerLoop:
             await asyncio.sleep(max(5.0, self.settings.healer_poll_interval_seconds))
 
     def _tick_once(self) -> None:
-        self.reconciler.reconcile()
+        self._record_worker_heartbeat()
+        reconcile_summary = self.reconciler.reconcile()
+        self._record_reconcile_summary(reconcile_summary)
+        self._maybe_recycle_helpers()
         if self.store.get_state("healer_paused") == "true":
             logger.info("Autonomous healer paused via system command; housekeeping complete, skipping cycle.")
             return
@@ -391,6 +399,64 @@ class AutonomousHealerLoop:
             self._process_claimed_issue(issue)
             self._reconcile_pr_outcomes()
             processed += 1
+
+    def _record_worker_heartbeat(self) -> None:
+        self.store.set_state("healer_active_worker_id", self.worker_id)
+        self.store.set_state("healer_active_worker_heartbeat_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+
+    def _record_reconcile_summary(self, summary: dict[str, int]) -> None:
+        self.store.set_state("healer_last_reconcile_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+        for key, value in summary.items():
+            self.store.set_state(f"healer_reconcile_{key}", str(max(0, int(value))))
+
+    def _maybe_recycle_helpers(self) -> bool:
+        requested_at = str(self.store.get_state("healer_helper_recycle_requested_at") or "").strip()
+        if not requested_at:
+            return False
+        idle_only = str(self.store.get_state("healer_helper_recycle_idle_only") or "").strip().lower() == "true"
+        active_rows = self.store.list_healer_issues(
+            states=["claimed", "running", "verify_pending"],
+            limit=max(1, int(self.settings.healer_max_concurrent_issues)),
+        )
+        if idle_only and active_rows:
+            active_issue_ids = ", ".join(str(row.get("issue_id") or "") for row in active_rows if row.get("issue_id"))
+            reason = (
+                f"Deferred helper recycle requested at {requested_at}; "
+                f"active issue processing is still in progress ({active_issue_ids or 'busy'})."
+            )
+            self.store.set_state("healer_helper_recycle_status", "deferred_busy")
+            self.store.set_state("healer_helper_recycle_reason", reason[:500])
+            logger.info(reason)
+            return False
+
+        recycled_backends: list[str] = []
+        closed: set[int] = set()
+        for backend, connector in self.connectors_by_backend.items():
+            if id(connector) in closed:
+                continue
+            try:
+                connector.shutdown()
+                recycled_backends.append(backend)
+            except Exception as exc:
+                logger.warning("Failed to recycle %s helper backend for repo %s: %s", backend, self.settings.repo_name, exc)
+            closed.add(id(connector))
+        summary = ", ".join(sorted(set(recycled_backends))) or "none"
+        self.store.set_state("healer_helper_recycle_requested_at", "")
+        self.store.set_state("healer_helper_recycle_idle_only", "")
+        self.store.set_state("healer_helper_recycle_status", "completed")
+        self.store.set_state(
+            "healer_helper_recycle_reason",
+            f"Recycled helper backends: {summary}. They will restart lazily on next use.",
+        )
+        self.store.set_state("healer_helper_recycle_completed_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+        logger.info(
+            "Recycled helper backends for repo %s (idle_only=%s, requested_at=%s, backends=%s)",
+            self.settings.repo_name,
+            idle_only,
+            requested_at,
+            summary,
+        )
+        return True
 
     def _ingest_pr_feedback(self, active_prs: list[dict[str, object]] | None = None) -> None:
         active_prs = active_prs or self._list_active_pr_rows(include_blocked=False)
@@ -1835,6 +1901,23 @@ class AutonomousHealerLoop:
                 language=resolved_execution.language_effective,
                 execution_root=hardened_execution_root,
             )
+            if _is_issue_scoped_sql_validation_task(task_spec):
+                baseline_validation = selected_runner.validate_workspace(
+                    workspace.path,
+                    task_spec=task_spec,
+                    targeted_tests=targeted_tests,
+                )
+                if int(baseline_validation.get("failed_tests", 0) or 0) == 0:
+                    issue_state = "archived"
+                    attempt_state = "archived"
+                    self._archive_already_satisfied_issue(
+                        issue_id=issue.issue_id,
+                        reason=(
+                            "The current baseline already satisfies the issue-scoped SQL assertion(s) "
+                            "and full DB validation, so no code change is needed."
+                        ),
+                    )
+                    return
             learned_context = self.memory.build_prompt_context(
                 issue_text=f"{issue.title}\n{issue.body}",
                 predicted_lock_set=prediction.keys,
@@ -2219,6 +2302,40 @@ class AutonomousHealerLoop:
             state="archived",
             pr_state="closed",
             last_failure_class="unsupported_language",
+            last_failure_reason=reason_text[:500],
+            clear_lease=True,
+        )
+
+    def _archive_already_satisfied_issue(self, *, issue_id: str, reason: str) -> None:
+        reason_text = str(reason or "").strip() or "The issue requirement is already satisfied on the current baseline."
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Issue already satisfied on current baseline",
+                "The issue-scoped validation passed before any edits were needed.",
+                [
+                    "Status: `archived`",
+                    f"Reason: {self._clean_comment_text(reason_text, max_chars=260)}",
+                    "Action: queue a fresh issue only if there is a concrete failing regression to reproduce.",
+                ],
+                outro=(
+                    "This prevents unnecessary churn on issues whose declared validation contract already passes "
+                    "without a code change."
+                ),
+            ),
+        )
+        close_issue_key = self._mutation_key(action="close_issue_already_satisfied", issue_id=issue_id)
+        close_ok = self._run_idempotent_mutation(
+            mutation_key=close_issue_key,
+            action=lambda: self.tracker.close_issue(issue_id=issue_id),
+        )
+        if not close_ok:
+            logger.warning("Already-satisfied issue #%s could not be closed on GitHub.", issue_id)
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="archived",
+            pr_state="closed",
+            last_failure_class="already_satisfied",
             last_failure_reason=reason_text[:500],
             clear_lease=True,
         )
@@ -3393,6 +3510,20 @@ def _ls_remote_branch_sha(*, workspace: Path, branch: str) -> str:
     if not line:
         return ""
     return line[0].split()[0].strip() if line[0].split() else ""
+
+
+def _is_issue_scoped_sql_validation_task(task_spec: HealerTaskSpec | None) -> bool:
+    if task_spec is None:
+        return False
+    assertion_targets = [
+        str(path or "").strip().replace("\\", "/").lstrip("./")
+        for path in task_spec.output_targets
+        if str(path or "").strip().lower().endswith(".sql")
+        and "/assertions/" in str(path or "").strip().replace("\\", "/")
+    ]
+    if not assertion_targets:
+        return False
+    return any(_SQL_VALIDATION_COMMAND_RE.search(str(command or "")) for command in task_spec.validation_commands)
 
 
 def _collect_targeted_tests(

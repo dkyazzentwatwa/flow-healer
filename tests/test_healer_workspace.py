@@ -103,6 +103,25 @@ def test_prepare_workspace_resets_issue_branch_to_latest_base(tmp_path):
     assert not (workspace.path / "feature.txt").exists()
 
 
+def test_prepare_workspace_cleans_ignored_artifacts(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-m", "ignore node modules")
+
+    manager = HealerWorkspaceManager(repo_path=repo)
+    workspace = manager.ensure_workspace(issue_id="9031", title="Fix parser")
+
+    stale_dir = workspace.path / "node_modules" / ".bin"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "vitest").write_text("broken\n", encoding="utf-8")
+
+    manager.prepare_workspace(workspace_path=workspace.path, branch=workspace.branch, base_branch="main")
+
+    assert not (workspace.path / "node_modules").exists()
+
+
 def test_remove_workspace_unlocks_and_retries_when_locked(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     _init_repo(repo)

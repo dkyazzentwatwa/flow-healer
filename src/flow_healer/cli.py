@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="~/.flow-healer/config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("start", "status", "pause", "resume", "scan", "doctor", "serve"):
+    for name in ("start", "status", "pause", "resume", "scan", "doctor", "serve", "recycle-helpers"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--repo")
         if name == "start":
@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "serve":
             cmd.add_argument("--host")
             cmd.add_argument("--port", type=int)
+        if name == "recycle-helpers":
+            cmd.add_argument("--idle-only", action="store_true")
     return parser
 
 
@@ -82,6 +84,10 @@ def main() -> None:
             host=args.host,
             port=args.port,
         )
+        return
+    if args.command == "recycle-helpers":
+        for row in service.request_helper_recycle(args.repo, idle_only=bool(args.idle_only)):
+            print(json.dumps(row, indent=2, default=str))
         return
 
 

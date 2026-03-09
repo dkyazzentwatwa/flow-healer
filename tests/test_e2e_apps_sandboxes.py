@@ -29,6 +29,8 @@ def test_all_demo_app_sandboxes_exist() -> None:
             "src/main.tsx",
             "src/App.tsx",
             "supabase/config.toml",
+            "supabase/assertions/manifest.json",
+            "supabase/assertions/schema_core.sql",
             "supabase/functions/chat-widget/index.ts",
             "supabase/migrations/20260301190615_15638062-0f7f-4cc7-96f5-79466e4cb26b.sql",
             "scripts/healer_validate.sh",

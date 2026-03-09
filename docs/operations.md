@@ -61,6 +61,23 @@ launchctl start local.apple-flow
 launchctl start local.flow-healer
 ~~~
 
+### 5a) Optional nightly helper recycle
+
+To recycle Flow Healer helper subprocesses without taking down the parent daemon, add a separate LaunchAgent:
+
+- `Label`: `local.flow-healer.recycle-helpers`
+- `ProgramArguments`: `/Users/cypher-server/Documents/code/flow-healer/.venv/bin/python -m flow_healer.cli --config /Users/cypher-server/.flow-healer/config.yaml recycle-helpers --idle-only`
+- `WorkingDirectory`: `/Users/cypher-server/Documents/code/flow-healer`
+- `StartCalendarInterval`: `Hour=3`, `Minute=0`
+- `StandardErrorPath`: `~/.flow-healer/recycle-helpers.err`
+- `StandardOutPath`: `~/.flow-healer/recycle-helpers.out`
+
+After shipping code that adds the recycle handler, restart the main `local.flow-healer` agent once during an idle window so the live daemon loads the new logic:
+
+~~~bash
+launchctl kickstart -k gui/$(id -u)/local.flow-healer
+~~~
+
 ### 6) Clear stale running attempts
 
 If an issue remains `running` after daemon restart, requeue expired leases:

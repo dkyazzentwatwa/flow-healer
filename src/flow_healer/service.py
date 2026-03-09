@@ -217,6 +217,7 @@ class FlowHealerService:
                             "last_error_reason": runtime.store.get_state("healer_tracker_last_error_reason") or "",
                             "last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
                         },
+                        "worker": _worker_runtime_state(runtime.store),
                         "resource_audit": HealerReconciler(
                             store=runtime.store,
                             workspace_manager=runtime.loop.workspace_manager,
@@ -272,6 +273,40 @@ class FlowHealerService:
             finally:
                 self._close_runtime(runtime)
         return results
+
+    def request_helper_recycle(self, repo_name: str | None = None, *, idle_only: bool) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for repo in self.config.select_repos(repo_name):
+            runtime = self.build_runtime(repo)
+            try:
+                active_rows = runtime.store.list_healer_issues(
+                    states=["claimed", "running", "verify_pending"],
+                    limit=max(1, int(repo.healer_max_concurrent_issues)),
+                )
+                runtime.store.set_state("healer_helper_recycle_requested_at", _utc_now_string())
+                runtime.store.set_state("healer_helper_recycle_idle_only", "true" if idle_only else "false")
+                runtime.store.set_state("healer_helper_recycle_status", "requested")
+                runtime.store.set_state(
+                    "healer_helper_recycle_reason",
+                    "Queued via CLI maintenance command.",
+                )
+                rows.append(
+                    {
+                        "repo": repo.repo_name,
+                        "requested": True,
+                        "idle_only": idle_only,
+                        "active_issue_count": len(active_rows),
+                        "status": "requested",
+                        "note": (
+                            "The live daemon will recycle helper processes on its next tick when idle."
+                            if idle_only
+                            else "The live daemon will recycle helper processes on its next tick."
+                        ),
+                    }
+                )
+            finally:
+                self._close_runtime(runtime)
+        return rows
 
     def doctor_rows(self, repo_name: str | None = None, *, preflight: bool = False) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
@@ -330,6 +365,7 @@ class FlowHealerService:
                         "tracker_last_error_class": runtime.store.get_state("healer_tracker_last_error_class") or "",
                         "tracker_last_error_reason": runtime.store.get_state("healer_tracker_last_error_reason") or "",
                         "tracker_last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
+                        "worker": _worker_runtime_state(runtime.store),
                         "preflight_gate_mode": repo.healer_test_gate_mode,
                         "preflight_reports": [
                             {
@@ -386,6 +422,12 @@ def _check_command(cmd: list[str]) -> bool:
     return proc.returncode == 0
 
 
+def _utc_now_string() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _safe_state_int(store: SQLiteStore, key: str) -> int:
     raw = str(store.get_state(key) or "").strip()
     try:
@@ -419,6 +461,18 @@ def _app_server_metrics(store: SQLiteStore) -> dict[str, object]:
         "app_server_exec_failover_attempts": exec_failover_attempts,
         "app_server_exec_failover_success": exec_failover_success,
         "zero_diff_rate_by_task_kind": zero_diff_rate_by_task_kind,
+    }
+
+
+def _worker_runtime_state(store: SQLiteStore) -> dict[str, object]:
+    return {
+        "active_worker_id": store.get_state("healer_active_worker_id") or "",
+        "last_heartbeat_at": store.get_state("healer_active_worker_heartbeat_at") or "",
+        "last_reconcile_at": store.get_state("healer_last_reconcile_at") or "",
+        "recovered_stale_active_issues": _safe_state_int(store, "healer_reconcile_recovered_stale_active_issues"),
+        "recovered_leases": _safe_state_int(store, "healer_reconcile_recovered_leases"),
+        "interrupted_inactive_attempts": _safe_state_int(store, "healer_reconcile_interrupted_inactive_attempts"),
+        "interrupted_superseded_attempts": _safe_state_int(store, "healer_reconcile_interrupted_superseded_attempts"),
     }
 
 

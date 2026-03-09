@@ -30,18 +30,27 @@ _ACTIVE_WORKSPACE_STATES = [
 
 
 class HealerReconciler:
-    def __init__(self, *, store: SQLiteStore, workspace_manager: HealerWorkspaceManager) -> None:
+    def __init__(
+        self,
+        *,
+        store: SQLiteStore,
+        workspace_manager: HealerWorkspaceManager,
+        current_worker_id: str = "",
+    ) -> None:
         self.store = store
         self.workspace_manager = workspace_manager
+        self.current_worker_id = str(current_worker_id or "").strip()
 
     def reconcile(self) -> dict[str, int]:
         recovered_leases = self.store.requeue_expired_healer_issue_leases()
+        recovered_stale_active_issues = self._recover_stale_active_issues()
         interrupted_inactive_attempts = self.store.interrupt_inactive_healer_attempts()
         interrupted_superseded_attempts = self.store.interrupt_superseded_healer_attempts()
         cleaned_inactive_workspaces = self._cleanup_inactive_issue_workspaces()
         expired_locks = self.store.cleanup_expired_healer_locks()
         removed_orphans = self._sweep_orphan_workspaces()
         return {
+            "recovered_stale_active_issues": recovered_stale_active_issues,
             "interrupted_inactive_attempts": interrupted_inactive_attempts,
             "interrupted_superseded_attempts": interrupted_superseded_attempts,
             "cleaned_inactive_workspaces": cleaned_inactive_workspaces,
@@ -124,6 +133,42 @@ class HealerReconciler:
             )
             cleaned += 1
         return cleaned
+
+    def _recover_stale_active_issues(self) -> int:
+        if not self.current_worker_id:
+            return 0
+        active_rows = self.store.list_healer_issue_workspace_refs(
+            states=["claimed", "running", "verify_pending"],
+            limit=2000,
+        )
+        recovered = 0
+        for row in active_rows:
+            issue_id = str(row.get("issue_id") or "").strip()
+            lease_owner = str(row.get("lease_owner") or "").strip()
+            if not issue_id or not lease_owner or lease_owner == self.current_worker_id:
+                continue
+            updated = self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="queued",
+                workspace_path="",
+                branch_name="",
+                clear_lease=True,
+                last_failure_class="interrupted",
+                last_failure_reason=(
+                    f"Recovered stale active issue from previous worker session '{lease_owner}'."
+                ),
+                expected_lease_owner=lease_owner,
+            )
+            if not updated:
+                continue
+            self.store.release_healer_locks_for_owner(issue_id=issue_id, lease_owner=lease_owner)
+            recovered += 1
+            logger.warning(
+                "Recovered stale active issue #%s from previous worker session %s",
+                issue_id,
+                lease_owner,
+            )
+        return recovered
 
     def _sweep_orphan_workspaces(self) -> int:
         if not self.workspace_manager.worktrees_root.exists():

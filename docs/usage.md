@@ -10,6 +10,7 @@
 | `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo. |
 | `flow-healer resume [--repo NAME]` | Resume autonomous processing. |
 | `flow-healer scan [--repo NAME] [--dry-run]` | Scan repo for breakage patterns and optionally create issues. |
+| `flow-healer recycle-helpers [--repo NAME] [--idle-only]` | Ask the live daemon to recycle connector/helper subprocesses on the next tick. |
 
 ## The Healing Lifecycle
 
@@ -69,6 +70,29 @@ Optional labels:
 ~~~bash
 EXTRA_LABELS="kind:scan,priority:medium" scripts/create_sandbox_issues.sh 20 "Sandbox stress task"
 ~~~
+
+You can also select a dedicated issue family. For SQL-only `prosper-chat` migration or RLS work, use the DB family so generated issues stay under `supabase/**` and prefer the `db` validation lane:
+
+~~~bash
+ISSUE_FAMILY=prosper-chat-db scripts/create_sandbox_issues.sh 12 "Prosper chat DB task"
+~~~
+
+Those generated issues use:
+
+- `Required code outputs:` under `e2e-apps/prosper-chat/supabase/migrations/` and `e2e-apps/prosper-chat/supabase/assertions/`
+- `Validation: cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db`
+- DB-focused labels such as `area:db`, `kind:migration`, and `kind:rls`
+
+For pure `prosper-chat` edge-function work under `supabase/functions/**`, prefer:
+
+~~~bash
+Validation:
+- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh backend
+~~~
+
+Reserve `full` for issues that intentionally span frontend/app files plus backend files.
+
+For `prosper-chat` Supabase-related validation, the harness now starts local Supabase on demand and auto-stops it on exit only if the harness started it. If the stack was already running before validation began, it is left alone. Set `FLOW_HEALER_AUTO_STOP_SUPABASE=0` to keep the stack running even when the harness started it.
 
 ## Scanner Behavior
 
@@ -156,3 +180,13 @@ scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml my-project
 scripts/verify_runtime.sh ~/.flow-healer/config.yaml my-project
 FLOW_HEALER_RESTART=1 scripts/remediate_runtime.sh ~/.flow-healer/config.yaml my-project
 ~~~
+
+## Helper Recycling
+
+Use helper recycling when the daemon should stay up but long-lived connector/helper subprocesses need a clean restart.
+
+~~~bash
+flow-healer recycle-helpers --repo my-project --idle-only
+~~~
+
+`--idle-only` tells the live daemon to defer the recycle while an issue is actively in `claimed`, `running`, or `verify_pending`. The parent service stays up; only helper backends are shut down and restarted lazily on the next use.

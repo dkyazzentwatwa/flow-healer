@@ -1,0 +1,24 @@
+{
+  "checks": [
+    {
+      "name": "schema_core",
+      "path": "supabase/assertions/schema_core.sql"
+    },
+    {
+      "name": "policies_core",
+      "path": "supabase/assertions/policies_core.sql"
+    },
+    {
+      "name": "anon_access_controls",
+      "path": "supabase/assertions/anon_access_controls.sql"
+    },
+    {
+      "name": "subscription_visibility",
+      "path": "supabase/assertions/subscription_visibility.sql"
+    },
+    {
+      "name": "appointment_overlap",
+      "path": "supabase/assertions/appointment_overlap.sql"
+    }
+  ]
+}

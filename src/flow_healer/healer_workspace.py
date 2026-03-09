@@ -122,6 +122,18 @@ class HealerWorkspaceManager:
         )
         if clean.returncode != 0:
             raise RuntimeError(f"Failed to clean workspace {ws}: {(clean.stderr or clean.stdout).strip()}")
+        ignored_clean = subprocess.run(
+            ["git", "-C", str(ws), "clean", "-fdX"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if ignored_clean.returncode != 0:
+            raise RuntimeError(
+                f"Failed to clean ignored artifacts in workspace {ws}: "
+                f"{(ignored_clean.stderr or ignored_clean.stdout).strip()}"
+            )
 
     def remove_workspace(self, *, workspace_path: Path) -> None:
         ws = Path(workspace_path).resolve()

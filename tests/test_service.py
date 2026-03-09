@@ -7,6 +7,7 @@ from flow_healer.healer_preflight import preflight_cache_key
 from flow_healer.healer_tracker import GitHubHealerTracker
 from flow_healer.local_healer_tracker import LocalHealerTracker
 from flow_healer.service import FlowHealerService
+from flow_healer.store import SQLiteStore
 
 
 def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
@@ -85,6 +86,11 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "last_error_class" in tracker
     assert "last_error_reason" in tracker
     assert "last_error_at" in tracker
+    worker = rows[0]["worker"]
+    assert "active_worker_id" in worker
+    assert "last_heartbeat_at" in worker
+    assert "last_reconcile_at" in worker
+    assert "recovered_stale_active_issues" in worker
     recent_attempt = rows[0]["recent_attempts"][0]
     assert recent_attempt["diagnosis"] == "product_bug"
     assert recent_attempt["failure_family"] == "product"
@@ -185,6 +191,9 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "tracker_last_error_class" in rows[0]
     assert "tracker_last_error_reason" in rows[0]
     assert "tracker_last_error_at" in rows[0]
+    assert "worker" in rows[0]
+    assert "active_worker_id" in rows[0]["worker"]
+    assert "recovered_stale_active_issues" in rows[0]["worker"]
     assert rows[0]["skill_contracts_ok"] is True
     assert rows[0]["skill_contracts"]["recommended_skill_by_diagnosis"]["connector_or_patch_generation"] == (
         "flow-healer-connector-debug"
@@ -316,3 +325,28 @@ def test_status_rows_include_new_app_server_recovery_metric_keys(tmp_path) -> No
     assert metrics["app_server_forced_serialized_recovery_success"] == 0
     assert metrics["app_server_exec_failover_attempts"] == 0
     assert metrics["app_server_exec_failover_success"] == 0
+
+
+def test_request_helper_recycle_sets_live_daemon_request_state(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[repo],
+        )
+    )
+
+    rows = service.request_helper_recycle("demo", idle_only=True)
+
+    assert rows[0]["repo"] == "demo"
+    assert rows[0]["requested"] is True
+    assert rows[0]["idle_only"] is True
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    assert store.get_state("healer_helper_recycle_requested_at")
+    assert store.get_state("healer_helper_recycle_idle_only") == "true"
+    assert store.get_state("healer_helper_recycle_status") == "requested"
+    store.close()

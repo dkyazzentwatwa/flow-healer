@@ -128,11 +128,164 @@ def test_run_test_gates_prefers_explicit_validation_commands(monkeypatch, tmp_pa
         local_gate_policy="auto",
     )
 
-    assert calls == [("explicit", ("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full",))]
+    assert calls == [("explicit", ("./scripts/healer_validate.sh full",))]
     assert summary["local_full_status"] == "passed"
     assert summary["docker_full_status"] == "skipped"
     assert summary["docker_full_reason"] == "explicit_validation_commands"
-    assert summary["validation_commands"] == ["cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full"]
+    assert summary["validation_commands"] == ["./scripts/healer_validate.sh full"]
+
+
+def test_run_test_gates_expands_sql_issue_validation_to_targeted_then_full(monkeypatch, tmp_path):
+    calls: list[tuple[str, object]] = []
+
+    def fake_explicit(workspace: Path, commands: tuple[str, ...], timeout_seconds: int):
+        calls.append(("explicit", commands))
+        return {"exit_code": 0, "output_tail": "explicit ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_explicit_validation_commands", fake_explicit)
+
+    task_spec = HealerTaskSpec(
+        task_kind="edit",
+        output_mode="patch",
+        output_targets=(
+            "e2e-apps/prosper-chat/supabase/migrations/20260301215513_a3f9ada2-3230-44bf-a5ef-90d631a3961c.sql",
+            "e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql",
+        ),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+        language="node",
+        execution_root="e2e-apps/prosper-chat",
+        validation_commands=("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db",),
+    )
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="e2e-apps/prosper-chat",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("node"),
+        ),
+        validation_commands=task_spec.validation_commands,
+        task_spec=task_spec,
+        local_gate_policy="auto",
+    )
+
+    assert len(calls) == 1
+    commands = calls[0][1]
+    assert commands == (
+        (
+            "unset FLOW_HEALER_SQL_SKIP_RESET; export FLOW_HEALER_SQL_CHECK_PATHS_JSON="
+            "'[\"e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql\"]'; "
+            "./scripts/healer_validate.sh db"
+        ),
+        (
+            "unset FLOW_HEALER_SQL_CHECK_PATHS_JSON; export FLOW_HEALER_SQL_SKIP_RESET=1; "
+            "./scripts/healer_validate.sh db"
+        ),
+    )
+    assert summary["validation_commands"] == list(commands)
+
+
+def test_run_test_gates_rewrites_nested_execution_root_cd_to_local_command(monkeypatch, tmp_path):
+    calls: list[tuple[str, object]] = []
+
+    def fake_explicit(workspace: Path, commands: tuple[str, ...], timeout_seconds: int):
+        calls.append(("explicit", commands))
+        return {"exit_code": 0, "output_tail": "explicit ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_explicit_validation_commands", fake_explicit)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="e2e-apps/prosper-chat",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("node"),
+        ),
+        validation_commands=("cd e2e-apps/prosper-chat/supabase && supabase db reset --local --yes",),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("explicit", ("cd supabase && supabase db reset --local --yes",))]
+    assert summary["validation_commands"] == ["cd supabase && supabase db reset --local --yes"]
+
+
+def test_run_test_gates_rejects_validation_commands_outside_execution_root(tmp_path):
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="e2e-apps/prosper-chat",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("node"),
+        ),
+        validation_commands=("cd e2e-smoke/node && npm test",),
+        local_gate_policy="auto",
+    )
+
+    assert summary["failed_tests"] == 1
+    assert summary["failure_class"] == "validation_command_invalid"
+    assert "outside the execution root" in summary["failure_reason"]
+    assert summary["local_full_status"] == "failed"
+    assert summary["local_full_reason"] == "validation_command_invalid"
+
+
+def test_run_test_gates_keeps_full_sql_validation_when_issue_has_no_assertion_target(monkeypatch, tmp_path):
+    calls: list[tuple[str, object]] = []
+
+    def fake_explicit(workspace: Path, commands: tuple[str, ...], timeout_seconds: int):
+        calls.append(("explicit", commands))
+        return {"exit_code": 0, "output_tail": "explicit ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_explicit_validation_commands", fake_explicit)
+
+    task_spec = HealerTaskSpec(
+        task_kind="edit",
+        output_mode="patch",
+        output_targets=("db/migrations/202603090001_add_index.sql",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+        language="node",
+        validation_commands=("python3 scripts/flow_healer_sql_validate.py --project-dir .",),
+    )
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("node"),
+        ),
+        validation_commands=task_spec.validation_commands,
+        task_spec=task_spec,
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("explicit", ("python3 scripts/flow_healer_sql_validate.py --project-dir .",))]
+    assert summary["validation_commands"] == ["python3 scripts/flow_healer_sql_validate.py --project-dir ."]
 
 
 def test_run_tests_locally_normalizes_pytest_command(monkeypatch, tmp_path):
@@ -667,6 +820,49 @@ def test_stage_workspace_changes_excludes_swift_build_artifacts(tmp_path):
 
     assert changed is True
     assert _changed_paths(workspace) == ["Sources/TodoCLI/main.swift"]
+
+
+def test_stage_workspace_changes_excludes_supabase_runtime_temp_artifacts(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    target = workspace / "e2e-apps" / "prosper-chat" / "supabase" / "migrations" / "0001_init.sql"
+    target.parent.mkdir(parents=True)
+    target.write_text("-- old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    target.write_text("-- new\n", encoding="utf-8")
+    temp_file = workspace / "e2e-apps" / "prosper-chat" / "supabase" / ".temp" / "cli-latest"
+    temp_file.parent.mkdir(parents=True)
+    temp_file.write_text("generated\n", encoding="utf-8")
+    branch_file = workspace / "e2e-apps" / "prosper-chat" / "supabase" / ".branches" / "_current_branch"
+    branch_file.parent.mkdir(parents=True)
+    branch_file.write_text("generated\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Prosper chat DB migration fix",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/prosper-chat/supabase/migrations/0001_init.sql\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db\n"
+        ),
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/prosper-chat/supabase/migrations/0001_init.sql",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="node",
+            execution_root="e2e-apps/prosper-chat",
+        ),
+        language="node",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["e2e-apps/prosper-chat/supabase/migrations/0001_init.sql"]
 
 
 def test_run_test_gates_marks_local_skipped_when_toolchain_unavailable(monkeypatch):

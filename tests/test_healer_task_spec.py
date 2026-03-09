@@ -401,6 +401,44 @@ def test_compile_task_spec_infers_prosper_chat_execution_root_for_e2e_apps() -> 
     assert spec.validation_commands == ("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh full",)
 
 
+def test_compile_task_spec_infers_prosper_chat_db_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Prosper chat DB policy task",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/prosper-chat/supabase/migrations/20260302101500_7f8d9de2-cb2b-4f35-b3b8-6d8a8f519e7e.sql\n"
+            "- e2e-apps/prosper-chat/supabase/assertions/anon_access_controls.sql\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.execution_root == "e2e-apps/prosper-chat"
+    assert spec.output_targets == (
+        "e2e-apps/prosper-chat/supabase/migrations/20260302101500_7f8d9de2-cb2b-4f35-b3b8-6d8a8f519e7e.sql",
+        "e2e-apps/prosper-chat/supabase/assertions/anon_access_controls.sql",
+    )
+    assert spec.validation_commands == ("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db",)
+
+
+def test_compile_task_spec_infers_prosper_chat_backend_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Prosper chat backend task",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/prosper-chat/supabase/functions/check-subscription/index.ts\n"
+            "- e2e-apps/prosper-chat/supabase/functions/_shared/billing.ts\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh backend\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.execution_root == "e2e-apps/prosper-chat"
+    assert spec.validation_commands == ("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh backend",)
+
+
 def test_compile_task_spec_prefers_rooted_swift_paths_over_bare_filename_mentions() -> None:
     spec = compile_task_spec(
         issue_title="Swift todo sandbox: package target wiring for CLI test coverage",
@@ -442,3 +480,7 @@ def test_is_code_path_recognizes_swift_scala_kotlin() -> None:
     assert _is_code_path("Sources/App.swift") is True
     assert _is_code_path("src/main/scala/Main.scala") is True
     assert _is_code_path("src/main/kotlin/Main.kt") is True
+
+
+def test_is_code_path_recognizes_sql() -> None:
+    assert _is_code_path("supabase/migrations/20260302101500_schema.sql") is True

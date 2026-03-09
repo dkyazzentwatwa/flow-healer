@@ -23,8 +23,13 @@ doctor_file="$(mktemp)"
 status_file="$(mktemp)"
 trap 'rm -f "${doctor_file}" "${status_file}"' EXIT
 
-run_cli doctor "${repo_args[@]}" >"${doctor_file}"
-run_cli status "${repo_args[@]}" >"${status_file}"
+if (( ${#repo_args[@]} )); then
+  run_cli doctor "${repo_args[@]}" >"${doctor_file}"
+  run_cli status "${repo_args[@]}" >"${status_file}"
+else
+  run_cli doctor >"${doctor_file}"
+  run_cli status >"${status_file}"
+fi
 
 if command -v launchctl >/dev/null 2>&1; then
   uid="$(id -u)"

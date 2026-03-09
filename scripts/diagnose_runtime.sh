@@ -67,14 +67,22 @@ fi
 
 section "Doctor"
 if [[ -f "${CONFIG_PATH}" ]]; then
-  run_cli doctor "${repo_args[@]}" || true
+  if (( ${#repo_args[@]} )); then
+    run_cli doctor "${repo_args[@]}" || true
+  else
+    run_cli doctor || true
+  fi
 else
   printf "Config file not found at %s\n" "${CONFIG_PATH}"
 fi
 
 section "Status"
 if [[ -f "${CONFIG_PATH}" ]]; then
-  run_cli status "${repo_args[@]}" || true
+  if (( ${#repo_args[@]} )); then
+    run_cli status "${repo_args[@]}" || true
+  else
+    run_cli status || true
+  fi
 else
   printf "Config file not found at %s\n" "${CONFIG_PATH}"
 fi

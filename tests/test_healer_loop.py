@@ -831,6 +831,60 @@ def test_process_claimed_issue_archives_and_closes_unsupported_language_after_wo
     assert "migrate" in comment_body.lower()
 
 
+def test_process_claimed_issue_archives_already_satisfied_sql_validation_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    body = (
+        "Required code outputs:\n"
+        "- e2e-apps/prosper-chat/supabase/migrations/20260301190615_15638062-0f7f-4cc7-96f5-79466e4cb26b.sql\n"
+        "- e2e-apps/prosper-chat/supabase/assertions/schema_core.sql\n\n"
+        "Validation:\n"
+        "- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db\n"
+    )
+    store.upsert_healer_issue(
+        issue_id="50433",
+        repo="owner/repo",
+        title="Prosper chat DB task 12: Prosper chat DB: base schema helper functions remain complete",
+        body=body,
+        author="alice",
+        labels=["healer:ready", "area:db"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    workspace = tmp_path / "workspaces" / "issue-50433"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50433", "state": "open", "labels": ["healer:ready", "area:db"]}
+    loop.tracker.close_issue.return_value = True
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50433")
+    loop.runner.resolve_execution.side_effect = [
+        SimpleNamespace(language_effective="node", language_detected="node", execution_root="e2e-apps/prosper-chat"),
+        SimpleNamespace(language_effective="node", language_detected="node", execution_root="e2e-apps/prosper-chat"),
+    ]
+    loop.runner.validate_workspace.return_value = {"failed_tests": 0}
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50433")
+    attempts = store.list_healer_attempts(issue_id="50433")
+    assert issue is not None
+    assert issue["state"] == "archived"
+    assert issue["pr_state"] == "closed"
+    assert issue["attempt_count"] == 1
+    assert issue["last_failure_class"] == "already_satisfied"
+    assert "already satisfies" in str(issue["last_failure_reason"] or "")
+    assert len(attempts) == 1
+    assert attempts[0]["state"] == "archived"
+    loop.tracker.close_issue.assert_called_once_with(issue_id="50433")
+    loop.runner.validate_workspace.assert_called_once()
+    loop.runner.run_attempt.assert_not_called()
+    comment_body = loop.tracker.add_issue_comment.call_args.kwargs["body"]
+    assert "already satisfied" in comment_body.lower()
+    assert "archived" in comment_body.lower()
+
+
 def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -2541,6 +2595,69 @@ def test_tick_once_runs_reconciler_before_paused_return(tmp_path):
     loop.reconciler.reconcile.assert_called_once()
     loop._maybe_run_scan.assert_not_called()
     loop.dispatcher.claim_next_issue.assert_not_called()
+
+
+def test_tick_once_defers_helper_recycle_when_idle_only_and_active_issue_exists(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.set_state("healer_helper_recycle_requested_at", "2026-03-08 19:00:00")
+    store.set_state("healer_helper_recycle_idle_only", "true")
+    store.upsert_healer_issue(
+        issue_id="123",
+        repo="owner/repo",
+        title="Busy issue",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.set_healer_issue_state(issue_id="123", state="running")
+
+    connector = MagicMock()
+    connector.ensure_started.return_value = None
+    connector.health_snapshot.return_value = {
+        "available": True,
+        "configured_command": "codex",
+        "resolved_command": "/opt/homebrew/bin/codex",
+        "availability_reason": "",
+        "last_health_error": "",
+    }
+    loop = _make_loop(store, connector=connector)
+    loop.dispatcher.claim_next_issue.return_value = None
+
+    loop._tick_once()
+
+    connector.shutdown.assert_not_called()
+    assert store.get_state("healer_helper_recycle_requested_at") == "2026-03-08 19:00:00"
+    assert store.get_state("healer_helper_recycle_status") == "deferred_busy"
+
+
+def test_tick_once_recycles_helpers_when_request_is_pending_and_loop_is_idle(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.set_state("healer_helper_recycle_requested_at", "2026-03-08 19:00:00")
+    store.set_state("healer_helper_recycle_idle_only", "true")
+
+    connector = MagicMock()
+    connector.ensure_started.return_value = None
+    connector.health_snapshot.return_value = {
+        "available": True,
+        "configured_command": "codex",
+        "resolved_command": "/opt/homebrew/bin/codex",
+        "availability_reason": "",
+        "last_health_error": "",
+    }
+    loop = _make_loop(store, connector=connector)
+    loop.connectors_by_backend = {"exec": connector}
+    loop.dispatcher.claim_next_issue.return_value = None
+
+    loop._tick_once()
+
+    connector.shutdown.assert_called_once()
+    assert store.get_state("healer_helper_recycle_requested_at") == ""
+    assert store.get_state("healer_helper_recycle_idle_only") == ""
+    assert store.get_state("healer_helper_recycle_status") == "completed"
+    assert "restart lazily on next use" in str(store.get_state("healer_helper_recycle_reason") or "")
 
 
 def test_tick_once_stops_claiming_when_connector_becomes_unavailable_mid_cycle(tmp_path):

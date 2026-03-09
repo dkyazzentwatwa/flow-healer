@@ -88,6 +88,12 @@ class PathFenceMaterializationResult:
     rejection_reason: str = ""
 
 
+@dataclass(slots=True, frozen=True)
+class NormalizedValidationCommandsResult:
+    normalized_commands: tuple[str, ...]
+    rejection_reason: str = ""
+
+
 class HealerRunner:
     def __init__(
         self,
@@ -1042,10 +1048,15 @@ class HealerRunner:
         _annotate_app_server_recovery_status(workspace_status)
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
+            test_failure_class = str(test_summary.get("failure_class") or "").strip()
+            test_failure_reason = str(test_summary.get("failure_reason") or "").strip()
             return HealerRunResult(
                 success=False,
-                failure_class="tests_failed",
-                failure_reason=f"Failed tests={failed_tests} exceeds cap={max_failed_tests_allowed}",
+                failure_class=test_failure_class or "tests_failed",
+                failure_reason=(
+                    test_failure_reason
+                    or f"Failed tests={failed_tests} exceeds cap={max_failed_tests_allowed}"
+                ),
                 failure_fingerprint="",
                 proposer_output=proposer_output,
                 diff_paths=diff_paths,
@@ -1132,6 +1143,7 @@ class HealerRunner:
             mode=mode or self.test_gate_mode,
             resolved_execution=resolved_execution,
             validation_commands=task_spec.validation_commands,
+            task_spec=task_spec,
             local_gate_policy=local_gate_policy or self.local_gate_policy,
         )
 
@@ -1270,6 +1282,7 @@ def _run_test_gates(
     mode: str,
     resolved_execution: ResolvedExecution | None = None,
     validation_commands: tuple[str, ...] = (),
+    task_spec: HealerTaskSpec | None = None,
     local_gate_policy: str = "auto",
 ) -> dict[str, Any]:
     if resolved_execution is None:
@@ -1295,7 +1308,29 @@ def _run_test_gates(
     runners = _gate_runners_for_mode(mode)
     strategy = resolved_execution.strategy
     execution_path = resolved_execution.execution_path
-    explicit_validation_commands = tuple(str(command).strip() for command in validation_commands if str(command).strip())
+    normalized_validation_result = _normalize_explicit_validation_commands(
+        commands=tuple(str(command).strip() for command in validation_commands if str(command).strip()),
+        execution_root=resolved_execution.execution_root,
+    )
+    if normalized_validation_result.rejection_reason:
+        summary["failed_tests"] = 1
+        summary["validation_commands"] = list(normalized_validation_result.normalized_commands)
+        summary["failure_class"] = "validation_command_invalid"
+        summary["failure_reason"] = normalized_validation_result.rejection_reason
+        summary["local_full_exit_code"] = 1
+        summary["local_full_output_tail"] = normalized_validation_result.rejection_reason
+        summary["local_full_status"] = "failed"
+        summary["local_full_reason"] = "validation_command_invalid"
+        summary["local_full_runner"] = "explicit_validation_commands"
+        summary["docker_full_exit_code"] = 0
+        summary["docker_full_output_tail"] = "(docker full gate skipped: invalid explicit validation command)"
+        summary["docker_full_status"] = "skipped"
+        summary["docker_full_reason"] = "validation_command_invalid"
+        return summary
+    explicit_validation_commands = _expand_issue_scoped_validation_commands(
+        commands=normalized_validation_result.normalized_commands,
+        task_spec=task_spec,
+    )
 
     if targeted_tests:
         targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
@@ -1489,6 +1524,167 @@ def _normalize_validation_command(command: str) -> tuple[str, ...]:
         return tuple(shlex.split(candidate))
     except ValueError:
         return ()
+
+
+def _normalize_explicit_validation_commands(
+    *,
+    commands: tuple[str, ...],
+    execution_root: str,
+) -> NormalizedValidationCommandsResult:
+    if not commands:
+        return NormalizedValidationCommandsResult(())
+    normalized_commands: list[str] = []
+    for command in commands:
+        normalized_command, rejection_reason = _normalize_explicit_validation_command(
+            command=command,
+            execution_root=execution_root,
+        )
+        if rejection_reason:
+            return NormalizedValidationCommandsResult(tuple(normalized_commands), rejection_reason)
+        normalized_commands.append(normalized_command)
+    return NormalizedValidationCommandsResult(tuple(normalized_commands))
+
+
+def _normalize_explicit_validation_command(*, command: str, execution_root: str) -> tuple[str, str]:
+    candidate = str(command or "").strip()
+    if not candidate:
+        return "", ""
+    match = re.match(
+        r"^(?P<prefix>.*?)(?:^|;\s*)cd\s+(?P<cd>[^\n&|;]+?)\s*&&\s*(?P<rest>.+)$",
+        candidate,
+        re.IGNORECASE,
+    )
+    if not match:
+        return candidate, ""
+
+    raw_prefix = str(match.group("prefix") or "").strip()
+    raw_cd = str(match.group("cd") or "").strip().strip("'\"")
+    rest = str(match.group("rest") or "").strip()
+    normalized_execution_root = _normalize_repo_relative_shell_path(execution_root)
+    normalized_cd = _normalize_repo_relative_shell_path(raw_cd)
+
+    if not rest:
+        return candidate, ""
+    if not normalized_cd or normalized_cd == ".":
+        return _join_shell_prefix_and_command(raw_prefix, rest), ""
+    if not normalized_execution_root:
+        return candidate, ""
+    if normalized_cd == normalized_execution_root:
+        return _join_shell_prefix_and_command(raw_prefix, rest), ""
+    if normalized_cd.startswith(f"{normalized_execution_root}/"):
+        relative_cd = normalized_cd[len(normalized_execution_root) + 1 :]
+        rewritten = f"cd {shlex.quote(relative_cd)} && {rest}"
+        return _join_shell_prefix_and_command(raw_prefix, rewritten), ""
+    return (
+        candidate,
+        (
+            f"Explicit validation command '{candidate}' resolves outside the execution root "
+            f"'{normalized_execution_root}'."
+        ),
+    )
+
+
+def _normalize_repo_relative_shell_path(path: str) -> str:
+    normalized = str(path or "").strip().strip("'\"").replace("\\", "/")
+    if not normalized:
+        return ""
+    if normalized == ".":
+        return "."
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.rstrip("/")
+    if not normalized:
+        return "."
+    return PurePosixPath(normalized).as_posix()
+
+
+def _join_shell_prefix_and_command(prefix: str, command: str) -> str:
+    cleaned_command = str(command or "").strip()
+    cleaned_prefix = str(prefix or "").strip().rstrip(";")
+    if not cleaned_prefix:
+        return cleaned_command
+    if not cleaned_command:
+        return cleaned_prefix
+    return f"{cleaned_prefix}; {cleaned_command}"
+
+
+def _expand_issue_scoped_validation_commands(
+    *,
+    commands: tuple[str, ...],
+    task_spec: HealerTaskSpec | None,
+) -> tuple[str, ...]:
+    if not commands:
+        return ()
+    assertion_targets = _issue_scoped_sql_assertion_targets(task_spec)
+    if not assertion_targets:
+        return commands
+    expanded: list[str] = []
+    serialized_targets = json.dumps(assertion_targets)
+    for command in commands:
+        normalized = _normalize_validation_command(command)
+        if _is_sql_validation_command(normalized):
+            expanded.append(
+                _wrap_shell_command_with_env(
+                    command,
+                    set_vars={"FLOW_HEALER_SQL_CHECK_PATHS_JSON": serialized_targets},
+                    unset_vars=("FLOW_HEALER_SQL_SKIP_RESET",),
+                )
+            )
+            expanded.append(
+                _wrap_shell_command_with_env(
+                    command,
+                    set_vars={"FLOW_HEALER_SQL_SKIP_RESET": "1"},
+                    unset_vars=("FLOW_HEALER_SQL_CHECK_PATHS_JSON",),
+                )
+            )
+            continue
+        expanded.append(command)
+    return tuple(expanded)
+
+
+def _issue_scoped_sql_assertion_targets(task_spec: HealerTaskSpec | None) -> tuple[str, ...]:
+    if task_spec is None:
+        return ()
+    targets: list[str] = []
+    for raw_target in task_spec.output_targets:
+        normalized = str(raw_target or "").strip().replace("\\", "/").lstrip("./")
+        if not normalized or Path(normalized).suffix.lower() != ".sql":
+            continue
+        parts = PurePosixPath(normalized).parts
+        if "assertions" not in parts:
+            continue
+        targets.append(normalized)
+    return tuple(sorted(set(targets)))
+
+
+def _is_sql_validation_command(command: tuple[str, ...]) -> bool:
+    if not command:
+        return False
+    head = command[0]
+    if head.endswith("scripts/healer_validate.sh"):
+        return len(command) >= 2 and command[1] == "db"
+    if head in {"python", "python3"} and len(command) >= 2:
+        return command[1].endswith("scripts/flow_healer_sql_validate.py")
+    return head.endswith("scripts/flow_healer_sql_validate.py")
+
+
+def _wrap_shell_command_with_env(
+    command: str,
+    *,
+    set_vars: dict[str, str],
+    unset_vars: tuple[str, ...] = (),
+) -> str:
+    statements: list[str] = []
+    for name in unset_vars:
+        cleaned = str(name or "").strip()
+        if cleaned:
+            statements.append(f"unset {cleaned}")
+    for name, value in set_vars.items():
+        cleaned = str(name or "").strip()
+        if cleaned:
+            statements.append(f"export {cleaned}={shlex.quote(str(value))}")
+    statements.append(command)
+    return "; ".join(statements)
 
 
 def _compose_targeted_command(strategy: LanguageStrategy, targeted_tests: list[str]) -> list[str]:
@@ -2385,6 +2581,8 @@ _GENERIC_ARTIFACT_DIRS = {
     "pip-wheel-metadata",
     ".build",
     ".swiftpm",
+    ".temp",
+    ".branches",
 }
 _GENERIC_ARTIFACT_FILES = {
     ".ds_store",
