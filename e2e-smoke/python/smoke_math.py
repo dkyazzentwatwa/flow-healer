@@ -24,7 +24,8 @@ def _fits_python_integer_string_limit(value: str) -> bool:
         return True
 
     unsigned_value = value.removeprefix("+").removeprefix("-")
-    return len(unsigned_value) <= limit
+    unsigned_digits = unsigned_value.replace("_", "")
+    return len(unsigned_digits) <= limit
 
 
 def _normalize_string_operand(value: str) -> int:
@@ -84,6 +85,15 @@ def _is_supported_integer_string(value: str) -> bool:
     unsigned_value = value.removeprefix("+").removeprefix("-")
     if not unsigned_value:
         return False
+
+    if "_" in unsigned_value:
+        if (
+            unsigned_value.startswith("_")
+            or unsigned_value.endswith("_")
+            or "_" * 2 in unsigned_value
+        ):
+            return False
+        return all(part.isdecimal() for part in unsigned_value.split("_"))
 
     return all(character.isdecimal() for character in unsigned_value)
 
