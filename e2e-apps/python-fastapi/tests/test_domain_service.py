@@ -30,6 +30,29 @@ def test_repository_list_services_returns_detached_records() -> None:
     assert fresh_services[0].metadata == {"region": "us-west-2"}
 
 
+def test_repository_add_returns_detached_record() -> None:
+    repository = ServiceRepository()
+
+    created = repository.add(
+        ServiceRecord(
+            service_id="svc-1",
+            name="billing",
+            tags=["core"],
+            metadata={"region": "us-west-2"},
+        )
+    )
+    created.name = "mutated"
+    created.tags.append("mutated")
+    created.metadata["region"] = "eu-central-1"
+
+    stored_services = repository.list_services()
+
+    assert len(stored_services) == 1
+    assert stored_services[0].name == "billing"
+    assert stored_services[0].tags == ["core"]
+    assert stored_services[0].metadata == {"region": "us-west-2"}
+
+
 def test_domain_service_list_services_returns_detached_records() -> None:
     repository = ServiceRepository(
         [
