@@ -51,25 +51,56 @@ function throwVariadicOverflowUnsafeIntegerError() {
   throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
 }
 
-function isStringOperand(value) {
-  if (typeof value === 'string') {
-    return true;
-  }
-
-  if (value === null || typeof value !== 'object') {
-    return false;
-  }
-
-  try {
-    String.prototype.valueOf.call(value);
-    return true;
-  } catch {
-    return false;
-  }
+function isPrimitive(value) {
+  return value === null || (typeof value !== 'object' && typeof value !== 'function');
 }
 
-function hasStringOperand(a, b) {
-  return isStringOperand(a) || isStringOperand(b);
+function ordinaryToPrimitive(value) {
+  for (const methodName of ['valueOf', 'toString']) {
+    const method = value[methodName];
+
+    if (typeof method !== 'function') {
+      continue;
+    }
+
+    const result = method.call(value);
+
+    if (isPrimitive(result)) {
+      return result;
+    }
+  }
+
+  throw new TypeError('Cannot convert object to primitive value');
+}
+
+function toAddPrimitive(value) {
+  if (isPrimitive(value)) {
+    return value;
+  }
+
+  const customToPrimitive = value[Symbol.toPrimitive];
+
+  if (typeof customToPrimitive === 'function') {
+    const result = customToPrimitive.call(value, 'default');
+
+    if (!isPrimitive(result)) {
+      throw new TypeError('Cannot convert object to primitive value');
+    }
+
+    return result;
+  }
+
+  return ordinaryToPrimitive(value);
+}
+
+function normalizeOperand(value) {
+  const primitive = toAddPrimitive(value);
+
+  if (typeof primitive === 'string') {
+    throwStringOperandTypeError();
+  }
+
+  return primitive;
 }
 
 function throwStringOperandTypeError() {
@@ -77,10 +108,6 @@ function throwStringOperandTypeError() {
 }
 
 function addPair(a, b) {
-  if (hasStringOperand(a, b)) {
-    throwStringOperandTypeError();
-  }
-
   const canPromoteOperandsToBigInt =
     canConvertToBigInt(a) && canConvertToBigInt(b);
 
@@ -181,7 +208,7 @@ export function add(...operands) {
     return getInitialAccumulatedSum(operands);
   }
 
-  return sumOperands(operands);
+  return sumOperands(operands.map(normalizeOperand));
 }
 
 export default add;
