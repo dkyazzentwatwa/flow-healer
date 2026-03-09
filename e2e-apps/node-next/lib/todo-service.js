@@ -1,7 +1,7 @@
 export class TodoService {
-  constructor() {
-    this._todos = [];
-    this._nextId = 1;
+  constructor(todos = []) {
+    this._todos = todos.map((todo) => ({ ...todo }));
+    this._nextId = getNextTodoId(this._todos);
   }
 
   list() {
@@ -10,6 +10,7 @@ export class TodoService {
 
   create(title) {
     const normalized = normalizeTodoTitle(title);
+    this._nextId = Math.max(this._nextId, getNextTodoId(this._todos));
     const todo = {
       id: String(this._nextId++),
       title: normalized,
@@ -48,6 +49,19 @@ export function normalizeTodoTitle(title) {
   }
 
   return normalized;
+}
+
+function getNextTodoId(todos) {
+  let maxId = 0;
+
+  for (const todo of todos) {
+    const numericId = Number.parseInt(String(todo?.id ?? ""), 10);
+    if (Number.isSafeInteger(numericId) && numericId > maxId) {
+      maxId = numericId;
+    }
+  }
+
+  return maxId + 1;
 }
 
 export function toPublicTodo(todo) {
