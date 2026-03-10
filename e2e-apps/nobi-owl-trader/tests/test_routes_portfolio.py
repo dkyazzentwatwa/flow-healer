@@ -14,6 +14,7 @@ from api.main import app
 from api.database import init_db, close_db
 from api.models import Trade, TradeRepository
 from api.portfolio import PortfolioEngine
+from api.routes import portfolio as portfolio_routes
 import time
 import tempfile
 import os
@@ -46,7 +47,7 @@ def setup_test_data():
     engine = PortfolioEngine()
 
     # Create some test trades
-    timestamp = int(time.time())
+    timestamp = int(time.time() * 1000)
 
     # Buy trade
     buy_trade = Trade(
@@ -86,25 +87,34 @@ def test_get_portfolio_summary(client):
 
     assert response.status_code == 200
     data = response.json()
+    portfolio = data["portfolio"]
 
     # Check response structure
-    assert "total_value" in data
-    assert "cash_balance" in data
-    assert "unrealized_pnl" in data
-    assert "realized_pnl_today" in data
+    assert "totalValue" in portfolio
+    assert "cash" in portfolio
+    assert "unrealizedPnl" in portfolio
+    assert "realizedPnl" in portfolio
+    assert "timestamp" in portfolio
 
     # Check data types
-    assert isinstance(data["total_value"], (int, float))
-    assert isinstance(data["cash_balance"], (int, float))
-    assert isinstance(data["unrealized_pnl"], (int, float))
-    assert isinstance(data["realized_pnl_today"], (int, float))
+    assert isinstance(portfolio["totalValue"], (int, float))
+    assert isinstance(portfolio["cash"], (int, float))
+    assert isinstance(portfolio["unrealizedPnl"], (int, float))
+    assert isinstance(portfolio["realizedPnl"], (int, float))
+    assert isinstance(portfolio["timestamp"], int)
 
     # With no data, cash balance should be 10000.0
-    assert data["cash_balance"] == 10000.0
+    assert portfolio["cash"] == 10000.0
 
 
-def test_get_portfolio_summary_with_data(client, setup_test_data):
+def test_get_portfolio_summary_with_data(client, setup_test_data, monkeypatch):
     """Test portfolio summary with actual trades"""
+    monkeypatch.setattr(
+        portfolio_routes,
+        "_get_current_prices",
+        lambda symbols: {"BTC/USDT": 50000.0},
+    )
+
     response = client.get("/api/portfolio/summary")
 
     assert response.status_code == 200
@@ -112,7 +122,7 @@ def test_get_portfolio_summary_with_data(client, setup_test_data):
 
     # Should have realized P&L from the sell trade
     # Profit = (52000 - 50000) * 0.5 - fees = 1000 - 15 = 985
-    assert data["realized_pnl_today"] > 0
+    assert data["portfolio"]["realizedPnl"] > 0
 
 
 def test_get_positions_empty(client):
@@ -127,8 +137,14 @@ def test_get_positions_empty(client):
     assert len(data["positions"]) == 0
 
 
-def test_get_positions_with_data(client, setup_test_data):
+def test_get_positions_with_data(client, setup_test_data, monkeypatch):
     """Test GET /api/portfolio/positions with open positions"""
+    monkeypatch.setattr(
+        portfolio_routes,
+        "_get_current_prices",
+        lambda symbols: {"BTC/USDT": 50000.0},
+    )
+
     response = client.get("/api/portfolio/positions")
 
     assert response.status_code == 200
@@ -141,12 +157,14 @@ def test_get_positions_with_data(client, setup_test_data):
     # Check first position
     position = positions[0]
     assert position["symbol"] == "BTC/USDT"
-    assert position["amount"] == 0.5  # Remaining after partial sell
-    assert position["avg_entry_price"] == 50000.0
-    assert position["side"] == "long"
-    assert "current_price" in position
-    assert "unrealized_pnl" in position
-    assert "opened_at" in position
+    assert position["quantity"] == 0.5  # Remaining after partial sell
+    assert position["avgCost"] == 50000.0
+    assert position["currentPrice"] == 50000.0
+    assert position["marketValue"] == 25000.0
+    assert position["unrealizedPnl"] == 0.0
+    assert position["totalPnl"] == 0.0
+    assert position["firstBuyDate"] == setup_test_data["buy_trade"].timestamp
+    assert position["lastBuyDate"] == setup_test_data["sell_trade"].timestamp
 
 
 def test_get_performance_metrics_empty(client):
@@ -265,11 +283,69 @@ def test_portfolio_history_structure(client):
     history = data["history"]
     if len(history) > 0:
         snapshot = history[0]
-        assert "date" in snapshot
-        assert "total_value" in snapshot
-        assert "cash_balance" in snapshot
-        assert "unrealized_pnl" in snapshot
-        assert "realized_pnl_today" in snapshot
+        assert "timestamp" in snapshot
+        assert "totalValue" in snapshot
+        assert "cash" in snapshot
+        assert "positionsValue" in snapshot
+        assert "totalPnl" in snapshot
+        assert "totalPnlPercent" in snapshot
+        assert "dayChange" in snapshot
+        assert "dayChangePercent" in snapshot
+
+
+def test_portfolio_summary_sanitizes_non_finite_values(client, monkeypatch):
+    """Summary endpoint should normalize non-finite numeric values."""
+
+    class StubPaperAccount:
+        base_currency = "USDT"
+
+        def get_balances(self):
+            return {"free": {"USDT": float("nan")}}
+
+    class StubPosition:
+        symbol = "BTC/USDT"
+        total_cost = float("inf")
+
+    class StubPositionRepository:
+        def get_all(self):
+            return [StubPosition()]
+
+    class StubPortfolioEngine:
+        def calculate_unrealized_pnl(self, current_prices):
+            return {"BTC/USDT": float("nan")}
+
+        def calculate_realized_pnl(self):
+            return float("inf")
+
+        def calculate_realized_pnl_from_trades(self, trades):
+            return float("-inf")
+
+        def get_portfolio_value(self, cash_balance, current_prices):
+            return float("nan")
+
+    monkeypatch.setattr(portfolio_routes, "PaperAccount", StubPaperAccount)
+    monkeypatch.setattr(portfolio_routes, "PositionRepository", StubPositionRepository)
+    monkeypatch.setattr(portfolio_routes, "PortfolioEngine", StubPortfolioEngine)
+    monkeypatch.setattr(
+        portfolio_routes,
+        "_get_current_prices",
+        lambda symbols: {"BTC/USDT": float("nan")},
+    )
+
+    response = client.get("/api/portfolio/summary")
+
+    assert response.status_code == 200
+    portfolio = response.json()["portfolio"]
+    assert portfolio["totalValue"] == 0.0
+    assert portfolio["cash"] == 0.0
+    assert portfolio["positions"] == 1
+    assert portfolio["totalCost"] == 0.0
+    assert portfolio["unrealizedPnl"] == 0.0
+    assert portfolio["unrealizedPnlPercent"] == 0.0
+    assert portfolio["realizedPnl"] == 0.0
+    assert portfolio["totalPnl"] == 0.0
+    assert portfolio["totalPnlPercent"] == 0.0
+    assert isinstance(portfolio["timestamp"], int)
 
 
 def test_all_endpoints_return_json(client):

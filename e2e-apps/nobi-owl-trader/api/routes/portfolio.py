@@ -12,8 +12,9 @@ from fastapi import APIRouter, Query, HTTPException
 from typing import Dict, Any, List, Optional
 import os
 import time
+import math
 import ccxt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from api.portfolio import PortfolioEngine, PositionRepository
 from api.paper import PaperAccount
 from api.models import TradeRepository
@@ -22,6 +23,20 @@ from api.database import get_db_connection
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
 _exchange = None
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
+
+
+def _safe_round(value: Any, digits: int = 2, default: float = 0.0) -> float:
+    return round(_safe_float(value, default=default), digits)
 
 
 def _get_exchange():
@@ -41,7 +56,9 @@ def _get_current_prices(symbols: List[str]) -> Dict[str, float]:
             ticker = exchange.fetch_ticker(symbol)
             last = ticker.get("last")
             if last is not None:
-                prices[symbol] = float(last)
+                price = _safe_float(last, default=None)
+                if price is not None:
+                    prices[symbol] = price
         except Exception:
             continue
     return prices
@@ -65,7 +82,7 @@ async def get_portfolio_summary() -> Dict[str, Any]:
 
         balances = paper_account.get_balances()
         base_currency = paper_account.base_currency
-        cash_balance = balances["free"].get(base_currency, 0.0)
+        cash_balance = _safe_float(balances.get("free", {}).get(base_currency, 0.0))
 
         positions = position_repo.get_all()
         symbols = [p.symbol for p in positions]
@@ -73,15 +90,19 @@ async def get_portfolio_summary() -> Dict[str, Any]:
 
         # Calculate unrealized P&L
         unrealized_pnl_dict = engine.calculate_unrealized_pnl(current_prices)
-        total_unrealized_pnl = sum(unrealized_pnl_dict.values())
+        total_unrealized_pnl = sum(
+            _safe_float(value) for value in unrealized_pnl_dict.values()
+        )
 
         # Calculate realized P&L today
-        now = datetime.utcnow()
-        start_of_today = datetime(now.year, now.month, now.day)
+        now = datetime.now(UTC)
+        start_of_today = datetime(now.year, now.month, now.day, tzinfo=UTC)
         start_of_today_ts = int(start_of_today.timestamp() * 1000)
         
         repo = TradeRepository()
-        today_trades = repo.get_between(start_of_today_ts, int(datetime.utcnow().timestamp() * 1000))
+        today_trades = repo.get_between(
+            start_of_today_ts, int(datetime.now(UTC).timestamp() * 1000)
+        )
 
         # Calculate total realized P&L from closed trades (all-time)
         total_realized_pnl = engine.calculate_realized_pnl()
@@ -89,8 +110,8 @@ async def get_portfolio_summary() -> Dict[str, Any]:
         # Calculate realized P&L today using FIFO on today's trades
         realized_pnl_today = engine.calculate_realized_pnl_from_trades(today_trades)
 
-        total_value = engine.get_portfolio_value(cash_balance, current_prices)
-        total_cost = sum(p.total_cost for p in positions)
+        total_value = _safe_float(engine.get_portfolio_value(cash_balance, current_prices))
+        total_cost = sum(_safe_float(p.total_cost) for p in positions)
         total_pnl = total_realized_pnl + total_unrealized_pnl
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
         unrealized_pnl_pct = (
@@ -99,15 +120,15 @@ async def get_portfolio_summary() -> Dict[str, Any]:
 
         return {
             "portfolio": {
-                "totalValue": round(total_value, 2),
-                "cash": round(cash_balance, 2),
+                "totalValue": _safe_round(total_value, 2),
+                "cash": _safe_round(cash_balance, 2),
                 "positions": len(positions),
-                "totalCost": round(total_cost, 2),
-                "unrealizedPnl": round(total_unrealized_pnl, 2),
-                "unrealizedPnlPercent": round(unrealized_pnl_pct, 2),
-                "realizedPnl": round(realized_pnl_today, 2),
-                "totalPnl": round(total_pnl, 2),
-                "totalPnlPercent": round(total_pnl_pct, 2),
+                "totalCost": _safe_round(total_cost, 2),
+                "unrealizedPnl": _safe_round(total_unrealized_pnl, 2),
+                "unrealizedPnlPercent": _safe_round(unrealized_pnl_pct, 2),
+                "realizedPnl": _safe_round(realized_pnl_today, 2),
+                "totalPnl": _safe_round(total_pnl, 2),
+                "totalPnlPercent": _safe_round(total_pnl_pct, 2),
                 "timestamp": int(time.time() * 1000),
             }
         }
@@ -141,28 +162,33 @@ async def get_positions() -> Dict[str, List[Dict[str, Any]]]:
 
         result: List[Dict[str, Any]] = []
         for position in positions:
-            current_price = current_prices.get(
-                position.symbol, position.avg_entry_price
+            current_price = _safe_float(
+                current_prices.get(position.symbol, position.avg_entry_price),
+                default=_safe_float(position.avg_entry_price),
             )
             if position.side == "short":
-                unrealized_pnl = (position.avg_entry_price - current_price) * position.amount
+                unrealized_pnl = (
+                    _safe_float(position.avg_entry_price) - current_price
+                ) * _safe_float(position.amount)
             else:
-                unrealized_pnl = unrealized_pnl_dict.get(position.symbol, 0.0)
-            cost_basis = position.avg_entry_price * position.amount
+                unrealized_pnl = _safe_float(
+                    unrealized_pnl_dict.get(position.symbol, 0.0)
+                )
+            cost_basis = _safe_float(position.avg_entry_price) * _safe_float(position.amount)
             unrealized_pnl_pct = (unrealized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
-            market_value = current_price * position.amount
+            market_value = current_price * _safe_float(position.amount)
 
             result.append({
                 "symbol": position.symbol,
-                "quantity": position.amount,
-                "avgCost": round(position.avg_entry_price, 6),
-                "currentPrice": round(current_price, 6),
-                "marketValue": round(market_value, 2),
-                "unrealizedPnl": round(unrealized_pnl, 2),
-                "unrealizedPnlPercent": round(unrealized_pnl_pct, 2),
+                "quantity": _safe_float(position.amount),
+                "avgCost": _safe_round(position.avg_entry_price, 6),
+                "currentPrice": _safe_round(current_price, 6),
+                "marketValue": _safe_round(market_value, 2),
+                "unrealizedPnl": _safe_round(unrealized_pnl, 2),
+                "unrealizedPnlPercent": _safe_round(unrealized_pnl_pct, 2),
                 "realizedPnl": 0.0,
-                "totalPnl": round(unrealized_pnl, 2),
-                "totalPnlPercent": round(unrealized_pnl_pct, 2),
+                "totalPnl": _safe_round(unrealized_pnl, 2),
+                "totalPnlPercent": _safe_round(unrealized_pnl_pct, 2),
                 "firstBuyDate": position.opened_at,
                 "lastBuyDate": position.last_updated,
                 "trades": [],
@@ -250,7 +276,7 @@ async def get_portfolio_history(
         cursor = conn.cursor()
 
         # Calculate cutoff date
-        cutoff_date = (datetime.utcnow() - timedelta(days=days)).strftime('%Y-%m-%d')
+        cutoff_date = (datetime.now(UTC) - timedelta(days=days)).strftime('%Y-%m-%d')
 
         # Query portfolio snapshots
         rows = cursor.execute("""
@@ -274,19 +300,21 @@ async def get_portfolio_history(
             dt = _parse_date(row["date"])
             if dt is None:
                 continue
-            total_value = float(row["total_value"])
-            cash_balance = float(row["cash_balance"])
+            total_value = _safe_float(row["total_value"])
+            cash_balance = _safe_float(row["cash_balance"])
             positions_value = total_value - cash_balance
-            total_pnl = float(row["unrealized_pnl"]) + float(row["realized_pnl_today"])
+            total_pnl = _safe_float(row["unrealized_pnl"]) + _safe_float(
+                row["realized_pnl_today"]
+            )
             total_pnl_pct = (total_pnl / total_value * 100) if total_value > 0 else 0.0
 
             snapshots.append({
                 "timestamp": int(dt.timestamp()),
-                "totalValue": round(total_value, 2),
-                "cash": round(cash_balance, 2),
-                "positionsValue": round(positions_value, 2),
-                "totalPnl": round(total_pnl, 2),
-                "totalPnlPercent": round(total_pnl_pct, 2),
+                "totalValue": _safe_round(total_value, 2),
+                "cash": _safe_round(cash_balance, 2),
+                "positionsValue": _safe_round(positions_value, 2),
+                "totalPnl": _safe_round(total_pnl, 2),
+                "totalPnlPercent": _safe_round(total_pnl_pct, 2),
             })
 
         if not snapshots:
@@ -305,8 +333,8 @@ async def get_portfolio_history(
 
             history.append({
                 **snap,
-                "dayChange": round(day_change, 2),
-                "dayChangePercent": round(day_change_pct, 2),
+                "dayChange": _safe_round(day_change, 2),
+                "dayChangePercent": _safe_round(day_change_pct, 2),
             })
             prev = snap
 
