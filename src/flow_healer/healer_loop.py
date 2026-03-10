@@ -84,6 +84,18 @@ _EXECUTION_CONTRACT_FAILURE_CLASSES = {
 _QUARANTINE_NEUTRAL_FAILURE_CLASSES = {"interrupted", "lease_expired"}
 _STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
 _AGENT_BLOCKED_LABEL = "agent:blocked"
+_OUTCOME_LABEL_DONE_CODE = "healer:done-code"
+_OUTCOME_LABEL_DONE_ARTIFACT = "healer:done-artifact"
+_OUTCOME_LABEL_NEEDS_CLARIFICATION = "healer:needs-clarification"
+_OUTCOME_LABEL_BLOCKED_ENVIRONMENT = "healer:blocked-environment"
+_OUTCOME_LABEL_RETRY_EXHAUSTED = "healer:retry-exhausted"
+_OUTCOME_LABELS = (
+    _OUTCOME_LABEL_DONE_CODE,
+    _OUTCOME_LABEL_DONE_ARTIFACT,
+    _OUTCOME_LABEL_NEEDS_CLARIFICATION,
+    _OUTCOME_LABEL_BLOCKED_ENVIRONMENT,
+    _OUTCOME_LABEL_RETRY_EXHAUSTED,
+)
 _SQL_VALIDATION_COMMAND_RE = re.compile(
     r"(?:\./scripts/healer_validate\.sh\s+db\b|scripts/flow_healer_sql_validate\.py\b)",
     re.IGNORECASE,
@@ -2315,6 +2327,7 @@ class AutonomousHealerLoop:
                 state="needs_clarification",
                 clear_lease=True,
             )
+            self._sync_outcome_issue_label(issue_id=issue.issue_id, label=_OUTCOME_LABEL_NEEDS_CLARIFICATION)
             return
         prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
         scope_key = self._issue_scope_key(task_spec=task_spec, prediction=prediction)
@@ -2325,6 +2338,7 @@ class AutonomousHealerLoop:
             scope_key=scope_key,
             dedupe_key=dedupe_key,
         )
+        self._sync_outcome_issue_label(issue_id=issue.issue_id, label="")
         proposed_attempt_no = max(1, int(row.get("attempt_count") or 0) + 1)
         lease_stop = threading.Event()
         lease_lost = threading.Event()
@@ -2849,6 +2863,7 @@ class AutonomousHealerLoop:
                     state="pr_pending_approval",
                     clear_lease=True,
                 )
+                self._sync_outcome_issue_label(issue_id=issue.issue_id, label="")
                 self._post_issue_status(
                     issue_id=issue.issue_id,
                     body=self._format_flow_status_comment(
@@ -2940,6 +2955,12 @@ class AutonomousHealerLoop:
                 pr_state=pr.state,
                 clear_lease=True,
             )
+            outcome_label = (
+                _OUTCOME_LABEL_DONE_ARTIFACT
+                if task_spec.validation_profile == "artifact_only"
+                else _OUTCOME_LABEL_DONE_CODE
+            )
+            self._sync_outcome_issue_label(issue_id=issue.issue_id, label=outcome_label)
             self._post_issue_status(
                 issue_id=issue.issue_id,
                 body=self._format_flow_status_comment(
@@ -3220,6 +3241,21 @@ class AutonomousHealerLoop:
         except Exception as exc:
             logger.warning("Failed to sync blocked label for issue #%s: %s", issue_id, exc)
 
+    def _sync_outcome_issue_label(self, *, issue_id: str, label: str = "") -> None:
+        if not issue_id or not bool(getattr(self.tracker, "enabled", False)):
+            return
+        target = self._normalize_label(label)
+        if target not in _OUTCOME_LABELS:
+            target = ""
+        for candidate in _OUTCOME_LABELS:
+            try:
+                if candidate == target:
+                    self.tracker.add_issue_label(issue_id=issue_id, label=candidate)
+                else:
+                    self.tracker.remove_issue_label(issue_id=issue_id, label=candidate)
+            except Exception as exc:
+                logger.warning("Failed to sync outcome label %s for issue #%s: %s", candidate, issue_id, exc)
+
     def _maybe_reconcile_blocked_issue_labels(self) -> None:
         interval = max(
             60.0,
@@ -3314,6 +3350,7 @@ class AutonomousHealerLoop:
                 clear_lease=True,
             )
             self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
+            self._sync_outcome_issue_label(issue_id=issue_id, label=_OUTCOME_LABEL_BLOCKED_ENVIRONMENT)
             now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             self.store.set_state("healer_connector_last_error_class", failure_class)
             self.store.set_state("healer_connector_last_error_reason", failure_reason[:500])
@@ -3371,6 +3408,10 @@ class AutonomousHealerLoop:
                 clear_lease=True,
             )
             self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
+            self._sync_outcome_issue_label(
+                issue_id=issue_id,
+                label=_OUTCOME_LABEL_BLOCKED_ENVIRONMENT if is_infra else "",
+            )
             if is_infra:
                 self._note_infra_failure(failure_class=failure_class, failure_reason=failure_reason)
                 now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
@@ -3410,6 +3451,7 @@ class AutonomousHealerLoop:
                 clear_lease=True,
             )
             self._sync_blocked_issue_label(issue_id=issue_id, state="failed")
+            self._sync_outcome_issue_label(issue_id=issue_id, label=_OUTCOME_LABEL_RETRY_EXHAUSTED)
             logger.info(
                 "Issue #%s reached retry budget and is now failed (%s): %s",
                 issue_id,
@@ -3442,6 +3484,7 @@ class AutonomousHealerLoop:
             clear_lease=True,
         )
         self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
+        self._sync_outcome_issue_label(issue_id=issue_id, label="")
         logger.info(
                 "Issue #%s requeued after attempt %s with backoff until %s (%s)",
                 issue_id,

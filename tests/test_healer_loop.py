@@ -299,6 +299,67 @@ def test_maybe_reconcile_blocked_issue_labels_respects_interval(tmp_path):
     loop.tracker.get_issue.assert_called_once_with(issue_id="432")
 
 
+def test_sync_outcome_issue_label_sets_target_and_clears_other_labels(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    loop._sync_outcome_issue_label(issue_id="499", label="healer:needs-clarification")
+
+    loop.tracker.add_issue_label.assert_called_once_with(issue_id="499", label="healer:needs-clarification")
+    removed = {call.kwargs.get("label") for call in loop.tracker.remove_issue_label.call_args_list}
+    assert removed == {
+        "healer:done-code",
+        "healer:done-artifact",
+        "healer:blocked-environment",
+        "healer:retry-exhausted",
+    }
+
+
+def test_process_claimed_issue_low_confidence_sets_needs_clarification_label(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="433",
+        repo="owner/repo",
+        title="Issue 433",
+        body="Please investigate and report back.",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "433",
+        "state": "open",
+        "labels": ["healer:ready"],
+    }
+    monkeypatch.setattr(
+        "flow_healer.healer_loop.compile_task_spec",
+        lambda issue_title, issue_body: HealerTaskSpec(
+            task_kind="research",
+            output_mode="artifact_file",
+            output_targets=("docs/issue-433.md",),
+            tool_policy="summary_only",
+            validation_profile="artifact_only",
+            parse_confidence=0.1,
+        ),
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("433")
+    assert issue is not None
+    assert issue["state"] == "needs_clarification"
+    assert any(
+        call.kwargs.get("label") == "healer:needs-clarification"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
+
+
 def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
@@ -1155,6 +1216,10 @@ def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_p
     assert attempts[-1]["state"] == "pr_open"
     assert attempts[-1]["verifier_summary"]["verdict"] == "soft_fail"
     loop._commit_and_push.assert_called_once()
+    assert any(
+        call.kwargs.get("label") == "healer:done-code"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
 
 
 def test_process_claimed_issue_swarm_recovers_failed_run(tmp_path):
@@ -2998,6 +3063,10 @@ def test_backoff_or_fail_marks_failed_at_retry_budget(tmp_path):
     assert state == "failed"
     assert issue["state"] == "failed"
     assert issue["last_failure_class"] == "verifier_failed"
+    assert any(
+        call.kwargs.get("label") == "healer:retry-exhausted"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
 
 
 def test_backoff_or_fail_connector_failure_does_not_exhaust_retry_budget(tmp_path):
@@ -3084,6 +3153,10 @@ def test_backoff_or_fail_infra_pause_sets_long_pause_and_queue_backoff(tmp_path)
     assert issue["last_failure_class"] == "infra_pause"
     assert issue["backoff_until"] == store.get_state("healer_infra_pause_until")
     assert store.get_state("healer_infra_pause_reason").startswith("infra_pause:")
+    assert any(
+        call.kwargs.get("label") == "healer:blocked-environment"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
 
 
 def test_infra_pause_auto_clears_when_toolchain_reason_is_resolved(tmp_path, monkeypatch):
