@@ -164,6 +164,19 @@ def test_add_oversized_integer_string_raises_type_error_with_stable_message() ->
     assert str(exc_info.value) == SMOKE_MATH_MODULE.ERROR_MESSAGE
 
 
+def test_add_accepts_integer_strings_when_digit_limit_api_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older Python runtimes should skip the digit-limit guard cleanly."""
+    monkeypatch.delattr(
+        SMOKE_MATH_MODULE.sys,
+        "get_int_max_str_digits",
+        raising=False,
+    )
+
+    assert _call_add("9" * 1000, 1) == int("9" * 1000) + 1
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     (

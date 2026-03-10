@@ -20,7 +20,11 @@ def _operand_type_error(*, cause: Exception | None = None) -> TypeError:
 
 def _fits_python_integer_string_limit(value: str) -> bool:
     """Mirror the interpreter's integer-string digit guardrail."""
-    limit = sys.get_int_max_str_digits()
+    get_digit_limit = getattr(sys, "get_int_max_str_digits", None)
+    if get_digit_limit is None:
+        return True
+
+    limit = get_digit_limit()
     if limit == 0:
         return True
 
