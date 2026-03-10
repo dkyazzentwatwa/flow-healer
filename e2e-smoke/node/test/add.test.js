@@ -274,6 +274,19 @@ test('add keeps existing single-value and empty-call behavior', () => {
   assert.equal(add(0n), 0n);
 });
 
+test('add rejects string-like operands for single-value calls', () => {
+  const boxedString = vm.runInNewContext('Object("2")');
+
+  assert.throws(() => add('2'), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(boxedString), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
 test('add supports variadic invocation helpers without changing promotion rules', () => {
   const overflowingInputs = [0, Number.MAX_SAFE_INTEGER, 2];
   const mixedInputs = [1n, 2, 3, 4];
