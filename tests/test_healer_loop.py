@@ -2967,6 +2967,8 @@ def test_backoff_or_fail_requeues_before_retry_budget(tmp_path):
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "tests_failed"
     assert issue["backoff_until"]
+    assert store.get_state("healer_failure_domain_total") == "1"
+    assert store.get_state("healer_failure_domain_code") == "1"
     assert "T" not in str(issue["backoff_until"])
     assert "+" not in str(issue["backoff_until"])
 
@@ -3024,6 +3026,34 @@ def test_backoff_or_fail_connector_failure_does_not_exhaust_retry_budget(tmp_pat
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "connector_unavailable"
     assert issue["backoff_until"]
+
+
+def test_backoff_or_fail_uses_reason_to_classify_infra_domain(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="3030",
+        repo="owner/repo",
+        title="Issue 3030",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_backoff_initial_seconds=60)
+
+    state = loop._backoff_or_fail(
+        issue_id="3030",
+        attempt_no=1,
+        failure_class="tests_failed",
+        failure_reason="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+    )
+    issue = store.get_healer_issue("3030")
+    assert issue is not None
+    assert state == "queued"
+    assert issue["state"] == "queued"
+    assert store.get_state("healer_failure_domain_total") == "1"
+    assert store.get_state("healer_failure_domain_infra") == "1"
 
 
 def test_backoff_or_fail_infra_pause_sets_long_pause_and_queue_backoff(tmp_path):

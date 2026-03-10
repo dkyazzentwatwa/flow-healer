@@ -142,6 +142,8 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert swarm_metrics["skipped_by_domain"]["infra"] == 0
     assert swarm_metrics["skipped_by_domain"]["contract"] == 0
     assert swarm_metrics["skipped_by_domain"]["unknown"] == 0
+    failure_domains = rows[0]["failure_domain_metrics"]
+    assert failure_domains == {"total": 0, "infra": 0, "contract": 0, "code": 0, "unknown": 0}
     resource_audit = rows[0]["resource_audit"]
     assert resource_audit["worktrees"]["count"] == 0
     assert resource_audit["leases"]["total"] == 0
@@ -177,6 +179,41 @@ def test_status_rows_report_swarm_domain_skip_counters(tmp_path) -> None:
     swarm_metrics = rows[0]["swarm_metrics"]
     assert swarm_metrics["skipped_domain"] == 4
     assert swarm_metrics["skipped_by_domain"] == {"infra": 2, "contract": 1, "unknown": 1}
+
+
+def test_status_rows_report_failure_domain_counters(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_state("healer_failure_domain_total", "7")
+    runtime.store.set_state("healer_failure_domain_infra", "2")
+    runtime.store.set_state("healer_failure_domain_contract", "3")
+    runtime.store.set_state("healer_failure_domain_code", "1")
+    runtime.store.set_state("healer_failure_domain_unknown", "1")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    assert rows[0]["failure_domain_metrics"] == {
+        "total": 7,
+        "infra": 2,
+        "contract": 3,
+        "code": 1,
+        "unknown": 1,
+    }
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:

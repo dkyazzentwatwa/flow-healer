@@ -105,6 +105,24 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "infra_pause":          {"backoff_multiplier": 1.0, "feedback_hint": "Infrastructure failed before validation could confirm the patch. Repair the local runtime and wait for the pause window to clear before retrying."},
     "swarm_quarantine":     {"backoff_multiplier": 1.0, "feedback_hint": "Swarm quarantined the attempt because another autonomous edit would be speculative. Clear the blocker before retrying."},
 }
+_FAILURE_DOMAIN_STRATEGY: dict[str, dict[str, object]] = {
+    "infra": {
+        "backoff_multiplier": 1.0,
+        "feedback_hint": "Failure domain is infrastructure. Stabilize runtime/tooling connectivity before another mutation-heavy retry.",
+    },
+    "contract": {
+        "backoff_multiplier": 0.75,
+        "feedback_hint": "Failure domain is execution contract. Tighten diff/patch format and output contract before retrying.",
+    },
+    "code": {
+        "backoff_multiplier": 1.0,
+        "feedback_hint": "",
+    },
+    "unknown": {
+        "backoff_multiplier": 1.0,
+        "feedback_hint": "Failure domain is unclear. Capture more diagnostics before broad retries.",
+    },
+}
 
 
 _FAILURE_USER_HINTS: dict[str, str] = {
@@ -3276,6 +3294,12 @@ class AutonomousHealerLoop:
         issue_body: str = "",
         feedback_context_override: str = "",
     ) -> str:
+        failure_domain = classify_failure_domain(
+            failure_class=failure_class,
+            failure_reason=failure_reason,
+        )
+        self._increment_state_counter("healer_failure_domain_total")
+        self._increment_state_counter(f"healer_failure_domain_{failure_domain}")
         if failure_class == "infra_pause":
             backoff_until = self._activate_infra_pause(
                 failure_class=failure_class,
@@ -3318,7 +3342,7 @@ class AutonomousHealerLoop:
             )
             return "queued"
 
-        is_infra = failure_class in _INFRA_FAILURE_CLASSES
+        is_infra = failure_class in _INFRA_FAILURE_CLASSES or failure_domain == "infra"
         counts_against_trust = _counts_against_issue_trust(failure_class=failure_class, failure_reason=failure_reason)
         is_always_requeue = (
             is_infra
@@ -3398,7 +3422,8 @@ class AutonomousHealerLoop:
             self.settings.healer_backoff_max_seconds,
             self.settings.healer_backoff_initial_seconds * (2 ** max(0, attempt_no - 1)),
         )
-        strategy = _FAILURE_CLASS_STRATEGY.get(failure_class, {})
+        strategy = dict(_FAILURE_DOMAIN_STRATEGY.get(failure_domain, {}))
+        strategy.update(_FAILURE_CLASS_STRATEGY.get(failure_class, {}))
         multiplier = float(strategy.get("backoff_multiplier", 1.0))
         delay = max(15, int(delay * multiplier))
         feedback_hint = str(strategy.get("feedback_hint", "")).strip()

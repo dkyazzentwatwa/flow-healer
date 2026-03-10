@@ -347,6 +347,7 @@ class FlowHealerService:
                         },
                         "app_server_metrics": _app_server_metrics(runtime.store),
                         "swarm_metrics": _swarm_metrics(runtime.store),
+                        "failure_domain_metrics": _failure_domain_metrics(runtime.store),
                         "recent_attempts": annotated_attempts,
                     }
                 )
@@ -698,6 +699,17 @@ def _swarm_metrics(store: SQLiteStore) -> dict[str, object]:
         "strategy_counts": strategy_counts,
         "skipped_domain": _safe_state_int(store, "healer_swarm_skipped_domain"),
         "skipped_by_domain": skipped_by_domain,
+    }
+
+
+def _failure_domain_metrics(store: SQLiteStore) -> dict[str, int]:
+    domains = ("infra", "contract", "code", "unknown")
+    return {
+        "total": _safe_state_int(store, "healer_failure_domain_total"),
+        **{
+            domain: _safe_state_int(store, f"healer_failure_domain_{domain}")
+            for domain in domains
+        },
     }
 
 
