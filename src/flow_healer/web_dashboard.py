@@ -276,6 +276,48 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
       </div>
     </section>
 
+    <section class='mb-6 grid grid-cols-2 gap-4 xl:grid-cols-6'>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary First Pass</div>
+        <div class='mt-3 text-3xl font-semibold text-emerald-300' x-text='canaryFirstPassRate'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary No-op</div>
+        <div class='mt-3 text-3xl font-semibold text-amber-300' x-text='canaryNoOpRate'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary Wrong Root</div>
+        <div class='mt-3 text-3xl font-semibold text-rose-300' x-text='canaryWrongRootRate'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary Mean TTVP</div>
+        <div class='mt-3 text-3xl font-semibold text-cyan-200' x-text='canaryMeanTimeToValidPr'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Swarm Domain Skips</div>
+        <div class='mt-3 text-3xl font-semibold text-slate-100' x-text='swarmDomainSkips'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Native Recovery</div>
+        <div class='mt-3 text-3xl font-semibold text-fuchsia-200' x-text='nativeRecoveryRate'></div>
+      </div>
+    </section>
+
+    <section class='mb-6 grid grid-cols-1 gap-4 xl:grid-cols-3'>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Needs Clarification</div>
+        <div class='mt-3 text-3xl font-semibold text-amber-200' x-text='needsClarificationIssues'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Infra</div>
+        <div class='mt-3 text-3xl font-semibold text-rose-200' x-text='failureDomainInfra'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Contract</div>
+        <div class='mt-3 text-3xl font-semibold text-orange-200' x-text='failureDomainContract'></div>
+      </div>
+    </section>
+
     <section class='mb-6'>
       <div class='mb-3 flex items-center justify-between'>
         <h2 class='text-sm font-semibold uppercase tracking-[0.24em] text-slate-300'>Repo Controls</h2>
@@ -532,6 +574,69 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
         get pausedRepos() {{
           return this.rows.filter((row) => !!row.paused).length;
+        }},
+
+        get canaryFirstPassRate() {{
+          const values = this.rows
+            .map((row) => Number((row.reliability_canary || {{}}).first_pass_success_rate || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return '0.0%';
+          const avg = values.reduce((acc, value) => acc + value, 0) / values.length;
+          return `${{(avg * 100).toFixed(1)}}%`;
+        }},
+
+        get canaryNoOpRate() {{
+          const values = this.rows
+            .map((row) => Number((row.reliability_canary || {{}}).no_op_rate || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return '0.0%';
+          const avg = values.reduce((acc, value) => acc + value, 0) / values.length;
+          return `${{(avg * 100).toFixed(1)}}%`;
+        }},
+
+        get canaryWrongRootRate() {{
+          const values = this.rows
+            .map((row) => Number((row.reliability_canary || {{}}).wrong_root_execution_rate || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return '0.0%';
+          const avg = values.reduce((acc, value) => acc + value, 0) / values.length;
+          return `${{(avg * 100).toFixed(1)}}%`;
+        }},
+
+        get canaryMeanTimeToValidPr() {{
+          const values = this.rows
+            .map((row) => Number((row.reliability_canary || {{}}).mean_time_to_valid_pr_minutes || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return '0.00m';
+          const avg = values.reduce((acc, value) => acc + value, 0) / values.length;
+          return `${{avg.toFixed(2)}}m`;
+        }},
+
+        get swarmDomainSkips() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.swarm_metrics || {{}}).skipped_domain || 0), 0);
+        }},
+
+        get nativeRecoveryRate() {{
+          const aggregate = this.rows.reduce((acc, row) => {{
+            const metrics = row.codex_native_multi_agent_metrics || {{}};
+            acc.attempts += Number(metrics.recovery_attempts || 0);
+            acc.success += Number(metrics.recovery_success || 0);
+            return acc;
+          }}, {{ attempts: 0, success: 0 }});
+          if (!aggregate.attempts) return '0/0';
+          return `${{aggregate.success}}/${{aggregate.attempts}}`;
+        }},
+
+        get needsClarificationIssues() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.state_counts || {{}}).needs_clarification || 0), 0);
+        }},
+
+        get failureDomainInfra() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.failure_domain_metrics || {{}}).infra || 0), 0);
+        }},
+
+        get failureDomainContract() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.failure_domain_metrics || {{}}).contract || 0), 0);
         }},
 
         get activeAttempts() {{

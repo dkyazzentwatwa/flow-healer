@@ -238,6 +238,24 @@ def test_render_dashboard_activity_rows_counter_binds_to_activity(tmp_path: Path
     html = _render_dashboard(config, service, notice="")
 
     assert "x-text='activity.length'" in html
+
+
+def test_render_dashboard_includes_reliability_and_domain_metric_cards(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Canary First Pass" in html
+    assert "Canary No-op" in html
+    assert "Canary Wrong Root" in html
+    assert "Canary Mean TTVP" in html
+    assert "Swarm Domain Skips" in html
+    assert "Native Recovery" in html
+    assert "Needs Clarification" in html
+    assert "Failure Domain Infra" in html
+    assert "Failure Domain Contract" in html
+    assert "get canaryFirstPassRate()" in html
+    assert "get nativeRecoveryRate()" in html
     assert "x-text='activities.length'" not in html
 
 
