@@ -351,6 +351,34 @@ class TestPortfolioValue:
         total_value = portfolio_engine.get_portfolio_value(cash_balance, current_prices)
         assert abs(total_value - 50000.0) < 0.01
 
+    def test_portfolio_value_stays_consistent_with_unrealized_pnl(self, position_repo, portfolio_engine):
+        """Test portfolio value uses the same math basis as unrealized P&L."""
+        positions = [
+            Position("BTC/USDT", 1.0, 50000.0, 50000.0, "long", 1000000, 1000000),
+            Position("ETH/USDT", 10.0, 3000.0, 30000.0, "short", 1000000, 1000000),
+            Position("SOL/USDT", 100.0, 100.0, 10000.0, "long", 1000000, 1000000),
+        ]
+
+        for pos in positions:
+            position_repo.upsert(pos)
+
+        current_prices = {
+            "BTC/USDT": 55000.0,
+            "ETH/USDT": 2800.0,
+        }
+
+        cash_balance = 10000.0
+        total_value = portfolio_engine.get_portfolio_value(cash_balance, current_prices)
+
+        expected_value = (
+            cash_balance
+            + 55000.0  # Long position should use current market value.
+            + 32000.0  # Short equity contribution is entry basis plus unrealized profit.
+            + 10000.0  # Missing prices should fall back to cost basis instead of disappearing.
+        )
+
+        assert abs(total_value - expected_value) < 0.01
+
 
 class TestPerformanceMetrics:
     """Test performance metrics calculation"""

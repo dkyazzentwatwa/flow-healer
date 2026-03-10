@@ -229,8 +229,16 @@ class PortfolioEngine:
         position_value = 0.0
 
         for position in positions:
-            if position.symbol in current_prices:
-                position_value += current_prices[position.symbol] * position.amount
+            if position.symbol not in current_prices:
+                position_value += position.avg_entry_price * position.amount
+                continue
+
+            current_price = current_prices[position.symbol]
+            if position.side == "long":
+                position_value += current_price * position.amount
+            else:
+                unrealized_pnl = (position.avg_entry_price - current_price) * position.amount
+                position_value += (position.avg_entry_price * position.amount) + unrealized_pnl
 
         return cash_balance + position_value
 
