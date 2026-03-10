@@ -890,6 +890,41 @@ class SQLiteStore:
             rows = conn.execute("SELECT * FROM healer_attempts ORDER BY started_at DESC LIMIT ?", (int(limit),)).fetchall()
         return [attempt for row in rows if (attempt := self._decode_healer_attempt_row(self._row_to_dict(row))) is not None]
 
+    def list_healer_attempts_in_window(
+        self,
+        *,
+        days: int,
+        offset_days: int = 0,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        window_days = max(1, int(days))
+        offset = max(0, int(offset_days))
+        start_days = offset + window_days
+        conn = self._connect()
+        with self._lock:
+            if offset > 0:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM healer_attempts
+                    WHERE started_at >= datetime('now', ?)
+                      AND started_at < datetime('now', ?)
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                    (f"-{start_days} days", f"-{offset} days", int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM healer_attempts
+                    WHERE started_at >= datetime('now', ?)
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                    """,
+                    (f"-{start_days} days", int(limit)),
+                ).fetchall()
+        return [attempt for row in rows if (attempt := self._decode_healer_attempt_row(self._row_to_dict(row))) is not None]
+
     def create_healer_lesson(
         self,
         *,
@@ -1536,6 +1571,35 @@ class SQLiteStore:
         with self._lock:
             row = conn.execute("SELECT value FROM kv_state WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row is not None else None
+
+    def list_states(self, *, prefix: str = "", limit: int = 500) -> dict[str, str]:
+        conn = self._connect()
+        with self._lock:
+            if str(prefix or "").strip():
+                rows = conn.execute(
+                    """
+                    SELECT key, value
+                    FROM kv_state
+                    WHERE key LIKE ?
+                    ORDER BY key ASC
+                    LIMIT ?
+                    """,
+                    (f"{prefix}%", int(max(1, limit))),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT key, value
+                    FROM kv_state
+                    ORDER BY key ASC
+                    LIMIT ?
+                    """,
+                    (int(max(1, limit)),),
+                ).fetchall()
+        return {
+            str(row["key"]): str(row["value"])
+            for row in rows
+        }
 
 
 def _json_loads(raw: str, default: Any) -> Any:

@@ -44,6 +44,7 @@ logger = logging.getLogger("apple_flow.healer_loop")
 _TARGETED_TEST_RE = re.compile(
     r"\btests/[A-Za-z0-9_./\-]*test[A-Za-z0-9_./\-]*\.py\b"
 )
+_STATE_COUNTER_TOKEN_RE = re.compile(r"[^a-z0-9]+")
 _FLOW_COMMENT_PERSONA = (
     "Professional, concise status updates in Markdown, "
     "and always sign off with '-- Flow Healer'."
@@ -216,6 +217,27 @@ def _minutes_since(timestamp_str: str) -> float:
         return (datetime.now(tz=UTC) - dt).total_seconds() / 60.0
     except (ValueError, TypeError):
         return 0.0
+
+
+def _seconds_until_utc_timestamp(timestamp_str: str) -> int:
+    text = str(timestamp_str or "").strip()
+    if not text:
+        return 0
+    try:
+        target = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        remaining = int((target - datetime.now(tz=UTC)).total_seconds())
+        return max(0, remaining)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _state_counter_token(value: str, *, fallback: str = "unknown") -> str:
+    normalized = _STATE_COUNTER_TOKEN_RE.sub("_", str(value or "").strip().lower()).strip("_")
+    if normalized:
+        return normalized
+    return _STATE_COUNTER_TOKEN_RE.sub("_", str(fallback or "unknown").strip().lower()).strip("_") or "unknown"
 
 
 @dataclass(slots=True, frozen=True)
@@ -3622,6 +3644,14 @@ class AutonomousHealerLoop:
                     ],
                 ),
             )
+            self._record_retry_playbook_selection(
+                issue_id=issue_id,
+                failure_class=failure_class,
+                failure_domain=failure_domain,
+                strategy="infra_pause",
+                backoff_seconds=_seconds_until_utc_timestamp(backoff_until),
+                feedback_hint=_hint,
+            )
             return "queued"
 
         is_infra = failure_class in _INFRA_FAILURE_CLASSES or failure_domain == "infra"
@@ -3685,6 +3715,21 @@ class AutonomousHealerLoop:
                     ],
                 ),
             )
+            strategy = "always_requeue_trust_exempt"
+            if is_infra:
+                strategy = "always_requeue_infra"
+            elif failure_class in {"lock_conflict", "lock_upgrade_conflict"}:
+                strategy = "always_requeue_lock_conflict"
+            elif failure_class in _ALWAYS_REQUEUE_FAILURE_CLASSES or _is_no_workspace_change_failure_class(failure_class):
+                strategy = "always_requeue_failure_class"
+            self._record_retry_playbook_selection(
+                issue_id=issue_id,
+                failure_class=failure_class,
+                failure_domain=failure_domain,
+                strategy=strategy,
+                backoff_seconds=delay,
+                feedback_hint=_hint,
+            )
             return "queued"
 
         if attempt_no >= self.settings.healer_retry_budget:
@@ -3702,6 +3747,14 @@ class AutonomousHealerLoop:
                 issue_id,
                 failure_class,
                 failure_reason,
+            )
+            self._record_retry_playbook_selection(
+                issue_id=issue_id,
+                failure_class=failure_class,
+                failure_domain=failure_domain,
+                strategy="retry_exhausted",
+                backoff_seconds=0,
+                feedback_hint="Retry budget exhausted; manual intervention required.",
             )
             return "failed"
 
@@ -3752,6 +3805,14 @@ class AutonomousHealerLoop:
                     *([f"Hint: {_hint}"] if _hint else []),
                 ],
             ),
+        )
+        self._record_retry_playbook_selection(
+            issue_id=issue_id,
+            failure_class=failure_class,
+            failure_domain=failure_domain,
+            strategy="adaptive_failure_strategy",
+            backoff_seconds=delay,
+            feedback_hint=retry_feedback_context or _hint,
         )
         return "queued"
 
@@ -3828,6 +3889,35 @@ class AutonomousHealerLoop:
         except ValueError:
             current = 0
         self.store.set_state(key, str(max(0, current + int(amount))))
+
+    def _record_retry_playbook_selection(
+        self,
+        *,
+        issue_id: str,
+        failure_class: str,
+        failure_domain: str,
+        strategy: str,
+        backoff_seconds: int,
+        feedback_hint: str,
+    ) -> None:
+        class_token = _state_counter_token(failure_class)
+        domain_token = _state_counter_token(failure_domain)
+        strategy_token = _state_counter_token(strategy)
+        self._increment_state_counter("healer_retry_playbook_total")
+        self._increment_state_counter(f"healer_retry_playbook_class_{class_token}")
+        self._increment_state_counter(f"healer_retry_playbook_domain_{domain_token}")
+        self._increment_state_counter(f"healer_retry_playbook_strategy_{strategy_token}")
+        self.store.set_states(
+            {
+                "healer_retry_playbook_last_issue_id": str(issue_id or ""),
+                "healer_retry_playbook_last_failure_class": str(failure_class or ""),
+                "healer_retry_playbook_last_failure_domain": str(failure_domain or ""),
+                "healer_retry_playbook_last_strategy": str(strategy or ""),
+                "healer_retry_playbook_last_backoff_seconds": str(max(0, int(backoff_seconds))),
+                "healer_retry_playbook_last_feedback_hint": str(feedback_hint or "")[:500],
+                "healer_retry_playbook_last_selected_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
 
     def _record_app_server_attempt_metrics(
         self,

@@ -293,7 +293,7 @@ In strict mode, Flow Healer moves issues to `needs_clarification` unless both `R
 | Command | Purpose |
 | --- | --- |
 | `flow-healer doctor [--repo NAME] [--preflight]` | Validate environment, repo config, Docker, Codex, and token setup |
-| `flow-healer status [--repo NAME]` | Show queue state, pause status, recent attempts, swarm/failure-domain counters, and reliability canary metrics |
+| `flow-healer status [--repo NAME]` | Show queue state, pause status, recent attempts, swarm/failure-domain counters, retry playbook diagnostics, and reliability canary/trend rollups |
 | `flow-healer start [--repo NAME] [--once]` | Run one controlled healing pass or start the continuous runtime |
 | `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Start the runtime with dashboard and operator controls |
 | `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic repo scanning with optional no-write mode |

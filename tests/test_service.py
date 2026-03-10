@@ -144,12 +144,24 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert swarm_metrics["skipped_by_domain"]["unknown"] == 0
     failure_domains = rows[0]["failure_domain_metrics"]
     assert failure_domains == {"total": 0, "infra": 0, "contract": 0, "code": 0, "unknown": 0}
+    retry_playbook = rows[0]["retry_playbook_metrics"]
+    assert retry_playbook["total"] == 0
+    assert retry_playbook["class_counts"] == {}
+    assert retry_playbook["domain_counts"] == {}
+    assert retry_playbook["strategy_counts"] == {}
+    assert retry_playbook["recommendation"]
+    assert retry_playbook["last_selection"]["failure_class"] == ""
     canary = rows[0]["reliability_canary"]
     assert canary["sample_size"] >= 1
     assert 0.0 <= canary["first_pass_success_rate"] <= 1.0
     assert canary["retries_per_success"] >= 0.0
     assert 0.0 <= canary["wrong_root_execution_rate"] <= 1.0
     assert 0.0 <= canary["no_op_rate"] <= 1.0
+    trends = rows[0]["reliability_trends"]
+    assert set(trends.keys()) == {"7d", "30d"}
+    assert "changes" in trends["7d"]
+    assert "improvements" in trends["30d"]
+    assert isinstance(rows[0]["reliability_daily_rollups"], list)
     resource_audit = rows[0]["resource_audit"]
     assert resource_audit["worktrees"]["count"] == 0
     assert resource_audit["leases"]["total"] == 0
@@ -261,6 +273,59 @@ def test_status_rows_report_failure_domain_counters(tmp_path) -> None:
     }
 
 
+def test_status_rows_report_retry_playbook_metrics(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_states(
+        {
+            "healer_retry_playbook_total": "9",
+            "healer_retry_playbook_class_tests_failed": "4",
+            "healer_retry_playbook_class_no_patch": "3",
+            "healer_retry_playbook_class_push_failed": "2",
+            "healer_retry_playbook_domain_code": "4",
+            "healer_retry_playbook_domain_contract": "3",
+            "healer_retry_playbook_domain_infra": "2",
+            "healer_retry_playbook_strategy_adaptive_failure_strategy": "4",
+            "healer_retry_playbook_strategy_always_requeue_failure_class": "3",
+            "healer_retry_playbook_strategy_always_requeue_infra": "2",
+            "healer_retry_playbook_last_issue_id": "777",
+            "healer_retry_playbook_last_failure_class": "tests_failed",
+            "healer_retry_playbook_last_failure_domain": "code",
+            "healer_retry_playbook_last_strategy": "adaptive_failure_strategy",
+            "healer_retry_playbook_last_backoff_seconds": "30",
+            "healer_retry_playbook_last_feedback_hint": "Focus on failing test output.",
+            "healer_retry_playbook_last_selected_at": "2026-03-10 10:15:00",
+        }
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+    metrics = rows[0]["retry_playbook_metrics"]
+
+    assert metrics["total"] == 9
+    assert metrics["class_counts"]["tests_failed"] == 4
+    assert metrics["domain_counts"]["code"] == 4
+    assert metrics["strategy_counts"]["adaptive_failure_strategy"] == 4
+    assert metrics["top_failure_classes"][0] == {"failure_class": "tests_failed", "count": 4}
+    assert metrics["dominant_domain"] == "code"
+    assert metrics["last_selection"]["issue_id"] == "777"
+    assert metrics["last_selection"]["backoff_seconds"] == 30
+
+
 def test_status_rows_report_reliability_canary_metrics(tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -359,6 +424,127 @@ def test_status_rows_report_reliability_canary_metrics(tmp_path) -> None:
     assert canary["retries_per_success"] == 0.5
     assert canary["wrong_root_execution_rate"] == 0.3333
     assert canary["no_op_rate"] == 0.3333
+
+
+def test_status_rows_report_reliability_trend_deltas(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    for issue_id in ("9101", "9102", "9103", "9104"):
+        runtime.store.upsert_healer_issue(
+            issue_id=issue_id,
+            repo="owner/repo",
+            title=f"Issue {issue_id}",
+            body="",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+        )
+
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_curr_success",
+        issue_id="9101",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_curr_success",
+        state="pr_open",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "issue"},
+        verifier_summary={},
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_curr_noop",
+        issue_id="9102",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_curr_noop",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "fallback"},
+        verifier_summary={},
+        failure_class="no_patch",
+        failure_reason="no patch",
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_prev_fail_1",
+        issue_id="9103",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_prev_fail_1",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "fallback"},
+        verifier_summary={},
+        failure_class="no_patch",
+        failure_reason="no patch",
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_prev_fail_2",
+        issue_id="9104",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_prev_fail_2",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "fallback"},
+        verifier_summary={},
+        failure_class="no_patch",
+        failure_reason="no patch",
+    )
+
+    conn = runtime.store._connect()
+    with runtime.store._lock:
+        conn.execute(
+            """
+            UPDATE healer_attempts
+            SET started_at = datetime('now', '-10 days'),
+                finished_at = datetime('now', '-10 days', '+2 minutes')
+            WHERE attempt_id IN ('ha_prev_fail_1', 'ha_prev_fail_2')
+            """
+        )
+        conn.commit()
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+    trends_7d = rows[0]["reliability_trends"]["7d"]
+    daily_rollups = rows[0]["reliability_daily_rollups"]
+
+    assert trends_7d["current"]["sample_size"] == 2
+    assert trends_7d["previous"]["sample_size"] == 2
+    assert trends_7d["changes"]["first_pass_success_rate"] == 0.5
+    assert trends_7d["changes"]["no_op_rate"] == -0.5
+    assert trends_7d["improvements"]["no_op_rate_down"] == 0.5
+    assert len(daily_rollups) >= 2
+    assert "day" in daily_rollups[0]
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:

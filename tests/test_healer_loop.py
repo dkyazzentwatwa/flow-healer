@@ -3287,6 +3287,13 @@ def test_backoff_or_fail_requeues_before_retry_budget(tmp_path):
     assert issue["backoff_until"]
     assert store.get_state("healer_failure_domain_total") == "1"
     assert store.get_state("healer_failure_domain_code") == "1"
+    assert store.get_state("healer_retry_playbook_total") == "1"
+    assert store.get_state("healer_retry_playbook_class_tests_failed") == "1"
+    assert store.get_state("healer_retry_playbook_domain_code") == "1"
+    assert store.get_state("healer_retry_playbook_strategy_adaptive_failure_strategy") == "1"
+    assert store.get_state("healer_retry_playbook_last_failure_class") == "tests_failed"
+    assert store.get_state("healer_retry_playbook_last_strategy") == "adaptive_failure_strategy"
+    assert int(store.get_state("healer_retry_playbook_last_backoff_seconds") or 0) >= 15
     assert "T" not in str(issue["backoff_until"])
     assert "+" not in str(issue["backoff_until"])
 

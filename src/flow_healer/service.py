@@ -350,7 +350,10 @@ class FlowHealerService:
                         "codex_native_multi_agent_metrics": _codex_native_multi_agent_metrics(runtime.store),
                         "swarm_metrics": _swarm_metrics(runtime.store),
                         "failure_domain_metrics": _failure_domain_metrics(runtime.store),
+                        "retry_playbook_metrics": _retry_playbook_metrics(runtime.store),
                         "reliability_canary": _reliability_canary_metrics(runtime.store),
+                        "reliability_daily_rollups": _reliability_daily_rollups(runtime.store),
+                        "reliability_trends": _reliability_trend_metrics(runtime.store),
                         "recent_attempts": annotated_attempts,
                     }
                 )
@@ -728,6 +731,84 @@ def _failure_domain_metrics(store: SQLiteStore) -> dict[str, int]:
     }
 
 
+def _retry_playbook_metrics(store: SQLiteStore) -> dict[str, object]:
+    class_prefix = "healer_retry_playbook_class_"
+    domain_prefix = "healer_retry_playbook_domain_"
+    strategy_prefix = "healer_retry_playbook_strategy_"
+    class_counts = _counter_state_map(store=store, prefix=class_prefix)
+    domain_counts = _counter_state_map(store=store, prefix=domain_prefix)
+    strategy_counts = _counter_state_map(store=store, prefix=strategy_prefix)
+    total = _safe_state_int(store, "healer_retry_playbook_total")
+    top_failure_classes = [
+        {"failure_class": name, "count": count}
+        for name, count in sorted(class_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+    ]
+    dominant_domain = ""
+    dominant_domain_count = 0
+    if domain_counts:
+        dominant_domain, dominant_domain_count = max(
+            domain_counts.items(),
+            key=lambda item: (item[1], item[0]),
+        )
+    recommendation = _retry_playbook_recommendation(
+        dominant_domain=dominant_domain,
+        dominant_domain_count=dominant_domain_count,
+        total=total,
+    )
+    return {
+        "total": total,
+        "class_counts": class_counts,
+        "domain_counts": domain_counts,
+        "strategy_counts": strategy_counts,
+        "top_failure_classes": top_failure_classes,
+        "dominant_domain": dominant_domain,
+        "dominant_domain_count": dominant_domain_count,
+        "dominant_domain_share": round(float(dominant_domain_count) / float(max(1, total)), 4),
+        "recommendation": recommendation,
+        "last_selection": {
+            "issue_id": store.get_state("healer_retry_playbook_last_issue_id") or "",
+            "failure_class": store.get_state("healer_retry_playbook_last_failure_class") or "",
+            "failure_domain": store.get_state("healer_retry_playbook_last_failure_domain") or "",
+            "strategy": store.get_state("healer_retry_playbook_last_strategy") or "",
+            "backoff_seconds": _safe_state_int(store, "healer_retry_playbook_last_backoff_seconds"),
+            "feedback_hint": store.get_state("healer_retry_playbook_last_feedback_hint") or "",
+            "selected_at": store.get_state("healer_retry_playbook_last_selected_at") or "",
+        },
+    }
+
+
+def _counter_state_map(*, store: SQLiteStore, prefix: str) -> dict[str, int]:
+    values = store.list_states(prefix=prefix, limit=500)
+    mapped: dict[str, int] = {}
+    for key, raw in values.items():
+        if not key.startswith(prefix):
+            continue
+        token = key[len(prefix):]
+        if not token:
+            continue
+        try:
+            count = max(0, int(str(raw).strip()))
+        except ValueError:
+            continue
+        mapped[token] = count
+    return mapped
+
+
+def _retry_playbook_recommendation(*, dominant_domain: str, dominant_domain_count: int, total: int) -> str:
+    share = float(dominant_domain_count) / float(max(1, total))
+    if not dominant_domain or total <= 0:
+        return "No retry playbook samples yet."
+    if dominant_domain == "contract" and share >= 0.45:
+        return "Contract failures dominate; tighten issue output/validation contracts and diff formatting guidance."
+    if dominant_domain == "infra" and share >= 0.45:
+        return "Infrastructure failures dominate; prioritize preflight and runtime/toolchain stabilization before retries."
+    if dominant_domain == "code" and share >= 0.45:
+        return "Code failures dominate; focus retries on failing tests and narrower code-scope edits."
+    if dominant_domain == "unknown" and share >= 0.35:
+        return "Unknown-domain failures are high; increase structured failure details to improve retry routing."
+    return "Failure domains are mixed; continue collecting samples before tuning retry multipliers."
+
+
 def _worker_runtime_state(store: SQLiteStore) -> dict[str, object]:
     runtime = store.get_runtime_status() or {}
     return {
@@ -749,9 +830,87 @@ def _worker_runtime_state(store: SQLiteStore) -> dict[str, object]:
 
 def _reliability_canary_metrics(store: SQLiteStore, *, window: int = 50) -> dict[str, object]:
     attempts = store.list_recent_healer_attempts(limit=max(1, int(window)))
+    metrics = _compute_reliability_metrics(attempts)
+    metrics["window"] = max(1, int(window))
+    return metrics
+
+
+def _reliability_daily_rollups(store: SQLiteStore, *, days: int = 30) -> list[dict[str, object]]:
+    attempts = store.list_healer_attempts_in_window(days=max(1, int(days)), limit=10_000)
+    by_day: dict[str, list[dict[str, object]]] = {}
+    for attempt in attempts:
+        started_at = str(attempt.get("started_at") or "").strip()
+        day = started_at[:10] if len(started_at) >= 10 else ""
+        if not day:
+            continue
+        by_day.setdefault(day, []).append(attempt)
+    rollups: list[dict[str, object]] = []
+    for day in sorted(by_day.keys(), reverse=True):
+        metrics = _compute_reliability_metrics(by_day[day])
+        rollups.append(
+            {
+                "day": day,
+                "sample_size": metrics["sample_size"],
+                "issue_count": metrics["issue_count"],
+                "first_pass_success_rate": metrics["first_pass_success_rate"],
+                "retries_per_success": metrics["retries_per_success"],
+                "wrong_root_execution_rate": metrics["wrong_root_execution_rate"],
+                "no_op_rate": metrics["no_op_rate"],
+                "mean_time_to_valid_pr_minutes": metrics["mean_time_to_valid_pr_minutes"],
+            }
+        )
+    return rollups[:max(1, int(days))]
+
+
+def _reliability_trend_metrics(store: SQLiteStore) -> dict[str, object]:
+    current_7 = _compute_reliability_metrics(store.list_healer_attempts_in_window(days=7, offset_days=0, limit=10_000))
+    previous_7 = _compute_reliability_metrics(store.list_healer_attempts_in_window(days=7, offset_days=7, limit=10_000))
+    current_30 = _compute_reliability_metrics(store.list_healer_attempts_in_window(days=30, offset_days=0, limit=20_000))
+    previous_30 = _compute_reliability_metrics(store.list_healer_attempts_in_window(days=30, offset_days=30, limit=20_000))
+    return {
+        "7d": _trend_window_snapshot(window_days=7, current=current_7, previous=previous_7),
+        "30d": _trend_window_snapshot(window_days=30, current=current_30, previous=previous_30),
+    }
+
+
+def _trend_window_snapshot(
+    *,
+    window_days: int,
+    current: dict[str, object],
+    previous: dict[str, object],
+) -> dict[str, object]:
+    current_first_pass = _safe_float(current.get("first_pass_success_rate"))
+    previous_first_pass = _safe_float(previous.get("first_pass_success_rate"))
+    current_no_op = _safe_float(current.get("no_op_rate"))
+    previous_no_op = _safe_float(previous.get("no_op_rate"))
+    current_wrong_root = _safe_float(current.get("wrong_root_execution_rate"))
+    previous_wrong_root = _safe_float(previous.get("wrong_root_execution_rate"))
+    current_mean_ttvp = _safe_float(current.get("mean_time_to_valid_pr_minutes"))
+    previous_mean_ttvp = _safe_float(previous.get("mean_time_to_valid_pr_minutes"))
+    return {
+        "window_days": int(window_days),
+        "current": current,
+        "previous": previous,
+        "changes": {
+            "first_pass_success_rate": round(current_first_pass - previous_first_pass, 4),
+            "no_op_rate": round(current_no_op - previous_no_op, 4),
+            "wrong_root_execution_rate": round(current_wrong_root - previous_wrong_root, 4),
+            "mean_time_to_valid_pr_minutes": round(current_mean_ttvp - previous_mean_ttvp, 4),
+            "sample_size": int(current.get("sample_size") or 0) - int(previous.get("sample_size") or 0),
+            "issue_count": int(current.get("issue_count") or 0) - int(previous.get("issue_count") or 0),
+        },
+        "improvements": {
+            "first_pass_success_rate_up": round(current_first_pass - previous_first_pass, 4),
+            "no_op_rate_down": round(previous_no_op - current_no_op, 4),
+            "wrong_root_execution_rate_down": round(previous_wrong_root - current_wrong_root, 4),
+            "mean_time_to_valid_pr_minutes_down": round(previous_mean_ttvp - current_mean_ttvp, 4),
+        },
+    }
+
+
+def _compute_reliability_metrics(attempts: list[dict[str, object]]) -> dict[str, object]:
     if not attempts:
         return {
-            "window": max(1, int(window)),
             "sample_size": 0,
             "issue_count": 0,
             "first_pass_success_rate": 0.0,
@@ -831,9 +990,7 @@ def _reliability_canary_metrics(store: SQLiteStore, *, window: int = 50) -> dict
         if valid_pr_durations
         else 0.0
     )
-
     return {
-        "window": max(1, int(window)),
         "sample_size": sample_size,
         "issue_count": issue_count,
         "first_pass_success_rate": round(first_pass_success_rate, 4),
@@ -842,6 +999,13 @@ def _reliability_canary_metrics(store: SQLiteStore, *, window: int = 50) -> dict
         "no_op_rate": round(no_op_rate, 4),
         "mean_time_to_valid_pr_minutes": round(mean_time_to_valid_pr, 2),
     }
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _attempt_duration_minutes(attempt: dict[str, object]) -> float | None:

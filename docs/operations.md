@@ -237,6 +237,14 @@ service:
 
 ## Monitoring
 
+`flow-healer status --repo <repo>` now includes three high-value reliability surfaces:
+
+- `retry_playbook_metrics`: retry strategy volume, dominant failure domain, and last selected playbook details.
+- `reliability_trends`: `7d` and `30d` windows with current vs previous-window deltas.
+- `reliability_daily_rollups`: per-day reliability summaries for quick regression spotting.
+
+When retry behavior drifts, start with `retry_playbook_metrics.dominant_domain` and `top_failure_classes` to decide whether to tune contract prompts, infra preflight, or code-focused retries.
+
 Check healer status:
 
 ~~~bash

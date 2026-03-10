@@ -303,7 +303,7 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
       </div>
     </section>
 
-    <section class='mb-6 grid grid-cols-1 gap-4 xl:grid-cols-3'>
+    <section class='mb-6 grid grid-cols-1 gap-4 xl:grid-cols-6'>
       <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
         <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Needs Clarification</div>
         <div class='mt-3 text-3xl font-semibold text-amber-200' x-text='needsClarificationIssues'></div>
@@ -315,6 +315,18 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
       <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
         <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Contract</div>
         <div class='mt-3 text-3xl font-semibold text-orange-200' x-text='failureDomainContract'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Retry Playbook Runs</div>
+        <div class='mt-3 text-3xl font-semibold text-lime-200' x-text='retryPlaybookRuns'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Retry Hotspot</div>
+        <div class='mt-3 text-2xl font-semibold text-lime-100' x-text='retryPlaybookHotspot'></div>
+      </div>
+      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>7d First-pass Delta</div>
+        <div class='mt-3 text-3xl font-semibold text-cyan-100' x-text='firstPassTrend7d'></div>
       </div>
     </section>
 
@@ -637,6 +649,34 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
         get failureDomainContract() {{
           return this.rows.reduce((acc, row) => acc + Number((row.failure_domain_metrics || {{}}).contract || 0), 0);
+        }},
+
+        get retryPlaybookRuns() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.retry_playbook_metrics || {{}}).total || 0), 0);
+        }},
+
+        get retryPlaybookHotspot() {{
+          const domainCounts = this.rows.reduce((acc, row) => {{
+            const domains = ((row.retry_playbook_metrics || {{}}).domain_counts || {{}});
+            for (const [domain, count] of Object.entries(domains)) {{
+              acc[domain] = (acc[domain] || 0) + Number(count || 0);
+            }}
+            return acc;
+          }}, {{}});
+          const entries = Object.entries(domainCounts).sort((a, b) => (Number(b[1]) - Number(a[1])) || String(a[0]).localeCompare(String(b[0])));
+          if (!entries.length) return 'none';
+          const [domain, count] = entries[0];
+          return `${{domain}} (${{count}})`;
+        }},
+
+        get firstPassTrend7d() {{
+          const values = this.rows
+            .map((row) => Number((((row.reliability_trends || {{}})['7d'] || {{}}).changes || {{}}).first_pass_success_rate || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return '0.0pp';
+          const avg = values.reduce((acc, value) => acc + value, 0) / values.length;
+          const pp = avg * 100;
+          return `${{pp >= 0 ? '+' : ''}}${{pp.toFixed(1)}}pp`;
         }},
 
         get activeAttempts() {{

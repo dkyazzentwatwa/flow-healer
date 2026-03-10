@@ -254,8 +254,14 @@ def test_render_dashboard_includes_reliability_and_domain_metric_cards(tmp_path:
     assert "Needs Clarification" in html
     assert "Failure Domain Infra" in html
     assert "Failure Domain Contract" in html
+    assert "Retry Playbook Runs" in html
+    assert "Retry Hotspot" in html
+    assert "7d First-pass Delta" in html
     assert "get canaryFirstPassRate()" in html
     assert "get nativeRecoveryRate()" in html
+    assert "get retryPlaybookRuns()" in html
+    assert "get retryPlaybookHotspot()" in html
+    assert "get firstPassTrend7d()" in html
     assert "x-text='activities.length'" not in html
 
 
