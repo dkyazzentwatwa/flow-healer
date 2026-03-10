@@ -1973,17 +1973,26 @@ def _normalize_explicit_validation_command(*, command: str, execution_root: str)
     normalized_cd = _normalize_repo_relative_shell_path(raw_cd)
 
     if not rest:
-        return candidate, ""
+        return _normalize_issue_validation_aliases(candidate, normalized_execution_root), ""
     if not normalized_cd or normalized_cd == ".":
-        return _join_shell_prefix_and_command(raw_prefix, rest), ""
+        return _normalize_issue_validation_aliases(
+            _join_shell_prefix_and_command(raw_prefix, rest),
+            normalized_execution_root,
+        ), ""
     if not normalized_execution_root:
-        return candidate, ""
+        return _normalize_issue_validation_aliases(candidate, normalized_execution_root), ""
     if normalized_cd == normalized_execution_root:
-        return _join_shell_prefix_and_command(raw_prefix, rest), ""
+        return _normalize_issue_validation_aliases(
+            _join_shell_prefix_and_command(raw_prefix, rest),
+            normalized_execution_root,
+        ), ""
     if normalized_cd.startswith(f"{normalized_execution_root}/"):
         relative_cd = normalized_cd[len(normalized_execution_root) + 1 :]
         rewritten = f"cd {shlex.quote(relative_cd)} && {rest}"
-        return _join_shell_prefix_and_command(raw_prefix, rewritten), ""
+        return _normalize_issue_validation_aliases(
+            _join_shell_prefix_and_command(raw_prefix, rewritten),
+            normalized_execution_root,
+        ), ""
     return (
         candidate,
         (
@@ -1991,6 +2000,19 @@ def _normalize_explicit_validation_command(*, command: str, execution_root: str)
             f"'{normalized_execution_root}'."
         ),
     )
+
+
+def _normalize_issue_validation_aliases(command: str, execution_root: str) -> str:
+    normalized_execution_root = _normalize_repo_relative_shell_path(execution_root)
+    if normalized_execution_root != "e2e-apps/prosper-chat":
+        return command
+
+    normalized = _normalize_validation_command(command)
+    if normalized[:2] != ("./scripts/healer_validate.sh", "frontend"):
+        return command
+
+    rebuilt = [normalized[0], "web", *normalized[2:]]
+    return " ".join(shlex.quote(part) for part in rebuilt)
 
 
 def _normalize_repo_relative_shell_path(path: str) -> str:

@@ -182,6 +182,69 @@ def test_load_normalizes_invalid_connector_backend_to_app_server(tmp_path) -> No
     assert config.service.connector_backend == "app_server"
 
 
+def test_load_normalizes_new_connector_backends(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "service:",
+                "  connector_backend: claude-cli",
+                "  connector_routing_mode: exec_for_code",
+                "  code_connector_backend: cline",
+                "  non_code_connector_backend: kilo-cli",
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    assert config.service.connector_backend == "claude_cli"
+    assert config.service.code_connector_backend == "cline"
+    assert config.service.non_code_connector_backend == "kilo_cli"
+
+
+def test_load_reads_new_connector_service_settings(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "service:",
+                "  claude_cli_command: /usr/local/bin/claude",
+                "  claude_cli_model: claude-sonnet-4-6",
+                "  claude_cli_dangerously_skip_permissions: false",
+                "  cline_command: /usr/local/bin/cline",
+                "  cline_model: gpt-4o",
+                "  cline_use_json: false",
+                "  cline_act_mode: false",
+                "  kilo_cli_command: /usr/local/bin/kilo",
+                "  kilo_cli_model: google/gemini-3-flash-preview",
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    assert config.service.claude_cli_command == "/usr/local/bin/claude"
+    assert config.service.claude_cli_model == "claude-sonnet-4-6"
+    assert config.service.claude_cli_dangerously_skip_permissions is False
+    assert config.service.cline_command == "/usr/local/bin/cline"
+    assert config.service.cline_model == "gpt-4o"
+    assert config.service.cline_use_json is False
+    assert config.service.cline_act_mode is False
+    assert config.service.kilo_cli_command == "/usr/local/bin/kilo"
+    assert config.service.kilo_cli_model == "google/gemini-3-flash-preview"
+
+
 def test_load_supports_exec_for_code_routing_mode(tmp_path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

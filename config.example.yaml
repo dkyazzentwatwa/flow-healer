@@ -4,10 +4,33 @@ service:
   github_api_base_url: https://api.github.com
   poll_interval_seconds: 30
   state_root: ~/.flow-healer
+  # Valid backends: exec | app_server | claude_cli | cline | kilo_cli
   connector_backend: exec
+  # Optional split routing: single_backend | exec_for_code
+  connector_routing_mode: single_backend
+  code_connector_backend: exec
+  non_code_connector_backend: app_server
+
+  # Codex settings
   connector_command: codex
   connector_model: gpt-5.4
   connector_reasoning_effort: medium
+
+  # Claude CLI settings (used when backend is claude_cli)
+  claude_cli_command: claude
+  claude_cli_model: ""
+  claude_cli_dangerously_skip_permissions: true
+
+  # Cline settings (used when backend is cline)
+  cline_command: cline
+  cline_model: ""
+  cline_use_json: true
+  cline_act_mode: true
+
+  # Kilo settings (used when backend is kilo_cli)
+  kilo_cli_command: kilo
+  kilo_cli_model: ""
+
   connector_timeout_seconds: 300
 
 control:

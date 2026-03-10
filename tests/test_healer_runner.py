@@ -136,6 +136,37 @@ def test_run_test_gates_prefers_explicit_validation_commands(monkeypatch, tmp_pa
     assert summary["validation_commands"] == ["./scripts/healer_validate.sh full"]
 
 
+def test_run_test_gates_normalizes_prosper_chat_frontend_validation_alias(monkeypatch, tmp_path):
+    calls: list[tuple[str, object]] = []
+
+    def fake_explicit(workspace: Path, commands: tuple[str, ...], timeout_seconds: int):
+        calls.append(("explicit", commands))
+        return {"exit_code": 0, "output_tail": "explicit ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_explicit_validation_commands", fake_explicit)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="node",
+            language_effective="node",
+            execution_root="e2e-apps/prosper-chat",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("node"),
+        ),
+        validation_commands=("cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh frontend",),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("explicit", ("./scripts/healer_validate.sh web",))]
+    assert summary["local_full_status"] == "passed"
+    assert summary["validation_commands"] == ["./scripts/healer_validate.sh web"]
+
+
 def test_run_test_gates_expands_sql_issue_validation_to_targeted_then_full(monkeypatch, tmp_path):
     calls: list[tuple[str, object]] = []
 

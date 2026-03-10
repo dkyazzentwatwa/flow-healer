@@ -222,14 +222,10 @@ class AutonomousHealerLoop:
         self.non_code_connector_backend = str(non_code_connector_backend or "app_server")
         self.connectors_by_backend: dict[str, ConnectorProtocol] = dict(connectors_by_backend or {})
         if not self.connectors_by_backend:
-            default_backend = (
-                "app_server" if connector.__class__.__name__ == "CodexAppServerConnector" else "exec"
-            )
+            default_backend = _default_backend_for_connector(connector)
             self.connectors_by_backend[default_backend] = connector
         elif all(existing is not connector for existing in self.connectors_by_backend.values()):
-            default_backend = (
-                "app_server" if connector.__class__.__name__ == "CodexAppServerConnector" else "exec"
-            )
+            default_backend = _default_backend_for_connector(connector)
             self.connectors_by_backend.setdefault(default_backend, connector)
         self.repo_path = Path(settings.healer_repo_path).expanduser().resolve()
         self.worker_id = f"healer_{uuid4().hex[:8]}"
@@ -311,10 +307,12 @@ class AutonomousHealerLoop:
     def _primary_backend(self) -> str:
         if self.connector_routing_mode == "exec_for_code":
             return self.code_connector_backend
-        app_server_connector = self.connectors_by_backend.get("app_server")
-        if app_server_connector is self.connector:
-            return "app_server"
-        return "exec"
+        for backend, existing in self.connectors_by_backend.items():
+            if existing is self.connector:
+                return backend
+        if self.connectors_by_backend:
+            return next(iter(self.connectors_by_backend))
+        return _default_backend_for_connector(self.connector)
 
     def _select_backend_for_task(self, task_spec: HealerTaskSpec) -> str:
         if self.connector_routing_mode != "exec_for_code":
@@ -3416,6 +3414,11 @@ class AutonomousHealerLoop:
                     "resolved_command": str(health.get("resolved_command") or ""),
                     "availability_reason": str(health.get("availability_reason") or ""),
                     "last_health_error": str(health.get("last_health_error") or ""),
+                    "fallback_backend": str(health.get("fallback_backend") or ""),
+                    "fallback_available": bool(health.get("fallback_available")),
+                    "fallback_attempts": str(health.get("fallback_attempts") or ""),
+                    "fallback_successes": str(health.get("fallback_successes") or ""),
+                    "last_fallback_reason": str(health.get("last_fallback_reason") or ""),
                 }
             except Exception as exc:
                 return {
@@ -3448,6 +3451,11 @@ class AutonomousHealerLoop:
                 "healer_connector_resolved_command": str(health.get("resolved_command") or ""),
                 "healer_connector_availability_reason": str(health.get("availability_reason") or ""),
                 "healer_connector_last_checked_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                "healer_connector_fallback_backend": str(health.get("fallback_backend") or ""),
+                "healer_connector_fallback_available": "true" if bool(health.get("fallback_available")) else "false",
+                "healer_connector_fallback_attempts": str(health.get("fallback_attempts") or ""),
+                "healer_connector_fallback_successes": str(health.get("fallback_successes") or ""),
+                "healer_connector_last_fallback_reason": str(health.get("last_fallback_reason") or ""),
             }
         )
 
@@ -4457,3 +4465,16 @@ def _strip_execution_root_prefix(*, target: str, execution_root: str) -> str:
     if execution_root and cleaned.startswith(f"{execution_root}/"):
         return cleaned[len(execution_root) + 1 :]
     return cleaned
+
+
+def _default_backend_for_connector(connector: ConnectorProtocol) -> str:
+    class_name = connector.__class__.__name__
+    if class_name == "CodexAppServerConnector":
+        return "app_server"
+    if class_name == "ClaudeCliConnector":
+        return "claude_cli"
+    if class_name == "ClineConnector":
+        return "cline"
+    if class_name == "KiloCliConnector":
+        return "kilo_cli"
+    return "exec"

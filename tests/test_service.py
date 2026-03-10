@@ -1,10 +1,14 @@
 from pathlib import Path
 
+from flow_healer.claude_cli_connector import ClaudeCliConnector
+from flow_healer.cline_connector import ClineConnector
 from flow_healer.codex_app_server_connector import CodexAppServerConnector
 from flow_healer.codex_cli_connector import CodexCliConnector
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
+from flow_healer.fallback_connector import FailoverConnector
 from flow_healer.healer_preflight import preflight_cache_key
 from flow_healer.healer_tracker import GitHubHealerTracker
+from flow_healer.kilo_cli_connector import KiloCliConnector
 from flow_healer.local_healer_tracker import LocalHealerTracker
 from flow_healer.service import FlowHealerService
 from flow_healer.store import SQLiteStore
@@ -257,6 +261,49 @@ def test_build_runtime_uses_configured_connector_backend(tmp_path) -> None:
     app_server_service._close_runtime(app_runtime)
 
 
+def test_build_runtime_supports_new_cli_connector_backends(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+
+    claude_service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root / "claude"), connector_backend="claude_cli"),
+            repos=[repo],
+        )
+    )
+    claude_runtime = claude_service.build_runtime(repo)
+    assert isinstance(claude_runtime.connector, FailoverConnector)
+    assert isinstance(claude_runtime.connector.primary, ClaudeCliConnector)
+    assert isinstance(claude_runtime.connector.fallback, CodexCliConnector)
+    claude_service._close_runtime(claude_runtime)
+
+    cline_service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root / "cline"), connector_backend="cline"),
+            repos=[repo],
+        )
+    )
+    cline_runtime = cline_service.build_runtime(repo)
+    assert isinstance(cline_runtime.connector, FailoverConnector)
+    assert isinstance(cline_runtime.connector.primary, ClineConnector)
+    assert isinstance(cline_runtime.connector.fallback, CodexCliConnector)
+    cline_service._close_runtime(cline_runtime)
+
+    kilo_service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root / "kilo"), connector_backend="kilo_cli"),
+            repos=[repo],
+        )
+    )
+    kilo_runtime = kilo_service.build_runtime(repo)
+    assert isinstance(kilo_runtime.connector, FailoverConnector)
+    assert isinstance(kilo_runtime.connector.primary, KiloCliConnector)
+    assert isinstance(kilo_runtime.connector.fallback, CodexCliConnector)
+    kilo_service._close_runtime(kilo_runtime)
+
+
 def test_build_runtime_uses_exec_for_code_routing_mode(tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -280,6 +327,32 @@ def test_build_runtime_uses_exec_for_code_routing_mode(tmp_path) -> None:
     assert "app_server" in runtime.connectors_by_backend
     assert isinstance(runtime.connectors_by_backend["exec"], CodexCliConnector)
     assert isinstance(runtime.connectors_by_backend["app_server"], CodexAppServerConnector)
+    routing_service._close_runtime(runtime)
+
+
+def test_build_runtime_uses_non_codex_backends_with_exec_failover_in_exec_for_code_mode(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+
+    routing_service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(
+                state_root=str(state_root),
+                connector_routing_mode="exec_for_code",
+                code_connector_backend="cline",
+                non_code_connector_backend="kilo_cli",
+            ),
+            repos=[repo],
+        )
+    )
+    runtime = routing_service.build_runtime(repo)
+    assert isinstance(runtime.connector, FailoverConnector)
+    assert isinstance(runtime.connectors_by_backend["cline"], FailoverConnector)
+    assert isinstance(runtime.connectors_by_backend["kilo_cli"], FailoverConnector)
+    assert isinstance(runtime.connectors_by_backend["cline"].fallback, CodexCliConnector)  # type: ignore[attr-defined]
+    assert isinstance(runtime.connectors_by_backend["kilo_cli"].fallback, CodexCliConnector)  # type: ignore[attr-defined]
     routing_service._close_runtime(runtime)
 
 

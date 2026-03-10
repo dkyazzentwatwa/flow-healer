@@ -100,7 +100,7 @@ run_db() {
 }
 
 case "$MODE" in
-  web)
+  web|frontend)
     run_web
     ;;
   db)
@@ -114,7 +114,7 @@ case "$MODE" in
     run_db
     ;;
   *)
-    echo "usage: ./scripts/healer_validate.sh [web|db|backend|full]" >&2
+    echo "usage: ./scripts/healer_validate.sh [web|frontend|db|backend|full]" >&2
     exit 2
     ;;
 esac

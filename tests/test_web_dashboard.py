@@ -223,6 +223,24 @@ def test_render_dashboard_uses_dedicated_log_feed_for_logs_tab(tmp_path: Path) -
     assert "this.logEvents" in html
 
 
+def test_render_dashboard_embeds_raw_json_in_initial_data_script(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "<script id='initial-data' type='application/json'>{&quot;" not in html
+    assert "<script id='initial-data' type='application/json'>{\"" in html
+
+
+def test_render_dashboard_activity_rows_counter_binds_to_activity(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "x-text='activity.length'" in html
+    assert "x-text='activities.length'" not in html
+
+
 def test_render_dashboard_includes_mobile_activity_cards(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 

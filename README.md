@@ -21,7 +21,7 @@
 
 ## Why Flow Healer
 
-Flow Healer is for repositories that need more than issue triage. It watches GitHub issues, routes work into isolated worktrees, asks Codex to produce a fix, runs validation gates, opens or updates the pull request, and preserves enough local state to retry safely when something goes wrong.
+Flow Healer is for repositories that need more than issue triage. It watches GitHub issues, routes work into isolated worktrees, asks the configured connector (Codex by default) to produce a fix, runs validation gates, opens or updates the pull request, and preserves enough local state to retry safely when something goes wrong.
 
 It is designed as a practical operations loop, not just an issue generator. The service combines deterministic scanning, issue-driven healing, PR feedback ingestion, and runtime guardrails so maintainers can keep one or many repos moving without turning every broken issue into manual toil.
 
@@ -54,7 +54,7 @@ GitHub Issue labeled healer:ready
    execution root, language, and validation
                 |
                 v
-      Codex generates a candidate fix
+      The configured connector generates a candidate fix
                 |
                 v
    Local and/or Docker validation gates run
@@ -76,7 +76,7 @@ Flow Healer's default happy path looks like this:
 1. A maintainer opens or labels a GitHub issue with `healer:ready`.
 2. Flow Healer claims the issue and creates an isolated worktree.
 3. The issue body is parsed into required outputs, reference-only context, validation commands, and language hints.
-4. Codex produces a patch inside the worktree.
+4. The configured connector (Codex by default) produces a patch inside the worktree.
 5. Flow Healer runs verification using the right execution root and language strategy.
 6. If the candidate survives verification, Flow Healer opens or updates the PR.
 7. If a human leaves PR feedback, Flow Healer ingests that comment and re-queues a refined attempt.
@@ -186,6 +186,7 @@ service:
   github_token_env: GITHUB_TOKEN
   poll_interval_seconds: 60
   state_root: ~/.flow-healer
+  # exec | app_server | claude_cli | cline | kilo_cli
   connector_backend: exec
   connector_command: codex
   connector_model: gpt-5.4

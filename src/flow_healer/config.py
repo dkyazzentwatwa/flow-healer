@@ -24,6 +24,15 @@ class ServiceSettings:
     connector_command: str = "codex"
     connector_model: str = "gpt-5.4"
     connector_reasoning_effort: str = "medium"
+    claude_cli_command: str = "claude"
+    claude_cli_model: str = ""
+    claude_cli_dangerously_skip_permissions: bool = True
+    cline_command: str = "cline"
+    cline_model: str = ""
+    cline_use_json: bool = True
+    cline_act_mode: bool = True
+    kilo_cli_command: str = "kilo"
+    kilo_cli_model: str = ""
     connector_timeout_seconds: int = 300
     tracker_backend: str = "github"
 
@@ -187,6 +196,17 @@ class AppConfig:
             connector_command=str(service_raw.get("connector_command") or "codex"),
             connector_model=str(service_raw.get("connector_model") or "gpt-5.4"),
             connector_reasoning_effort=str(service_raw.get("connector_reasoning_effort") or "medium"),
+            claude_cli_command=str(service_raw.get("claude_cli_command") or "claude"),
+            claude_cli_model=str(service_raw.get("claude_cli_model") or ""),
+            claude_cli_dangerously_skip_permissions=bool(
+                service_raw.get("claude_cli_dangerously_skip_permissions", True)
+            ),
+            cline_command=str(service_raw.get("cline_command") or "cline"),
+            cline_model=str(service_raw.get("cline_model") or ""),
+            cline_use_json=bool(service_raw.get("cline_use_json", True)),
+            cline_act_mode=bool(service_raw.get("cline_act_mode", True)),
+            kilo_cli_command=str(service_raw.get("kilo_cli_command") or "kilo"),
+            kilo_cli_model=str(service_raw.get("kilo_cli_model") or ""),
             connector_timeout_seconds=int(service_raw.get("connector_timeout_seconds") or 300),
             tracker_backend=_normalize_tracker_backend(service_raw.get("tracker_backend")),
         )
@@ -359,12 +379,19 @@ def _list_of_str(value: Any, default: list[str]) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+_SUPPORTED_CONNECTOR_BACKENDS = {"exec", "app_server", "claude_cli", "cline", "kilo_cli"}
+
+
 def _normalize_connector_backend(value: Any) -> str:
     raw = str(value or "app_server").strip().lower().replace("-", "_")
-    if raw in {"exec", "app_server"}:
+    if raw in _SUPPORTED_CONNECTOR_BACKENDS:
         return raw
     if raw == "appserver":
         return "app_server"
+    if raw == "claude":
+        return "claude_cli"
+    if raw == "kilo":
+        return "kilo_cli"
     return "app_server"
 
 
@@ -382,9 +409,9 @@ def _apply_connector_routing_defaults(service: ServiceSettings) -> ServiceSettin
         service.non_code_connector_backend = service.connector_backend
         return service
 
-    if service.code_connector_backend not in {"exec", "app_server"}:
+    if service.code_connector_backend not in _SUPPORTED_CONNECTOR_BACKENDS:
         service.code_connector_backend = "exec"
-    if service.non_code_connector_backend not in {"exec", "app_server"}:
+    if service.non_code_connector_backend not in _SUPPORTED_CONNECTOR_BACKENDS:
         service.non_code_connector_backend = "app_server"
     return service
 

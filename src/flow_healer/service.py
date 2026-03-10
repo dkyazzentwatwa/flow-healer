@@ -10,15 +10,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
+from .claude_cli_connector import ClaudeCliConnector
+from .cline_connector import ClineConnector
 from .codex_app_server_connector import CodexAppServerConnector
 from .codex_cli_connector import CodexCliConnector
 from .config import AppConfig, RelaySettings
+from .fallback_connector import FailoverConnector
 from .healer_loop import AutonomousHealerLoop
 from .healer_preflight import list_cached_preflight_reports
 from .healer_reconciler import HealerReconciler
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker
 from .healer_triage import classify_issue_route
+from .kilo_cli_connector import KiloCliConnector
 from .local_healer_tracker import LocalHealerTracker
 from .protocols import ConnectorProtocol
 from .skill_contracts import audit_skill_contracts
@@ -70,22 +74,54 @@ class FlowHealerService:
                 poll_use_conditional_requests=repo.healer_poll_use_conditional_requests,
                 poll_etag_ttl_seconds=repo.healer_poll_etag_ttl_seconds,
             )
+        connector_cache: dict[str, ConnectorProtocol] = {}
+
         def _build_connector(backend: str) -> ConnectorProtocol:
+            cached = connector_cache.get(backend)
+            if cached is not None:
+                return cached
             if backend == "app_server":
-                return CodexAppServerConnector(
+                connector = CodexAppServerConnector(
                     workspace=repo.healer_repo_path,
                     codex_command=self.config.service.connector_command,
                     timeout=self.config.service.connector_timeout_seconds,
                     model=self.config.service.connector_model,
                     reasoning_effort=self.config.service.connector_reasoning_effort,
                 )
-            return CodexCliConnector(
-                workspace=repo.healer_repo_path,
-                codex_command=self.config.service.connector_command,
-                timeout=self.config.service.connector_timeout_seconds,
-                model=self.config.service.connector_model,
-                reasoning_effort=self.config.service.connector_reasoning_effort,
-            )
+            elif backend == "claude_cli":
+                connector = ClaudeCliConnector(
+                    workspace=repo.healer_repo_path,
+                    claude_command=self.config.service.claude_cli_command,
+                    timeout=self.config.service.connector_timeout_seconds,
+                    model=self.config.service.claude_cli_model,
+                    dangerously_skip_permissions=self.config.service.claude_cli_dangerously_skip_permissions,
+                )
+            elif backend == "cline":
+                connector = ClineConnector(
+                    workspace=repo.healer_repo_path,
+                    cline_command=self.config.service.cline_command,
+                    timeout=self.config.service.connector_timeout_seconds,
+                    model=self.config.service.cline_model,
+                    use_json=self.config.service.cline_use_json,
+                    act_mode=self.config.service.cline_act_mode,
+                )
+            elif backend == "kilo_cli":
+                connector = KiloCliConnector(
+                    workspace=repo.healer_repo_path,
+                    kilo_cli_command=self.config.service.kilo_cli_command,
+                    timeout=self.config.service.connector_timeout_seconds,
+                    model=self.config.service.kilo_cli_model,
+                )
+            else:
+                connector = CodexCliConnector(
+                    workspace=repo.healer_repo_path,
+                    codex_command=self.config.service.connector_command,
+                    timeout=self.config.service.connector_timeout_seconds,
+                    model=self.config.service.connector_model,
+                    reasoning_effort=self.config.service.connector_reasoning_effort,
+                )
+            connector_cache[backend] = connector
+            return connector
 
         routing_mode = self.config.service.connector_routing_mode
         if routing_mode == "exec_for_code":
@@ -94,11 +130,28 @@ class FlowHealerService:
             connectors_by_backend: dict[str, ConnectorProtocol] = {}
             for backend in {code_backend, non_code_backend}:
                 connectors_by_backend[backend] = _build_connector(backend)
+            fallback_exec_connector = connectors_by_backend.get("exec") or _build_connector("exec")
+            for backend, backend_connector in list(connectors_by_backend.items()):
+                if backend in {"exec", "app_server"}:
+                    continue
+                connectors_by_backend[backend] = FailoverConnector(
+                    primary_backend=backend,
+                    primary=backend_connector,
+                    fallback_backend="exec",
+                    fallback=fallback_exec_connector,
+                )
             connector = connectors_by_backend[code_backend]
         else:
             code_backend = self.config.service.connector_backend
             non_code_backend = self.config.service.connector_backend
             connector = _build_connector(self.config.service.connector_backend)
+            if self.config.service.connector_backend not in {"exec", "app_server"}:
+                connector = FailoverConnector(
+                    primary_backend=self.config.service.connector_backend,
+                    primary=connector,
+                    fallback_backend="exec",
+                    fallback=_build_connector("exec"),
+                )
             connectors_by_backend = {self.config.service.connector_backend: connector}
 
         loop = AutonomousHealerLoop(
@@ -230,6 +283,11 @@ class FlowHealerService:
                             "last_runtime_error_kind": connector_health.get("last_runtime_error_kind"),
                             "last_runtime_stdout_tail": connector_health.get("last_runtime_stdout_tail"),
                             "last_runtime_stderr_tail": connector_health.get("last_runtime_stderr_tail"),
+                            "fallback_backend": connector_health.get("fallback_backend"),
+                            "fallback_available": connector_health.get("fallback_available"),
+                            "fallback_attempts": connector_health.get("fallback_attempts"),
+                            "fallback_successes": connector_health.get("fallback_successes"),
+                            "last_fallback_reason": connector_health.get("last_fallback_reason"),
                             "last_checked_at": runtime.store.get_state("healer_connector_last_checked_at") or "",
                             "last_error_class": runtime.store.get_state("healer_connector_last_error_class") or "",
                             "last_error_reason": runtime.store.get_state("healer_connector_last_error_reason") or "",
@@ -401,6 +459,12 @@ class FlowHealerService:
             "resolved_command": resolved_command,
             "availability_reason": availability_reason,
             "last_health_error": str(store.get_state("healer_connector_last_error_reason") or "").strip(),
+            "fallback_backend": str(store.get_state("healer_connector_fallback_backend") or "").strip(),
+            "fallback_available": str(store.get_state("healer_connector_fallback_available") or "").strip().lower()
+            == "true",
+            "fallback_attempts": str(store.get_state("healer_connector_fallback_attempts") or "").strip(),
+            "fallback_successes": str(store.get_state("healer_connector_fallback_successes") or "").strip(),
+            "last_fallback_reason": str(store.get_state("healer_connector_last_fallback_reason") or "").strip(),
         }
         if backend_name and not configured_command:
             payload["configured_command"] = str(runtime.connectors_by_backend.get(backend_name).__class__.__name__)
@@ -467,6 +531,11 @@ class FlowHealerService:
                         "connector_last_runtime_error_kind": connector_health.get("last_runtime_error_kind"),
                         "connector_last_runtime_stdout_tail": connector_health.get("last_runtime_stdout_tail"),
                         "connector_last_runtime_stderr_tail": connector_health.get("last_runtime_stderr_tail"),
+                        "connector_fallback_backend": connector_health.get("fallback_backend"),
+                        "connector_fallback_available": connector_health.get("fallback_available"),
+                        "connector_fallback_attempts": connector_health.get("fallback_attempts"),
+                        "connector_fallback_successes": connector_health.get("fallback_successes"),
+                        "connector_last_fallback_reason": connector_health.get("last_fallback_reason"),
                         "connector_backends": connector_health_by_backend,
                         "last_failure_fingerprint": runtime.store.get_state("healer_last_failure_fingerprint") or "",
                         "last_failure_fingerprint_issue_id": runtime.store.get_state("healer_last_failure_fingerprint_issue_id") or "",

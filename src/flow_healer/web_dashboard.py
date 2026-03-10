@@ -168,7 +168,7 @@ class DashboardServer:
 def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str) -> str:
     payload = _overview_payload(config, service)
     repo_names = [repo.repo_name for repo in config.repos]
-    initial = escape(json.dumps(payload, default=str))
+    initial = json.dumps(payload, default=str).replace("</", "<\\/")
     repo_actions = _render_repo_action_cards(config)
     repo_options = "".join(
         f"<option value='{escape(repo_name)}'>{escape(repo_name)}</option>" for repo_name in repo_names
@@ -235,7 +235,7 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           </div>
           <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
             <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Activity Rows</div>
-            <div class='mt-2 text-lg font-semibold text-white' x-text='activities.length'></div>
+            <div class='mt-2 text-lg font-semibold text-white' x-text='activity.length'></div>
           </div>
           <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
             <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Log Files</div>
@@ -476,6 +476,7 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
         rows: [],
         activity: [],
         logs: [],
+        logEvents: [],
         activeActions: '',
         refreshMs: {_REFRESH_MS},
         kindFilter: 'all',
@@ -510,8 +511,12 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
         }},
 
         get filteredActivities() {{
+          let sourceRows = this.activity;
+          if (this.kindFilter === 'log') {{
+            sourceRows = this.logEvents;
+          }}
           const search = (this.searchText || '').trim().toLowerCase();
-          return this.activity.filter((item) => {{
+          return sourceRows.filter((item) => {{
             if (this.kindFilter !== 'all' && item.kind !== this.kindFilter) {{
               return false;
             }}
@@ -542,7 +547,9 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           if (!this.selectedActivityId) {{
             return null;
           }}
-          return this.activity.find((item) => item.id === this.selectedActivityId) || this.selectedActivitySnapshot;
+          return this.activity.find((item) => item.id === this.selectedActivityId)
+            || this.logEvents.find((item) => item.id === this.selectedActivityId)
+            || this.selectedActivitySnapshot;
         }},
 
         get activitySummary() {{
@@ -610,10 +617,12 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           this.activity = Array.isArray(payload.activity) ? payload.activity : [];
           const logsData = payload.logs || {{}};
           this.logs = Array.isArray(logsData.lines) ? logsData.lines : [];
+          this.logEvents = Array.isArray(logsData.events) ? logsData.events : [];
           this.logFiles = Array.isArray(logsData.files) ? logsData.files : [];
           this.generatedAt = payload.generated_at || '';
           if (this.selectedActivityId) {{
-            const live = this.activity.find((item) => item.id === this.selectedActivityId);
+            const live = this.activity.find((item) => item.id === this.selectedActivityId)
+              || this.logEvents.find((item) => item.id === this.selectedActivityId);
             if (live) {{
               this.selectedActivitySnapshot = live;
             }}
@@ -622,7 +631,9 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
         openInspector(id) {{
           this.selectedActivityId = id;
-          this.selectedActivitySnapshot = this.activity.find((item) => item.id === id) || null;
+          this.selectedActivitySnapshot = this.activity.find((item) => item.id === id)
+            || this.logEvents.find((item) => item.id === id)
+            || null;
         }},
 
         closeInspector() {{
