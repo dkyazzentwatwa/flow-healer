@@ -204,8 +204,12 @@ export function add(...operands) {
   // Preserve identity-like behavior for empty and single-operand calls.
   const operandCount = operands.length;
 
-  if (operandCount <= 1) {
+  if (operandCount === 0) {
     return getInitialAccumulatedSum(operands);
+  }
+
+  if (operandCount === 1) {
+    return normalizeZero(normalizeOperand(operands[0]));
   }
 
   return sumOperands(operands.map(normalizeOperand));
