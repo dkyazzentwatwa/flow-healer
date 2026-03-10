@@ -9,6 +9,7 @@ from flow_healer.sql_validation import (
     database_is_ready,
     database_container_is_paused,
     database_container_for_project,
+    ensure_local_supabase_stack,
     pause_local_database_container,
     resume_local_database_container,
     load_sql_checks,
@@ -95,6 +96,24 @@ def test_load_sql_checks_accepts_repo_relative_selected_paths(tmp_path: Path) ->
     assert checks == [SqlCheck(name="policy", path=policy_file.resolve())]
 
 
+def test_load_sql_checks_rejects_manifest_paths_outside_repo_root(tmp_path: Path) -> None:
+    manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
+    outside_file = tmp_path / "outside.sql"
+    manifest.parent.mkdir(parents=True)
+    outside_file.write_text("select 1;\n", encoding="utf-8")
+    manifest.write_text(
+        '{"checks":[{"name":"escape","path":"../outside.sql"}]}',
+        encoding="utf-8",
+    )
+
+    try:
+        load_sql_checks(project_dir=tmp_path, manifest_path=manifest)
+    except ValueError as exc:
+        assert "outside the project directory" in str(exc)
+    else:
+        raise AssertionError("expected load_sql_checks to reject manifest paths outside the repo root")
+
+
 def test_load_sql_checks_allows_ad_hoc_selected_paths_not_in_manifest(tmp_path: Path) -> None:
     manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
     schema_file = tmp_path / "supabase" / "assertions" / "schema.sql"
@@ -136,6 +155,30 @@ def test_load_sql_checks_rejects_missing_ad_hoc_selected_paths(tmp_path: Path) -
         assert "does not exist" in str(exc)
     else:
         raise AssertionError("expected load_sql_checks to reject unknown selected paths")
+
+
+def test_load_sql_checks_rejects_ad_hoc_selected_paths_outside_repo_root(tmp_path: Path) -> None:
+    manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
+    check_file = tmp_path / "supabase" / "assertions" / "schema.sql"
+    outside_file = tmp_path / "outside.sql"
+    check_file.parent.mkdir(parents=True)
+    check_file.write_text("select 1;\n", encoding="utf-8")
+    outside_file.write_text("select 2;\n", encoding="utf-8")
+    manifest.write_text(
+        '{"checks":[{"name":"schema","path":"supabase/assertions/schema.sql"}]}',
+        encoding="utf-8",
+    )
+
+    try:
+        load_sql_checks(
+            project_dir=tmp_path,
+            manifest_path=manifest,
+            selected_paths=("../outside.sql",),
+        )
+    except ValueError as exc:
+        assert "outside the project directory" in str(exc)
+    else:
+        raise AssertionError("expected load_sql_checks to reject ad hoc paths outside the repo root")
 
 
 def test_build_sql_check_script_includes_context_and_rollback(tmp_path: Path) -> None:
@@ -268,7 +311,7 @@ def test_wait_for_database_ready_polls_until_success(monkeypatch) -> None:
     assert sleeps == [0.25, 0.25]
 
 
-def test_reset_local_database_tolerates_transient_upstream_failure_when_db_recovers(monkeypatch, tmp_path: Path) -> None:
+def test_reset_local_database_raises_when_reset_fails(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -279,6 +322,91 @@ def test_reset_local_database_tolerates_transient_upstream_failure_when_db_recov
             stderr="Error status 502: An invalid response was received from the upstream server",
         ),
     )
-    monkeypatch.setattr("flow_healer.sql_validation.wait_for_database_ready", lambda **kwargs: True)
+    try:
+        reset_local_database(project_dir=tmp_path, project_id="demo123")
+    except RuntimeError as exc:
+        assert "supabase db reset failed" in str(exc)
+        assert "Error status 502" in str(exc)
+    else:
+        raise AssertionError("expected reset_local_database to fail when supabase db reset exits non-zero")
 
-    reset_local_database(project_dir=tmp_path, project_id="demo123")
+
+def test_ensure_local_supabase_stack_skips_start_when_database_probe_is_ready(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["supabase", "status"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unhealthy")
+        raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+    monkeypatch.setattr("flow_healer.sql_validation.ensure_docker_runtime_running", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation.record_docker_activity", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation._ensure_command_available", lambda command: None)
+    monkeypatch.setattr("flow_healer.sql_validation.project_id_for_project_dir", lambda _project_dir: "demo123")
+    monkeypatch.setattr("flow_healer.sql_validation.resume_local_database_container", lambda *, project_id: False)
+    monkeypatch.setattr("flow_healer.sql_validation.wait_for_database_ready", lambda **kwargs: True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ensure_local_supabase_stack(project_dir=tmp_path)
+
+    assert calls == [["supabase", "status"]]
+
+
+def test_ensure_local_supabase_stack_starts_when_status_and_probe_fail(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+    ready_checks = iter([False, True])
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["supabase", "status"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unhealthy")
+        if cmd == ["supabase", "start"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="started", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+    monkeypatch.setattr("flow_healer.sql_validation.ensure_docker_runtime_running", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation.record_docker_activity", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation._ensure_command_available", lambda command: None)
+    monkeypatch.setattr("flow_healer.sql_validation.project_id_for_project_dir", lambda _project_dir: "demo123")
+    monkeypatch.setattr("flow_healer.sql_validation.resume_local_database_container", lambda *, project_id: False)
+    monkeypatch.setattr(
+        "flow_healer.sql_validation.wait_for_database_ready",
+        lambda **kwargs: next(ready_checks),
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ensure_local_supabase_stack(project_dir=tmp_path)
+
+    assert calls == [["supabase", "status"], ["supabase", "start"]]
+
+
+def test_ensure_local_supabase_stack_attempts_resume_before_status(monkeypatch, tmp_path: Path) -> None:
+    resumed: list[str] = []
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["supabase", "status"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="paused")
+        raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+    monkeypatch.setattr("flow_healer.sql_validation.ensure_docker_runtime_running", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation.record_docker_activity", lambda **kwargs: None)
+    monkeypatch.setattr("flow_healer.sql_validation._ensure_command_available", lambda command: None)
+    monkeypatch.setattr("flow_healer.sql_validation.project_id_for_project_dir", lambda _project_dir: "demo123")
+    monkeypatch.setattr(
+        "flow_healer.sql_validation.resume_local_database_container",
+        lambda *, project_id: resumed.append(project_id) or True,
+    )
+    monkeypatch.setattr("flow_healer.sql_validation.wait_for_database_ready", lambda **kwargs: True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ensure_local_supabase_stack(project_dir=tmp_path)
+
+    assert resumed == ["demo123"]
+    assert calls == [["supabase", "status"]]

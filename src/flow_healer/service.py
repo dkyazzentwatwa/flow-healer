@@ -5,8 +5,10 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from .codex_app_server_connector import CodexAppServerConnector
 from .codex_cli_connector import CodexCliConnector
@@ -33,9 +35,17 @@ class RepoRuntime:
     connectors_by_backend: dict[str, ConnectorProtocol]
 
 
+@dataclass(slots=True)
+class StatusSnapshot:
+    rows: list[dict[str, object]]
+    generated_at: float
+
+
 class FlowHealerService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self._status_cache: dict[str, StatusSnapshot] = {}
+        self._status_cache_lock = Lock()
 
     def build_runtime(self, repo: RelaySettings) -> RepoRuntime:
         store = SQLiteStore(
@@ -121,6 +131,7 @@ class FlowHealerService:
                     runtime.loop._tick_once()
                 finally:
                     self._close_runtime(runtime)
+                self._invalidate_status_cache(repo.repo_name)
             return
 
         async def _run() -> None:
@@ -132,17 +143,35 @@ class FlowHealerService:
                 stop = True
                 for runtime in runtimes:
                     self._close_runtime(runtime)
+                self._invalidate_status_cache(repo_name)
 
         asyncio.run(_run())
 
-    def status_rows(self, repo_name: str | None = None) -> list[dict[str, object]]:
+    def status_rows(
+        self,
+        repo_name: str | None = None,
+        *,
+        force_refresh: bool = False,
+        probe_connector: bool = False,
+    ) -> list[dict[str, object]]:
+        cache_key = (repo_name or "").strip() or "*"
+        ttl_seconds = self._status_cache_ttl_seconds(repo_name)
+        if not force_refresh and ttl_seconds > 0:
+            with self._status_cache_lock:
+                cached = self._status_cache.get(cache_key)
+                if cached is not None and (time.monotonic() - cached.generated_at) <= ttl_seconds:
+                    return [dict(row) for row in cached.rows]
         rows: list[dict[str, object]] = []
         for repo in self.config.select_repos(repo_name):
             runtime = self.build_runtime(repo)
             try:
-                connector_health = runtime.loop._connector_health_snapshot()
-                connector_health_by_backend = runtime.loop._connector_health_by_backend()
-                runtime.loop._record_connector_health(connector_health)
+                connector_health = self._connector_health_payload(runtime, probe_connector=probe_connector)
+                connector_health_by_backend = self._connector_health_payload_by_backend(
+                    runtime,
+                    probe_connector=probe_connector,
+                )
+                if probe_connector:
+                    runtime.loop._record_connector_health(connector_health)
                 issues = runtime.store.list_healer_issues(limit=500)
                 issues_by_id = {str(issue.get("issue_id") or ""): issue for issue in issues}
                 breaker = runtime.loop._circuit_breaker_status()
@@ -216,6 +245,11 @@ class FlowHealerService:
                             "last_error_class": runtime.store.get_state("healer_tracker_last_error_class") or "",
                             "last_error_reason": runtime.store.get_state("healer_tracker_last_error_reason") or "",
                             "last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
+                            "request_metrics": (
+                                runtime.tracker.request_metrics_snapshot()
+                                if hasattr(runtime.tracker, "request_metrics_snapshot")
+                                else {"counts": {}}
+                            ),
                         },
                         "worker": _worker_runtime_state(runtime.store),
                         "resource_audit": HealerReconciler(
@@ -240,11 +274,17 @@ class FlowHealerService:
                             ],
                         },
                         "app_server_metrics": _app_server_metrics(runtime.store),
+                        "swarm_metrics": _swarm_metrics(runtime.store),
                         "recent_attempts": annotated_attempts,
                     }
                 )
             finally:
                 self._close_runtime(runtime)
+        with self._status_cache_lock:
+            self._status_cache[cache_key] = StatusSnapshot(
+                rows=[dict(row) for row in rows],
+                generated_at=time.monotonic(),
+            )
         return rows
 
     def set_paused(self, paused: bool, repo_name: str | None = None) -> None:
@@ -254,6 +294,7 @@ class FlowHealerService:
                 runtime.store.set_state("healer_paused", "true" if paused else "false")
             finally:
                 self._close_runtime(runtime)
+        self._invalidate_status_cache(repo_name)
 
     def run_scan(self, repo_name: str | None = None, *, dry_run: bool) -> list[dict[str, object]]:
         results: list[dict[str, object]] = []
@@ -272,6 +313,7 @@ class FlowHealerService:
                 results.append({"repo": repo.repo_name, "summary": scanner.run_scan(dry_run=dry_run)})
             finally:
                 self._close_runtime(runtime)
+        self._invalidate_status_cache(repo_name)
         return results
 
     def request_helper_recycle(self, repo_name: str | None = None, *, idle_only: bool) -> list[dict[str, object]]:
@@ -306,7 +348,81 @@ class FlowHealerService:
                 )
             finally:
                 self._close_runtime(runtime)
+        self._invalidate_status_cache(repo_name)
         return rows
+
+    def cached_status_rows(
+        self,
+        repo_name: str | None = None,
+        *,
+        force_refresh: bool = False,
+        probe_connector: bool = False,
+    ) -> list[dict[str, object]]:
+        return self.status_rows(
+            repo_name,
+            force_refresh=force_refresh,
+            probe_connector=probe_connector,
+        )
+
+    def _invalidate_status_cache(self, repo_name: str | None = None) -> None:
+        with self._status_cache_lock:
+            if repo_name is None:
+                self._status_cache.clear()
+                return
+            wanted = repo_name.strip()
+            self._status_cache.pop(wanted, None)
+            self._status_cache.pop("*", None)
+
+    def _status_cache_ttl_seconds(self, repo_name: str | None = None) -> float:
+        repos = self.config.select_repos(repo_name)
+        if not repos:
+            return 0.0
+        return float(max(0, min(int(repo.healer_status_cache_ttl_seconds) for repo in repos)))
+
+    def _connector_health_payload(
+        self,
+        runtime: RepoRuntime,
+        *,
+        probe_connector: bool,
+        connector: ConnectorProtocol | None = None,
+        backend_name: str = "",
+    ) -> dict[str, str | bool]:
+        if probe_connector:
+            return runtime.loop._connector_health_snapshot(connector=connector)
+        store = runtime.store
+        available_raw = str(store.get_state("healer_connector_available") or "").strip().lower()
+        available = True if not available_raw else available_raw == "true"
+        configured_command = str(store.get_state("healer_connector_configured_command") or "").strip()
+        resolved_command = str(store.get_state("healer_connector_resolved_command") or "").strip()
+        availability_reason = str(store.get_state("healer_connector_availability_reason") or "").strip()
+        payload = {
+            "available": available,
+            "configured_command": configured_command,
+            "resolved_command": resolved_command,
+            "availability_reason": availability_reason,
+            "last_health_error": str(store.get_state("healer_connector_last_error_reason") or "").strip(),
+        }
+        if backend_name and not configured_command:
+            payload["configured_command"] = str(runtime.connectors_by_backend.get(backend_name).__class__.__name__)
+        return payload
+
+    def _connector_health_payload_by_backend(
+        self,
+        runtime: RepoRuntime,
+        *,
+        probe_connector: bool,
+    ) -> dict[str, dict[str, str | bool]]:
+        if probe_connector:
+            return runtime.loop._connector_health_by_backend()
+        return {
+            backend: self._connector_health_payload(
+                runtime,
+                probe_connector=False,
+                connector=backend_connector,
+                backend_name=backend,
+            )
+            for backend, backend_connector in runtime.connectors_by_backend.items()
+        }
 
     def doctor_rows(self, repo_name: str | None = None, *, preflight: bool = False) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
@@ -476,6 +592,22 @@ def _app_server_metrics(store: SQLiteStore) -> dict[str, object]:
         "app_server_exec_failover_attempts": exec_failover_attempts,
         "app_server_exec_failover_success": exec_failover_success,
         "zero_diff_rate_by_task_kind": zero_diff_rate_by_task_kind,
+    }
+
+
+def _swarm_metrics(store: SQLiteStore) -> dict[str, object]:
+    strategies = ("repair", "retry_prompt_only", "quarantine", "infra_pause")
+    strategy_counts = {
+        strategy: _safe_state_int(store, f"healer_swarm_strategy_{strategy}")
+        for strategy in strategies
+    }
+    return {
+        "runs": _safe_state_int(store, "healer_swarm_runs"),
+        "recovered": _safe_state_int(store, "healer_swarm_recovered"),
+        "unrecovered": _safe_state_int(store, "healer_swarm_unrecovered"),
+        "backend_exec": _safe_state_int(store, "healer_swarm_runs_backend_exec"),
+        "backend_app_server": _safe_state_int(store, "healer_swarm_runs_backend_app_server"),
+        "strategy_counts": strategy_counts,
     }
 
 

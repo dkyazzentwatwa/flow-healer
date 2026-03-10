@@ -100,6 +100,7 @@ class SQLiteStore:
                     failure_class TEXT NOT NULL DEFAULT '',
                     failure_reason TEXT NOT NULL DEFAULT '',
                     proposer_output_excerpt TEXT NOT NULL DEFAULT '',
+                    swarm_summary_json TEXT NOT NULL DEFAULT '{}',
                     task_kind TEXT NOT NULL DEFAULT '',
                     output_targets_json TEXT NOT NULL DEFAULT '[]',
                     tool_policy TEXT NOT NULL DEFAULT '',
@@ -207,8 +208,14 @@ class SQLiteStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_healer_issues_state_backoff ON healer_issues(state, backoff_until, priority, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_priority_updated ON healer_issues(state, priority, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_scope_priority_updated ON healer_issues(state, scope_key, priority, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_lease ON healer_issues(state, lease_expires_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_attempts_started ON healer_attempts(started_at);
+                CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_started ON healer_attempts(issue_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_healer_attempts_state_finished_issue ON healer_attempts(state, finished_at, issue_id);
+                CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_attempt_no ON healer_attempts(issue_id, attempt_no);
                 CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_healer_events_issue_created ON healer_events(issue_id, created_at DESC);
@@ -257,6 +264,7 @@ class SQLiteStore:
                 ("tool_policy", "ALTER TABLE healer_attempts ADD COLUMN tool_policy TEXT NOT NULL DEFAULT ''"),
                 ("validation_profile", "ALTER TABLE healer_attempts ADD COLUMN validation_profile TEXT NOT NULL DEFAULT ''"),
                 ("proposer_output_excerpt", "ALTER TABLE healer_attempts ADD COLUMN proposer_output_excerpt TEXT NOT NULL DEFAULT ''"),
+                ("swarm_summary_json", "ALTER TABLE healer_attempts ADD COLUMN swarm_summary_json TEXT NOT NULL DEFAULT '{}'"),
             ]
             for column, statement in attempt_migrations:
                 if column not in attempt_cols:
@@ -276,10 +284,28 @@ class SQLiteStore:
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_scope_state ON healer_issues(scope_key, state, updated_at)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_priority_updated ON healer_issues(state, priority, updated_at)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_dedupe_state ON healer_issues(dedupe_key, state, updated_at)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_scope_priority_updated ON healer_issues(state, scope_key, priority, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_lease ON healer_issues(state, lease_expires_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_started ON healer_attempts(issue_id, started_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_attempts_state_finished_issue ON healer_attempts(state, finished_at, issue_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_attempt_no ON healer_attempts(issue_id, attempt_no)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at)"
@@ -308,6 +334,7 @@ class SQLiteStore:
         data["actual_diff_set"] = _json_loads(data.pop("actual_diff_set_json", "[]"), [])
         data["test_summary"] = _json_loads(data.pop("test_summary_json", "{}"), {})
         data["verifier_summary"] = _json_loads(data.pop("verifier_summary_json", "{}"), {})
+        data["swarm_summary"] = _json_loads(data.pop("swarm_summary_json", "{}"), {})
         data["output_targets"] = _json_loads(data.pop("output_targets_json", "[]"), [])
         return data
 
@@ -468,6 +495,7 @@ class SQLiteStore:
                 SELECT COUNT(*) AS count
                 FROM healer_issues
                 WHERE state IN ('claimed', 'running', 'verify_pending')
+                  AND (lease_expires_at IS NULL OR lease_expires_at > CURRENT_TIMESTAMP)
                 """
             ).fetchone()
             active_count = int(active_row["count"]) if active_row is not None else 0
@@ -476,11 +504,16 @@ class SQLiteStore:
             scope_conflict_clause = ""
             if enforce_scope_queue:
                 scope_conflict_clause = (
-                    "AND (COALESCE(scope_key, '') = '' OR NOT EXISTS ("
+                    "AND (scope_key = '' OR NOT EXISTS ("
                     "SELECT 1 FROM healer_issues active "
                     "WHERE active.issue_id != healer_issues.issue_id "
                     "AND active.state IN ('claimed', 'running', 'verify_pending', 'pr_open', 'pr_pending_approval') "
-                    "AND COALESCE(active.scope_key, '') = COALESCE(healer_issues.scope_key, '')"
+                    "AND active.scope_key = healer_issues.scope_key "
+                    "AND ("
+                    "active.state IN ('pr_open', 'pr_pending_approval') "
+                    "OR active.lease_expires_at IS NULL "
+                    "OR active.lease_expires_at > CURRENT_TIMESTAMP"
+                    ") "
                     "))"
                 )
             row = conn.execute(
@@ -806,6 +839,7 @@ class SQLiteStore:
         actual_diff_set: list[str],
         test_summary: dict[str, Any],
         verifier_summary: dict[str, Any],
+        swarm_summary: dict[str, Any] | None = None,
         failure_class: str = "",
         failure_reason: str = "",
         proposer_output_excerpt: str = "",
@@ -819,6 +853,7 @@ class SQLiteStore:
                     actual_diff_set_json = ?,
                     test_summary_json = ?,
                     verifier_summary_json = ?,
+                    swarm_summary_json = ?,
                     failure_class = ?,
                     failure_reason = ?,
                     proposer_output_excerpt = ?,
@@ -830,6 +865,7 @@ class SQLiteStore:
                     json.dumps(actual_diff_set or []),
                     json.dumps(test_summary or {}),
                     json.dumps(verifier_summary or {}),
+                    json.dumps(swarm_summary or {}),
                     (failure_class or "")[:120],
                     (failure_reason or "")[:500],
                     (proposer_output_excerpt or "")[:1500],
@@ -1481,11 +1517,17 @@ class SQLiteStore:
             conn.commit()
 
     def set_state(self, key: str, value: str) -> None:
+        self.set_states({key: value})
+
+    def set_states(self, values: dict[str, str]) -> None:
+        items = [(str(key), str(value)) for key, value in values.items() if str(key)]
+        if not items:
+            return
         conn = self._connect()
         with self._lock:
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO kv_state(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
+                items,
             )
             conn.commit()
 

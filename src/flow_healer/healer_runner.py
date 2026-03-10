@@ -1148,6 +1148,392 @@ class HealerRunner:
             local_gate_policy=local_gate_policy or self.local_gate_policy,
         )
 
+    def evaluate_existing_workspace(
+        self,
+        *,
+        workspace: Path,
+        issue_id: str,
+        issue_title: str,
+        issue_body: str,
+        task_spec: HealerTaskSpec,
+        targeted_tests: list[str],
+        max_diff_files: int,
+        max_diff_lines: int,
+        max_failed_tests_allowed: int,
+        proposer_output: str = "",
+        workspace_status: dict[str, Any] | None = None,
+    ) -> HealerRunResult:
+        self._bind_connector_workspace(workspace)
+        resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
+        current_workspace_status = dict(
+            workspace_status or _empty_workspace_status(execution_root=resolved_execution.execution_root)
+        )
+        current_workspace_status.setdefault("execution_root", resolved_execution.execution_root)
+        current_workspace_status.setdefault("execution_root_source", resolved_execution.execution_root_source)
+        current_workspace_status.setdefault("app_server_forced_serialized_recovery_attempted", False)
+        current_workspace_status.setdefault("app_server_forced_serialized_recovery_succeeded", False)
+        current_workspace_status.setdefault("app_server_exec_failover_attempted", False)
+        current_workspace_status.setdefault("app_server_exec_failover_succeeded", False)
+        current_workspace_status.setdefault("completion_artifact_parser_mode", "not_attempted")
+        current_workspace_status.setdefault("completion_artifact_parser_confidence", 0.0)
+        current_workspace_status.setdefault("completion_artifact_parser_source", "")
+        current_workspace_status.setdefault("completion_artifact_parser_reason", "")
+
+        if not _stage_workspace_changes(
+            workspace,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=resolved_execution.language_effective,
+        ):
+            return HealerRunResult(
+                success=False,
+                failure_class="no_workspace_change:swarm_repair_noop",
+                failure_reason="Swarm repair executor finished without producing staged workspace changes.",
+                failure_fingerprint=_execution_contract_failure_fingerprint(
+                    failure_class="no_workspace_change:swarm_repair_noop",
+                    connector=self.connector,
+                    task_spec=task_spec,
+                ),
+                proposer_output=proposer_output,
+                diff_paths=[],
+                diff_files=0,
+                diff_lines=0,
+                test_summary=_with_workspace_status(
+                    {},
+                    workspace_status=current_workspace_status,
+                    failure_fingerprint="",
+                ),
+                workspace_status=current_workspace_status,
+            )
+
+        diff_paths = _changed_paths(workspace)
+        diff_files, diff_lines = _diff_stats(workspace)
+        if not diff_paths:
+            return HealerRunResult(
+                success=False,
+                failure_class="no_workspace_change:swarm_repair_noop",
+                failure_reason="Swarm repair executor finished without producing staged workspace changes.",
+                failure_fingerprint=_execution_contract_failure_fingerprint(
+                    failure_class="no_workspace_change:swarm_repair_noop",
+                    connector=self.connector,
+                    task_spec=task_spec,
+                ),
+                proposer_output=proposer_output,
+                diff_paths=[],
+                diff_files=0,
+                diff_lines=0,
+                test_summary=_with_workspace_status(
+                    {},
+                    workspace_status=current_workspace_status,
+                    failure_fingerprint="",
+                ),
+                workspace_status=current_workspace_status,
+            )
+        if _requires_non_artifact_diff(task_spec=task_spec) and not _has_non_artifact_diff(diff_paths):
+            return HealerRunResult(
+                success=False,
+                failure_class="no_code_diff",
+                failure_reason="Code-change task produced only docs/artifact edits.",
+                failure_fingerprint="",
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
+                test_summary={},
+                workspace_status=current_workspace_status,
+            )
+        scope_violations = _scope_violation_paths(
+            diff_paths,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+        )
+        if scope_violations:
+            return HealerRunResult(
+                success=False,
+                failure_class="scope_violation",
+                failure_reason=_scope_violation_reason(scope_violations),
+                failure_fingerprint="",
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
+                test_summary={},
+                workspace_status=current_workspace_status,
+            )
+        if diff_files > max_diff_files or diff_lines > max_diff_lines:
+            return HealerRunResult(
+                success=False,
+                failure_class="diff_limit_exceeded",
+                failure_reason=f"Diff too large: files={diff_files}/{max_diff_files}, lines={diff_lines}/{max_diff_lines}",
+                failure_fingerprint="",
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
+                test_summary={},
+                workspace_status=current_workspace_status,
+            )
+
+        if task_spec.validation_profile == "artifact_only":
+            artifact_summary = _validate_artifact_outputs(workspace=workspace, diff_paths=diff_paths)
+            if not artifact_summary["passed"]:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="artifact_validation_failed",
+                    failure_reason=str(artifact_summary.get("summary") or "Artifact validation failed."),
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=artifact_summary,
+                    workspace_status=current_workspace_status,
+                )
+            test_summary = {
+                "mode": "skipped_artifact_only",
+                "failed_tests": 0,
+                "targeted_tests": targeted_tests,
+                "skipped": True,
+                "language_detected": resolved_execution.language_detected,
+                "language_effective": resolved_execution.language_effective,
+                "docker_image_effective": resolved_execution.strategy.docker_image,
+                "execution_root": resolved_execution.execution_root,
+                "execution_root_source": resolved_execution.execution_root_source,
+                "local_gate_policy": self.local_gate_policy,
+                "artifact_validation": artifact_summary,
+            }
+        else:
+            test_summary = self.validate_workspace(
+                workspace,
+                task_spec=task_spec,
+                targeted_tests=targeted_tests,
+            )
+        test_summary = _with_workspace_status(
+            test_summary,
+            workspace_status=current_workspace_status,
+            failure_fingerprint="",
+        )
+
+        post_validation_status = _workspace_status_summary(
+            workspace,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            task_spec=task_spec,
+            language=resolved_execution.language_effective,
+            execution_root=resolved_execution.execution_root,
+        )
+        if post_validation_status["contamination_paths"]:
+            stabilized_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=resolved_execution.language_effective,
+                execution_root=resolved_execution.execution_root,
+                allow_cleanup=self.auto_clean_generated_artifacts,
+            )
+            stabilized_status.setdefault("swarm_strategy", current_workspace_status.get("swarm_strategy", "repair"))
+            stabilized_status.setdefault("swarm_summary", current_workspace_status.get("swarm_summary", ""))
+            if cleaned_paths:
+                stabilized_status["cleanup_cycles_used"] = 1
+            if contamination_reason:
+                fingerprint = _generated_artifact_failure_fingerprint(
+                    stabilized_status.get("contamination_paths") or stabilized_status.get("cleaned_paths") or [],
+                    execution_root=resolved_execution.execution_root,
+                )
+                test_summary = _with_workspace_status(
+                    test_summary,
+                    workspace_status=stabilized_status,
+                    failure_fingerprint=fingerprint,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="generated_artifact_contamination",
+                    failure_reason=contamination_reason,
+                    failure_fingerprint=fingerprint,
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=test_summary,
+                    workspace_status=stabilized_status,
+                )
+            diff_paths = _changed_paths(workspace)
+            diff_files, diff_lines = _diff_stats(workspace)
+            if not diff_paths:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="no_workspace_change:swarm_repair_noop",
+                    failure_reason="Swarm repair executor finished without producing staged workspace changes.",
+                    failure_fingerprint=_execution_contract_failure_fingerprint(
+                        failure_class="no_workspace_change:swarm_repair_noop",
+                        connector=self.connector,
+                        task_spec=task_spec,
+                    ),
+                    proposer_output=proposer_output,
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        {},
+                        workspace_status=stabilized_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=stabilized_status,
+                )
+            scope_violations = _scope_violation_paths(
+                diff_paths,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+            )
+            if scope_violations:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="scope_violation",
+                    failure_reason=_scope_violation_reason(scope_violations),
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=_with_workspace_status(
+                        test_summary,
+                        workspace_status=stabilized_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=stabilized_status,
+                )
+            if task_spec.validation_profile == "artifact_only":
+                artifact_summary = _validate_artifact_outputs(workspace=workspace, diff_paths=diff_paths)
+                artifact_summary["workspace_hygiene_rerun"] = True
+                test_summary = {
+                    "mode": "skipped_artifact_only",
+                    "failed_tests": 0,
+                    "targeted_tests": targeted_tests,
+                    "skipped": True,
+                    "language_detected": resolved_execution.language_detected,
+                    "language_effective": resolved_execution.language_effective,
+                    "docker_image_effective": resolved_execution.strategy.docker_image,
+                    "execution_root": resolved_execution.execution_root,
+                    "execution_root_source": resolved_execution.execution_root_source,
+                    "local_gate_policy": self.local_gate_policy,
+                    "artifact_validation": artifact_summary,
+                    "workspace_hygiene_rerun": True,
+                }
+                if not artifact_summary["passed"]:
+                    return HealerRunResult(
+                        success=False,
+                        failure_class="artifact_validation_failed",
+                        failure_reason=str(artifact_summary.get("summary") or "Artifact validation failed."),
+                        failure_fingerprint="",
+                        proposer_output=proposer_output,
+                        diff_paths=diff_paths,
+                        diff_files=diff_files,
+                        diff_lines=diff_lines,
+                        test_summary=_with_workspace_status(
+                            test_summary,
+                            workspace_status=stabilized_status,
+                            failure_fingerprint="",
+                        ),
+                        workspace_status=stabilized_status,
+                    )
+            else:
+                test_summary = self.validate_workspace(
+                    workspace,
+                    task_spec=task_spec,
+                    targeted_tests=targeted_tests,
+                )
+                test_summary["workspace_hygiene_rerun"] = True
+            final_workspace_status = _workspace_status_summary(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=resolved_execution.language_effective,
+                execution_root=resolved_execution.execution_root,
+            )
+            final_workspace_status.setdefault("swarm_strategy", current_workspace_status.get("swarm_strategy", "repair"))
+            final_workspace_status.setdefault("swarm_summary", current_workspace_status.get("swarm_summary", ""))
+            if final_workspace_status["contamination_paths"]:
+                final_workspace_status["contamination_paths"] = [
+                    path
+                    for path in final_workspace_status["contamination_paths"]
+                    if not (
+                        _is_tolerated_runtime_artifact(path, language=resolved_execution.language_effective)
+                        and path not in final_workspace_status.get("staged_paths", [])
+                    )
+                ]
+            if final_workspace_status["contamination_paths"]:
+                final_workspace_status["cleanup_performed"] = True
+                final_workspace_status["cleaned_paths"] = list(stabilized_status.get("cleaned_paths") or [])
+                final_workspace_status["cleanup_cycles_used"] = int(stabilized_status.get("cleanup_cycles_used") or 1)
+                fingerprint = _generated_artifact_failure_fingerprint(
+                    final_workspace_status["contamination_paths"],
+                    execution_root=resolved_execution.execution_root,
+                )
+                test_summary = _with_workspace_status(
+                    test_summary,
+                    workspace_status=final_workspace_status,
+                    failure_fingerprint=fingerprint,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="generated_artifact_contamination",
+                    failure_reason=_generated_artifact_contamination_reason(
+                        list(final_workspace_status["contamination_paths"]),
+                        execution_root=resolved_execution.execution_root,
+                    ),
+                    failure_fingerprint=fingerprint,
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=test_summary,
+                    workspace_status=final_workspace_status,
+                )
+            current_workspace_status = final_workspace_status
+            test_summary = _with_workspace_status(
+                test_summary,
+                workspace_status=current_workspace_status,
+                failure_fingerprint="",
+            )
+
+        failed_tests = int(test_summary.get("failed_tests", 0) or 0)
+        if failed_tests > max_failed_tests_allowed:
+            test_failure_class = str(test_summary.get("failure_class") or "").strip()
+            test_failure_reason = str(test_summary.get("failure_reason") or "").strip()
+            return HealerRunResult(
+                success=False,
+                failure_class=test_failure_class or "tests_failed",
+                failure_reason=(
+                    test_failure_reason
+                    or f"Failed tests={failed_tests} exceeds cap={max_failed_tests_allowed}"
+                ),
+                failure_fingerprint=str(test_summary.get("failure_fingerprint") or ""),
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
+                test_summary=test_summary,
+                workspace_status=current_workspace_status,
+            )
+
+        return HealerRunResult(
+            success=True,
+            failure_class="",
+            failure_reason="",
+            failure_fingerprint=str(test_summary.get("failure_fingerprint") or ""),
+            proposer_output=proposer_output,
+            diff_paths=diff_paths,
+            diff_files=diff_files,
+            diff_lines=diff_lines,
+            test_summary=test_summary,
+            workspace_status=current_workspace_status,
+        )
+
     def _bind_connector_workspace(self, workspace: Path) -> None:
         # CodexCliConnector executes with cwd=self.workspace; update it per issue
         # so direct edits land in the active healer worktree, not repo root.
@@ -1332,6 +1718,27 @@ def _run_test_gates(
         commands=normalized_validation_result.normalized_commands,
         task_spec=task_spec,
     )
+    if (
+        not explicit_validation_commands
+        and not strategy.local_test_cmd
+        and not strategy.docker_test_cmd
+    ):
+        reason = (
+            "Language could not be resolved safely from repo markers. "
+            "Provide an explicit issue language or validation command."
+        )
+        summary["failed_tests"] = 1
+        summary["failure_class"] = "language_unresolved"
+        summary["failure_reason"] = reason
+        summary["local_full_exit_code"] = 1
+        summary["local_full_output_tail"] = reason
+        summary["local_full_status"] = "failed"
+        summary["local_full_reason"] = "language_unresolved"
+        summary["docker_full_exit_code"] = 0
+        summary["docker_full_output_tail"] = "(docker full gate skipped: language unresolved)"
+        summary["docker_full_status"] = "skipped"
+        summary["docker_full_reason"] = "language_unresolved"
+        return summary
 
     if targeted_tests:
         targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
@@ -1868,9 +2275,9 @@ def _starts_with_any(command: list[str], *prefixes: list[str]) -> bool:
 
 
 def _is_pytest_style_command(command: list[str]) -> bool:
-    return _starts_with_any(command, ["pytest"], ["py.test"]) or (
-        _starts_with_any(command, ["python"]) and "pytest" in command
-    )
+    if _starts_with_any(command, ["pytest"], ["py.test"]):
+        return True
+    return bool(command) and command[0].startswith("python") and "pytest" in command
 
 
 def _run_tests_in_docker(
@@ -2221,6 +2628,9 @@ def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:
     if _is_issue_scoped_sandbox(task_spec):
         lines.append(
             f"This issue is sandbox-scoped to `{task_spec.execution_root}`. Treat only the issue-declared validation commands and files in that root as the required validation contract."
+        )
+        lines.append(
+            "For sandbox-scoped issues, `Required code outputs` is an exact allowlist for edits. Do not change sibling files, manifests, lockfiles, or other nearby tests unless the issue explicitly names them."
         )
         lines.append(
             "Do not suggest or claim repo-root pytest/full-suite validation unless the issue explicitly asks for it."

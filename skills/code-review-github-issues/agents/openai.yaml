@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Review to GitHub Issues"
+  short_description: "Run a review and open GitHub issues"
+  default_prompt: "Use $code-review-github-issues to review this repo and create ordered GitHub issues without making code edits."

@@ -205,10 +205,10 @@ def test_task_spec_prompt_block_includes_contract_guidance() -> None:
     assert "Default next action: Implement the smallest safe repo patch" in prompt_block
 
 
-def test_task_spec_prompt_block_marks_code_targets_as_anchors_not_allowlist() -> None:
+def test_task_spec_prompt_block_marks_non_sandbox_code_targets_as_anchors() -> None:
     spec = compile_task_spec(
         issue_title="Fix Swift smoke fixture",
-        issue_body="Fix e2e-smoke/swift/Package.swift so the fixture builds and passes the regression test.",
+        issue_body="Fix src/demo.py so the fixture builds and passes the regression test.",
     )
 
     prompt_block = task_spec_to_prompt_block(spec)
@@ -216,6 +216,23 @@ def test_task_spec_prompt_block_marks_code_targets_as_anchors_not_allowlist() ->
     assert "Output target policy: Named targets are anchors for the fix" in prompt_block
     assert "Inspect only enough files" not in prompt_block
     assert "Preferred output order" not in prompt_block
+
+
+def test_task_spec_prompt_block_marks_sandbox_code_targets_as_exact_allowlist() -> None:
+    spec = compile_task_spec(
+        issue_title="Hard: Node app route-state recovery regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node-app/src/app.js\n"
+            "- e2e-smoke/node-app/test/app.test.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node-app && npm test -- --passWithNoTests\n"
+        ),
+    )
+
+    prompt_block = task_spec_to_prompt_block(spec)
+
+    assert "Output target policy: Named targets are the exact allowed edit set for this issue" in prompt_block
 
 
 def test_compile_task_spec_passes_language_through() -> None:
@@ -272,6 +289,32 @@ def test_compile_task_spec_infers_node_execution_root_and_validation_command() -
     assert spec.language_source == "issue"
     assert spec.execution_root == "e2e-smoke/node"
     assert spec.validation_commands == ("cd e2e-smoke/node && npm test -- --passWithNoTests",)
+
+
+def test_compile_task_spec_ignores_issue_title_when_extracting_validation_commands() -> None:
+    spec = compile_task_spec(
+        issue_title="npm run test only",
+        issue_body="Please review parser wording.",
+    )
+
+    assert spec.validation_commands == ()
+    assert spec.execution_root == ""
+
+
+def test_compile_task_spec_preserves_python3_pytest_validation_command_and_execution_root() -> None:
+    spec = compile_task_spec(
+        issue_title="FastAPI sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/python-fastapi/app/api.py\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/python-fastapi && python3 -m pytest -q\n"
+        ),
+    )
+
+    assert spec.language == "python"
+    assert spec.execution_root == "e2e-apps/python-fastapi"
+    assert spec.validation_commands == ("cd e2e-apps/python-fastapi && python3 -m pytest -q",)
 
 
 def test_compile_task_spec_infers_swift_execution_root_and_validation_command() -> None:
@@ -362,24 +405,24 @@ def test_compile_task_spec_infers_python_execution_root_for_e2e_apps() -> None:
     assert spec.validation_commands == ("cd e2e-apps/python-fastapi && pytest -q",)
 
 
-def test_compile_task_spec_infers_swift_execution_root_for_e2e_apps() -> None:
+def test_compile_task_spec_infers_swift_execution_root_for_e2e_smoke_paths() -> None:
     spec = compile_task_spec(
         issue_title="Swift todo sandbox regression",
         issue_body=(
             "Required code outputs:\n"
-            "- e2e-apps/swift-todo/Sources/TodoCore/TodoService.swift\n"
-            "- e2e-apps/swift-todo/Tests/TodoCoreTests/TodoServiceTests.swift\n\n"
+            "- e2e-smoke/swift/Sources/FlowHealerAdd/Add.swift\n"
+            "- e2e-smoke/swift/Tests/FlowHealerAddTests/AddTests.swift\n\n"
             "Validation:\n"
-            "- cd e2e-apps/swift-todo && swift test\n"
+            "- cd e2e-smoke/swift && swift test\n"
         ),
     )
 
     assert spec.language == "swift"
     assert spec.language_source == "issue"
     assert spec.task_kind == "fix"
-    assert spec.execution_root == "e2e-apps/swift-todo"
+    assert spec.execution_root == "e2e-smoke/swift"
     assert "Package.swift" not in spec.output_targets
-    assert spec.validation_commands == ("cd e2e-apps/swift-todo && swift test",)
+    assert spec.validation_commands == ("cd e2e-smoke/swift && swift test",)
 
 
 def test_compile_task_spec_infers_prosper_chat_execution_root_for_e2e_apps() -> None:
@@ -444,16 +487,16 @@ def test_compile_task_spec_prefers_rooted_swift_paths_over_bare_filename_mention
         issue_title="Swift todo sandbox: package target wiring for CLI test coverage",
         issue_body=(
             "Required code outputs:\n"
-            "- e2e-apps/swift-todo/Package.swift\n"
-            "- e2e-apps/swift-todo/Tests/TodoCLITests/TodoPackageWiringTests.swift\n\n"
+            "- e2e-smoke/swift/Package.swift\n"
+            "- e2e-smoke/swift/Tests/FlowHealerAddTests/AddTests.swift\n\n"
             "Validation:\n"
-            "- cd e2e-apps/swift-todo && swift test\n"
+            "- cd e2e-smoke/swift && swift test\n"
         ),
     )
 
     assert spec.output_targets == (
-        "e2e-apps/swift-todo/Package.swift",
-        "e2e-apps/swift-todo/Tests/TodoCLITests/TodoPackageWiringTests.swift",
+        "e2e-smoke/swift/Package.swift",
+        "e2e-smoke/swift/Tests/FlowHealerAddTests/AddTests.swift",
     )
 
 

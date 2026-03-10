@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from flow_healer.store import SQLiteStore
 
 
@@ -129,3 +131,137 @@ def test_claim_next_healer_issue_can_ignore_scope_queue(tmp_path):
     )
     assert claimed is not None
     assert claimed["issue_id"] == "9012"
+
+
+def test_claim_next_healer_issue_ignores_expired_leases_for_active_budget(tmp_path):
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="9101",
+        repo="owner/repo",
+        title="Expired claim",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.upsert_healer_issue(
+        issue_id="9102",
+        repo="owner/repo",
+        title="Queued issue",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=2,
+    )
+    store.set_healer_issue_state(
+        issue_id="9101",
+        state="claimed",
+        expected_state="queued",
+    )
+
+    conn = store._connect()
+    conn.execute(
+        "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = datetime('now', '-10 minutes') WHERE issue_id = ?",
+        ("worker-stale", "9101"),
+    )
+    conn.commit()
+
+    claimed = store.claim_next_healer_issue(
+        worker_id="worker-a",
+        lease_seconds=120,
+        max_active_issues=1,
+        enforce_scope_queue=True,
+    )
+
+    assert claimed is not None
+    assert claimed["issue_id"] == "9102"
+
+
+def test_claim_next_healer_issue_ignores_expired_scope_conflicts(tmp_path):
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="9111",
+        repo="owner/repo",
+        title="Expired running issue",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+        scope_key="path:e2e-smoke/node",
+    )
+    store.upsert_healer_issue(
+        issue_id="9112",
+        repo="owner/repo",
+        title="Queued same scope",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=2,
+        scope_key="path:e2e-smoke/node",
+    )
+    store.set_healer_issue_state(
+        issue_id="9111",
+        state="running",
+        expected_state="queued",
+    )
+
+    conn = store._connect()
+    conn.execute(
+        "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = datetime('now', '-10 minutes') WHERE issue_id = ?",
+        ("worker-stale", "9111"),
+    )
+    conn.commit()
+
+    claimed = store.claim_next_healer_issue(
+        worker_id="worker-a",
+        lease_seconds=120,
+        max_active_issues=2,
+        enforce_scope_queue=True,
+    )
+
+    assert claimed is not None
+    assert claimed["issue_id"] == "9112"
+
+
+def test_set_states_batches_multiple_kv_updates(tmp_path):
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+
+    store.set_states(
+        {
+            "healer_paused": "true",
+            "healer_helper_recycle_status": "requested",
+            "healer_active_worker_id": "worker-1",
+        }
+    )
+
+    assert store.get_state("healer_paused") == "true"
+    assert store.get_state("healer_helper_recycle_status") == "requested"
+    assert store.get_state("healer_active_worker_id") == "worker-1"
+
+
+def test_store_bootstrap_adds_hot_path_indexes(tmp_path):
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+
+    conn = sqlite3.connect(store.db_path)
+    try:
+        index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list('healer_issues')").fetchall()
+        }
+        attempt_index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list('healer_attempts')").fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert "idx_healer_issues_state_priority_updated" in index_names
+    assert "idx_healer_issues_state_scope_priority_updated" in index_names
+    assert "idx_healer_issues_state_lease" in index_names
+    assert "idx_healer_attempts_issue_started" in attempt_index_names
+    assert "idx_healer_attempts_state_finished_issue" in attempt_index_names
+    assert "idx_healer_attempts_issue_attempt_no" in attempt_index_names

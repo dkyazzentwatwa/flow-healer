@@ -57,6 +57,7 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
             failure_class="tests_failed" if state == "failed" else "",
             failure_reason="Targeted sandbox validation failed." if state == "failed" else "",
         )
+    runtime.store.update_runtime_status(status="swarm_repairing", last_error="", touch_heartbeat=True)
     runtime.store.close()
 
     rows = service.status_rows("demo")
@@ -86,12 +87,14 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert "last_error_class" in tracker
     assert "last_error_reason" in tracker
     assert "last_error_at" in tracker
+    assert "request_metrics" in tracker
     worker = rows[0]["worker"]
     assert "active_worker_id" in worker
     assert "last_heartbeat_at" in worker
     assert "last_pulse_at" in worker
     assert "last_reconcile_at" in worker
     assert "runtime_status" in worker
+    assert worker["runtime_status"] == "swarm_repairing"
     assert "last_tick_started_at" in worker
     assert "last_tick_finished_at" in worker
     assert "recovered_stale_active_issues" in worker
@@ -124,6 +127,13 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert app_server_metrics["app_server_exec_failover_attempts"] == 0
     assert app_server_metrics["app_server_exec_failover_success"] == 0
     assert app_server_metrics["zero_diff_rate_by_task_kind"] == {}
+    swarm_metrics = rows[0]["swarm_metrics"]
+    assert swarm_metrics["runs"] == 0
+    assert swarm_metrics["recovered"] == 0
+    assert swarm_metrics["unrecovered"] == 0
+    assert swarm_metrics["backend_exec"] == 0
+    assert swarm_metrics["backend_app_server"] == 0
+    assert swarm_metrics["strategy_counts"]["repair"] == 0
     resource_audit = rows[0]["resource_audit"]
     assert resource_audit["worktrees"]["count"] == 0
     assert resource_audit["leases"]["total"] == 0
@@ -354,3 +364,38 @@ def test_request_helper_recycle_sets_live_daemon_request_state(tmp_path) -> None
     assert store.get_state("healer_helper_recycle_idle_only") == "true"
     assert store.get_state("healer_helper_recycle_status") == "requested"
     store.close()
+
+
+def test_status_rows_reuses_cached_snapshot_within_ttl(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(
+        repo_name="demo",
+        healer_repo_path=str(repo_path),
+        healer_repo_slug="owner/repo",
+        healer_status_cache_ttl_seconds=60,
+    )
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[repo],
+        )
+    )
+
+    build_calls = 0
+    original_build_runtime = service.build_runtime
+
+    def counted_build_runtime(selected_repo):
+        nonlocal build_calls
+        build_calls += 1
+        return original_build_runtime(selected_repo)
+
+    service.build_runtime = counted_build_runtime  # type: ignore[method-assign]
+
+    first = service.status_rows("demo")
+    second = service.status_rows("demo")
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert build_calls == 1

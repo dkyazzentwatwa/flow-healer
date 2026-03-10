@@ -233,6 +233,9 @@ class FakeStore:
     def set_state(self, key: str, value: str) -> None:
         self.state[key] = value
 
+    def set_states(self, values: dict[str, str]) -> None:
+        self.state.update({str(key): str(value) for key, value in values.items() if str(key)})
+
     def get_state(self, key: str) -> str | None:
         return self.state.get(key)
 
@@ -334,6 +337,7 @@ class FakeStore:
         state: str,
         prediction_source: str,
         predicted_lock_set: list[str],
+        **extra: Any,
     ) -> None:
         self.healer_attempts.append(
             {
@@ -343,6 +347,7 @@ class FakeStore:
                 "state": state,
                 "prediction_source": prediction_source,
                 "predicted_lock_set": list(predicted_lock_set),
+                **dict(extra),
             }
         )
 
@@ -354,6 +359,7 @@ class FakeStore:
         actual_diff_set: list[str],
         test_summary: dict[str, Any],
         verifier_summary: dict[str, Any],
+        swarm_summary: dict[str, Any] | None = None,
         failure_class: str = "",
         failure_reason: str = "",
     ) -> bool:
@@ -363,6 +369,7 @@ class FakeStore:
                 attempt["actual_diff_set"] = list(actual_diff_set)
                 attempt["test_summary"] = dict(test_summary)
                 attempt["verifier_summary"] = dict(verifier_summary)
+                attempt["swarm_summary"] = dict(swarm_summary or {})
                 attempt["failure_class"] = failure_class
                 attempt["failure_reason"] = failure_reason
                 return True

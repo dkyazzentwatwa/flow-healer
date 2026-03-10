@@ -52,6 +52,14 @@ class PullRequestDetails:
     updated_at: str = ""
 
 
+@dataclass(slots=True, frozen=True)
+class TrackerRequestMetric:
+    method: str
+    path: str
+    status: str
+    duration_ms: int
+
+
 class GitHubHealerTracker:
     """Minimal GitHub issue + PR adapter for autonomous healer flows."""
 
@@ -86,6 +94,9 @@ class GitHubHealerTracker:
         self._etag_cache: dict[str, tuple[str, Any, float]] = {}
         self._last_error_class = ""
         self._last_error_reason = ""
+        self._request_metrics_lock = threading.Lock()
+        self._request_counts_by_key: dict[str, int] = {}
+        self._request_duration_ms_by_key: dict[str, int] = {}
 
     @property
     def enabled(self) -> bool:
@@ -93,6 +104,13 @@ class GitHubHealerTracker:
 
     def get_last_error(self) -> tuple[str, str]:
         return self._last_error_class, self._last_error_reason
+
+    def request_metrics_snapshot(self) -> dict[str, dict[str, int]]:
+        with self._request_metrics_lock:
+            return {
+                "counts": dict(self._request_counts_by_key),
+                "durations_ms": dict(self._request_duration_ms_by_key),
+            }
 
     def _set_last_error(self, *, error_class: str, reason: str) -> None:
         self._last_error_class = str(error_class or "").strip()
@@ -304,31 +322,47 @@ class GitHubHealerTracker:
     def find_pr_for_issue(self, *, issue_id: str, limit: int = 100) -> PullRequestResult | None:
         if not self.enabled or not issue_id.strip():
             return None
+        query = f'repo:{self.repo_slug} is:pr "issue #{issue_id.strip()}"'
         payload = self._request_json(
-            f"/repos/{self.repo_slug}/pulls?state=all&per_page={int(max(1, min(limit, 100)))}"
+            f"/search/issues?q={quote(query)}&per_page={int(max(1, min(limit, 20)))}"
         )
-        if not isinstance(payload, list):
+        if not isinstance(payload, dict):
             return None
-
-        issue_pattern = re.compile(rf"\bissue\s*#\s*{re.escape(issue_id.strip())}\b", re.IGNORECASE)
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return None
         matches: list[tuple[str, PullRequestResult]] = []
-        for item in payload:
+        for item in items:
             if not isinstance(item, dict):
-                continue
-            title = str(item.get("title") or "")
-            body = str(item.get("body") or "")
-            if not issue_pattern.search(title) and not issue_pattern.search(body):
                 continue
             pr_number = int(item.get("number") or 0)
             if pr_number <= 0:
                 continue
+            state = str(item.get("state") or "").strip().lower()
+            html_url = str(item.get("html_url") or "")
+            updated_at = str(item.get("closed_at") or item.get("updated_at") or "")
+            if state == "closed":
+                details = self.get_pr_details(pr_number=pr_number)
+                if details is None:
+                    continue
+                matches.append(
+                    (
+                        updated_at or str(details.updated_at or ""),
+                        PullRequestResult(
+                            number=pr_number,
+                            state=details.state,
+                            html_url=details.html_url or html_url,
+                        ),
+                    )
+                )
+                continue
             matches.append(
                 (
-                    str(item.get("merged_at") or item.get("updated_at") or ""),
+                    updated_at,
                     PullRequestResult(
                         number=pr_number,
-                        state=self._pr_state_from_payload(item),
-                        html_url=str(item.get("html_url") or ""),
+                        state=state or "open",
+                        html_url=html_url,
                     ),
                 )
             )
@@ -568,6 +602,7 @@ class GitHubHealerTracker:
         self._last_error_reason = ""
         method_upper = method.strip().upper() or "GET"
         url = f"{self.api_base_url}{path}"
+        started_at = time.monotonic()
         data: bytes | None = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -610,9 +645,11 @@ class GitHubHealerTracker:
                         etag = str(resp.headers.get("ETag") or "").strip()
                         if etag:
                             self._etag_cache[cache_key] = (etag, payload, time.monotonic())
+                    self._record_request_metric(method=method_upper, path=path, status=str(resp.status), started_at=started_at)
                     return payload
             except HTTPError as exc:
                 if use_conditional and exc.code == 304 and cached_payload is not None:
+                    self._record_request_metric(method=method_upper, path=path, status="304", started_at=started_at)
                     return cached_payload
                 reason = self._http_error_reason(exc)
                 is_rate_limited = self._is_rate_limited_error(exc=exc, reason=reason)
@@ -620,6 +657,7 @@ class GitHubHealerTracker:
                 self._last_error_reason = reason[:500]
                 retryable = exc.code in {403, 429, 500, 502, 503, 504}
                 if retryable and attempt < (max_attempts - 1):
+                    self._record_request_metric(method=method_upper, path=path, status=str(exc.code), started_at=started_at)
                     delay = self._retry_delay_seconds(attempt=attempt, headers=dict(exc.headers or {}))
                     logger.warning(
                         "GitHub API %s %s failed (status=%s). Retrying in %.2fs (%d/%d).",
@@ -631,13 +669,16 @@ class GitHubHealerTracker:
                         max_attempts,
                     )
                     time.sleep(delay)
+                    started_at = time.monotonic()
                     continue
+                self._record_request_metric(method=method_upper, path=path, status=str(exc.code), started_at=started_at)
                 logger.warning("GitHub API %s %s failed: %s", method_upper, path, reason)
                 return {}
             except URLError as exc:
                 self._last_error_class = "github_network_error"
                 self._last_error_reason = str(exc)[:500]
                 if attempt < (max_attempts - 1):
+                    self._record_request_metric(method=method_upper, path=path, status="network_error", started_at=started_at)
                     delay = self._retry_delay_seconds(attempt=attempt, headers={})
                     logger.warning(
                         "GitHub API network error for %s %s: %s. Retrying in %.2fs (%d/%d).",
@@ -649,15 +690,33 @@ class GitHubHealerTracker:
                         max_attempts,
                     )
                     time.sleep(delay)
+                    started_at = time.monotonic()
                     continue
+                self._record_request_metric(method=method_upper, path=path, status="network_error", started_at=started_at)
                 logger.warning("GitHub API network error for %s %s: %s", method_upper, path, exc)
                 return {}
             except json.JSONDecodeError:
                 self._last_error_class = "github_parse_error"
                 self._last_error_reason = f"GitHub API returned non-JSON response for {method_upper} {path}"
+                self._record_request_metric(method=method_upper, path=path, status="parse_error", started_at=started_at)
                 logger.warning(self._last_error_reason)
                 return {}
         return {}
+
+    def _record_request_metric(self, *, method: str, path: str, status: str, started_at: float) -> None:
+        normalized_path = self._normalize_metric_path(path)
+        key = f"{method} {normalized_path} {status}"
+        elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000.0))
+        with self._request_metrics_lock:
+            self._request_counts_by_key[key] = self._request_counts_by_key.get(key, 0) + 1
+            self._request_duration_ms_by_key[key] = self._request_duration_ms_by_key.get(key, 0) + elapsed_ms
+
+    @staticmethod
+    def _normalize_metric_path(path: str) -> str:
+        normalized = re.sub(r"/pulls/\d+", "/pulls/:id", path)
+        normalized = re.sub(r"/issues/\d+", "/issues/:id", normalized)
+        normalized = re.sub(r"/comments/\d+", "/comments/:id", normalized)
+        return normalized
 
     def _enforce_mutation_spacing(self) -> None:
         if self.mutation_min_interval_ms <= 0:

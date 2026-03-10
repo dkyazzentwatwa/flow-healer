@@ -35,14 +35,6 @@ def test_all_demo_app_sandboxes_exist() -> None:
             "supabase/migrations/20260301190615_15638062-0f7f-4cc7-96f5-79466e4cb26b.sql",
             "scripts/healer_validate.sh",
         ],
-        "swift-todo": [
-            "Package.swift",
-            "Sources/TodoCore/TodoService.swift",
-            "Sources/TodoCLI/main.swift",
-            "Sources/TodoCLI/CompletionRenderer.swift",
-            "Tests/TodoCoreTests/TodoServiceTests.swift",
-            "Tests/TodoCLITests/TodoCLITests.swift",
-        ],
     }
 
     for sandbox, required_files in expected.items():

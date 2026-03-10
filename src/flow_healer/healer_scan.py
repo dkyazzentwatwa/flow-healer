@@ -71,6 +71,7 @@ class FlowHealerScanner:
         created: list[dict[str, Any]] = []
         deduped = 0
         skipped_budget = 0
+        skipped_non_sandbox = 0
 
         for finding in included:
             existing = self.store.get_scan_finding(finding.fingerprint) if hasattr(self.store, "get_scan_finding") else None
@@ -108,6 +109,7 @@ class FlowHealerScanner:
 
             if not dry_run and self.enable_issue_creation:
                 if finding.scan_type == "pytest" and not self._finding_targets_are_sandbox_scoped(finding):
+                    skipped_non_sandbox += 1
                     if hasattr(self.store, "upsert_scan_finding"):
                         self.store.upsert_scan_finding(
                             fingerprint=finding.fingerprint,
@@ -169,6 +171,7 @@ class FlowHealerScanner:
             "created_issues": created,
             "deduped_count": deduped,
             "skipped_budget_count": skipped_budget,
+            "skipped_non_sandbox_count": skipped_non_sandbox,
             "failed_checks": check_failures,
             "severity_threshold": self.severity_threshold,
         }

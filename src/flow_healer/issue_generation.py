@@ -141,14 +141,6 @@ def _default_templates() -> tuple[IssueTemplate, ...]:
             ),
             validation_command="cd e2e-apps/python-fastapi && pytest -q",
         ),
-        IssueTemplate(
-            kind="Swift app regression",
-            targets=(
-                "e2e-apps/swift-todo/Sources/TodoCore/TodoService.swift",
-                "e2e-apps/swift-todo/Tests/TodoCoreTests/TodoServiceTests.swift",
-            ),
-            validation_command="cd e2e-apps/swift-todo && swift test",
-        ),
     )
 
 

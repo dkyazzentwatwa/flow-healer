@@ -141,6 +141,11 @@ class HealerPreflight:
         if callable(snapshot_fn):
             try:
                 snapshot = snapshot_fn()
+                available = snapshot.get("available")
+                if available is False:
+                    reason = str(snapshot.get("availability_reason") or "connector reported unavailable")
+                    self._connector_probe_cache[connector_name] = (False, reason, now)
+                    return False, reason
                 availability = str(snapshot.get("availability") or "").lower()
                 if availability == "unavailable":
                     reason = str(snapshot.get("availability_reason") or "connector reported unavailable")

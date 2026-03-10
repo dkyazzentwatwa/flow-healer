@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from html import escape
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
+import secrets
 import threading
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -100,6 +102,14 @@ class DashboardServer:
                     self.send_error(404, "Not Found")
                     return
                 params = self._read_form_data()
+                allowed, status, reason = _web_request_is_authorized(
+                    server.config,
+                    headers=dict(self.headers.items()),
+                    params=params,
+                )
+                if not allowed:
+                    self._write_json({"ok": False, "message": reason}, status=status)
+                    return
                 command = (params.get("command") or "").strip().lower()
                 repo = (params.get("repo") or "").strip()
                 dry_run = (params.get("dry_run") or "").strip().lower()
@@ -670,11 +680,18 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
 def _overview_payload(config: AppConfig, service: FlowHealerService) -> dict[str, Any]:
     logs = _collect_recent_logs(config, max_lines=160)
+    status_rows = service.cached_status_rows(None)
     return {
-        "rows": service.status_rows(None),
+        "rows": status_rows,
         "commands": service.control_command_rows(None, limit=120),
         "logs": logs,
-        "activity": _collect_activity(config, service, logs=logs, limit=_ACTIVITY_LIMIT),
+        "activity": _collect_activity(
+            config,
+            service,
+            logs=logs,
+            limit=_ACTIVITY_LIMIT,
+            status_rows=status_rows,
+        ),
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -748,8 +765,9 @@ def _collect_activity(
     *,
     logs: dict[str, Any] | None = None,
     limit: int = _ACTIVITY_LIMIT,
+    status_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    status_rows = service.status_rows(None)
+    status_rows = status_rows if status_rows is not None else service.cached_status_rows(None)
     command_rows = service.control_command_rows(None, limit=max(120, limit))
     event_rows = service.healer_event_rows(None, limit=max(120, limit))
     logs_payload = logs or _collect_recent_logs(config, max_lines=max(160, limit))
@@ -776,6 +794,23 @@ def _repo_slug_by_name(config: AppConfig) -> dict[str, str]:
 
 def _render_repo_action_cards(config: AppConfig) -> str:
     cards: list[str] = []
+    auth_mode = str(getattr(config.control.web, "auth_mode", "none") or "none").strip().lower()
+    auth_note = ""
+    auth_fields = ""
+    if auth_mode == "token":
+        auth_env = escape(str(getattr(config.control.web, "auth_token_env", "FLOW_HEALER_WEB_TOKEN") or "FLOW_HEALER_WEB_TOKEN"))
+        auth_note = (
+            "<div class='mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] "
+            f"text-amber-100'>Action token required via <span class='font-mono'>{auth_env}</span>.</div>"
+        )
+        auth_fields = (
+            "<label class='mt-2 block text-[11px] text-slate-400'>"
+            "<span class='mb-1 block uppercase tracking-[0.2em] text-slate-500'>Auth token</span>"
+            "<input type='password' name='auth_token' "
+            "class='w-full rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-xs text-white outline-none placeholder:text-slate-500' "
+            "placeholder='Web auth token'>"
+            "</label>"
+        )
     for repo in config.repos:
         repo_name = escape(repo.repo_name)
         cards.append(
@@ -796,30 +831,37 @@ def _render_repo_action_cards(config: AppConfig) -> str:
               </div>
 
               <div class='mt-4 text-xs text-slate-400'>Fast controls stay local to the repo card. Investigations happen in the activity console below.</div>
+              {auth_note}
 
               <div x-show="activeActions === '{repo_name}'" class='mt-4 grid grid-cols-2 gap-2 border-t border-white/10 pt-4'>
                 <form method='post' action='/action'>
                   <input type='hidden' name='repo' value='{repo_name}'>
+                  {auth_fields}
                   <button type='submit' name='command' value='status' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Status</button>
                 </form>
                 <form method='post' action='/action'>
                   <input type='hidden' name='repo' value='{repo_name}'>
+                  {auth_fields}
                   <button type='submit' name='command' value='doctor' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Doctor</button>
                 </form>
                 <form method='post' action='/action'>
                   <input type='hidden' name='repo' value='{repo_name}'>
+                  {auth_fields}
                   <button type='submit' name='command' value='pause' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Pause</button>
                 </form>
                 <form method='post' action='/action'>
                   <input type='hidden' name='repo' value='{repo_name}'>
+                  {auth_fields}
                   <button type='submit' name='command' value='resume' class='w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/10'>Resume</button>
                 </form>
                 <form method='post' action='/action'>
                   <input type='hidden' name='repo' value='{repo_name}'>
+                  {auth_fields}
                   <button type='submit' name='command' value='once' class='w-full rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-left text-xs text-cyan-100 transition hover:bg-cyan-400/15'>Run once</button>
                 </form>
                 <form method='post' action='/action' class='rounded-2xl border border-white/10 bg-white/5 px-3 py-2'>
                   <input type='hidden' name='repo' value='{repo_name}'>
+                  {auth_fields}
                   <div class='flex items-center justify-between gap-2'>
                     <button type='submit' name='command' value='scan' class='text-left text-xs text-slate-100'>Scan</button>
                     <label class='flex items-center gap-1 text-[11px] uppercase tracking-[0.2em] text-slate-400'>
@@ -877,6 +919,40 @@ def _normalize_command_activity_rows(
             }
         )
     return activity
+
+
+def _web_request_is_authorized(
+    config: AppConfig,
+    *,
+    headers: dict[str, str],
+    params: dict[str, str],
+) -> tuple[bool, int, str]:
+    auth_mode = str(getattr(config.control.web, "auth_mode", "none") or "none").strip().lower()
+    if auth_mode != "token":
+        return True, 200, ""
+
+    env_name = str(getattr(config.control.web, "auth_token_env", "FLOW_HEALER_WEB_TOKEN") or "FLOW_HEALER_WEB_TOKEN")
+    expected_token = os.getenv(env_name, "").strip()
+    if not expected_token:
+        return False, 503, f"Web auth token is not configured in {env_name}."
+
+    form_token = str(params.get("auth_token") or "").strip()
+    header_token = _extract_bearer_token(headers)
+    candidate = form_token or header_token
+    if candidate and secrets.compare_digest(candidate, expected_token):
+        return True, 200, ""
+    return False, 401, "Web auth token required."
+
+
+def _extract_bearer_token(headers: dict[str, str]) -> str:
+    authorization = ""
+    for key, value in headers.items():
+        if str(key).lower() == "authorization":
+            authorization = str(value or "").strip()
+            break
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return ""
 
 
 def _normalize_attempt_activity_rows(
@@ -937,7 +1013,8 @@ def _normalize_event_activity_rows(
         level = str(row.get("level") or "").strip().lower()
         message = str(row.get("message") or "").strip() or event_type.replace("_", " ")
         payload = row.get("payload") or {}
-        signal = "failure" if level in {"error", "warning"} else "running" if event_type == "worker_pulse" else "ok"
+        is_swarm_event = event_type.startswith("swarm_")
+        signal = "failure" if level in {"error", "warning"} else "running" if event_type == "worker_pulse" or is_swarm_event else "ok"
         raw_text_parts = [message]
         if payload:
             raw_text_parts.append(json.dumps(payload, indent=2, default=str))
@@ -951,7 +1028,7 @@ def _normalize_event_activity_rows(
                 "pr_id": "",
                 "attempt_id": str(row.get("attempt_id") or "").strip(),
                 "branch": "",
-                "subsystem": "healer runtime" if event_type == "worker_pulse" else (event_type or "healer event"),
+                "subsystem": "healer runtime" if event_type == "worker_pulse" else ("healer swarm" if is_swarm_event else (event_type or "healer event")),
                 "summary": _truncate_text(message, 180),
                 "message": event_type or "event",
                 "raw_text": "\n\n".join(part for part in raw_text_parts if part),

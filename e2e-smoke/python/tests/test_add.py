@@ -22,18 +22,32 @@ def test_add_returns_the_sum_of_two_integers() -> None:
     assert module.add(2, 3) == 5
 
 
+def test_add_keeps_integer_addition_unchanged_for_negative_values() -> None:
+    module = _load_add_module()
+
+    assert module.add(-4, 7) == 3
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     (
         pytest.param(2.5, 3, id="rejects_float_operand"),
         pytest.param("2", 3, id="rejects_string_operand"),
-        pytest.param(True, 3, id="rejects_bool_left_operand"),
-        pytest.param(3, False, id="rejects_bool_right_operand"),
-        pytest.param(True, False, id="rejects_bool_operands"),
     ),
 )
-def test_add_rejects_non_integer_operands(left: object, right: object) -> None:
+def test_add_rejects_non_boolean_non_integer_operands(left: object, right: object) -> None:
     module = _load_add_module()
 
     with pytest.raises(TypeError, match=r"^add\(\) operands must be integers$"):
+        module.add(left, right)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [(True, 3), (2, False), (True, False)],
+)
+def test_add_rejects_boolean_inputs(left: int, right: int) -> None:
+    module = _load_add_module()
+
+    with pytest.raises(TypeError, match="bool inputs are not supported"):
         module.add(left, right)

@@ -46,7 +46,7 @@ _DIRECTORY_RE = re.compile(
 )
 _COMMAND_LINE_RE = re.compile(
     r"(?:^|\b)(?:cd\s+[^\n&|;]+&&\s*)?"
-    r"(?:npm\s+test|npm\s+run\s+(?:lint|test|build|smoke)\b|pytest\b|python\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b|\./scripts/healer_validate\.sh\b)"
+    r"(?:npm\s+test|npm\s+run\s+(?:lint|test|build|smoke)\b|pytest\b|python(?:3(?:\.\d+)?)?\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b|\./scripts/healer_validate\.sh\b)"
     r"[^\n]*",
     re.IGNORECASE,
 )
@@ -54,7 +54,7 @@ _URL_RE = re.compile(r"\bhttps?://[^\s)>`]+", re.IGNORECASE)
 
 _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bnpm\s+test\b", re.IGNORECASE), "node"),
-    (re.compile(r"\bpython\s+-m\s+pytest\b|\bpytest\b", re.IGNORECASE), "python"),
+    (re.compile(r"\bpython(?:3(?:\.\d+)?)?\s+-m\s+pytest\b|\bpytest\b", re.IGNORECASE), "python"),
     (re.compile(r"\bbundle\s+exec\s+rspec\b|\brspec\b", re.IGNORECASE), "ruby"),
     (re.compile(r"\bcargo\s+test\b", re.IGNORECASE), "rust"),
     (re.compile(r"\bgo\s+test\b", re.IGNORECASE), "go"),
@@ -75,7 +75,6 @@ _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-apps/node-next", "node"),
     ("e2e-apps/python-fastapi", "python"),
     ("e2e-apps/prosper-chat", "node"),
-    ("e2e-apps/swift-todo", "swift"),
 )
 
 
@@ -84,7 +83,7 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     task_kind_hint = _extract_task_kind_hint(issue_text=issue_text)
     explicit_paths = tuple(_explicit_paths(issue_text))
     explicit_directories = tuple(_explicit_directories(issue_text))
-    validation_commands = _extract_validation_commands(issue_text)
+    validation_commands = _extract_validation_commands(issue_body)
     input_context_paths = _explicit_input_context_paths(issue_text=issue_text, explicit_paths=explicit_paths)
     output_targets = tuple(path for path in explicit_paths if path not in input_context_paths)
     if not input_context_paths and _treat_markdown_targets_as_input_hints(issue_text=issue_text, output_targets=output_targets):
@@ -170,9 +169,14 @@ def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
     if spec.validation_commands:
         lines.append(f"- Validation commands: {' | '.join(spec.validation_commands)}")
     if spec.validation_profile == "code_change" and spec.output_targets:
-        lines.append(
-            "- Output target policy: Named targets are anchors for the fix; additional nearby code, test, or config files may also be edited when required."
-        )
+        if _uses_exact_output_target_policy(spec):
+            lines.append(
+                "- Output target policy: Named targets are the exact allowed edit set for this issue; do not modify nearby code, tests, or config unless the issue explicitly declares them."
+            )
+        else:
+            lines.append(
+                "- Output target policy: Named targets are anchors for the fix; additional nearby code, test, or config files may also be edited when required."
+            )
     lines.extend(
         [
             f"- Success criteria: {_success_criteria(spec)}",
@@ -232,6 +236,13 @@ def _validation_profile(*, task_kind: str, output_targets: tuple[str, ...]) -> s
     if task_kind in {"research", "docs"}:
         return "artifact_only"
     return "code_change"
+
+
+def _uses_exact_output_target_policy(spec: HealerTaskSpec) -> bool:
+    normalized_root = str(spec.execution_root or "").strip().strip("/")
+    if normalized_root.startswith("e2e-smoke/") or normalized_root.startswith("e2e-apps/"):
+        return True
+    return False
 
 
 def _explicit_paths(issue_text: str) -> list[str]:

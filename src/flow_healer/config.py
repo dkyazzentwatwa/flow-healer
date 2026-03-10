@@ -33,7 +33,8 @@ class WebControlSettings:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8787
-    auth_mode: str = "none"
+    auth_mode: str = "token"
+    auth_token_env: str = "FLOW_HEALER_WEB_TOKEN"
 
 
 @dataclass(slots=True)
@@ -85,8 +86,8 @@ class RelaySettings:
     healer_issue_required_labels: list[str] = field(default_factory=lambda: ["healer:ready"])
     healer_pr_actions_require_approval: bool = False
     healer_pr_required_label: str = "healer:pr-approved"
-    healer_pr_auto_approve_clean: bool = True
-    healer_pr_auto_merge_clean: bool = True
+    healer_pr_auto_approve_clean: bool = False
+    healer_pr_auto_merge_clean: bool = False
     healer_pr_merge_method: str = "squash"
     healer_trusted_actors: list[str] = field(default_factory=list)
     healer_retry_budget: int = 2
@@ -97,7 +98,23 @@ class RelaySettings:
     healer_circuit_breaker_cooldown_seconds: int = 900
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
-    healer_verifier_policy: str = "advisory"
+    healer_swarm_enabled: bool = False
+    healer_swarm_mode: str = "failure_repair"
+    healer_swarm_max_parallel_agents: int = 4
+    healer_swarm_max_repair_cycles_per_attempt: int = 1
+    healer_swarm_trigger_failure_classes: list[str] = field(
+        default_factory=lambda: [
+            "tests_failed",
+            "verifier_failed",
+            "no_workspace_change*",
+            "patch_apply_failed",
+            "malformed_diff",
+            "scope_violation",
+            "generated_artifact_contamination",
+        ]
+    )
+    healer_swarm_backend_strategy: str = "match_selected_backend"
+    healer_verifier_policy: str = "required"
     healer_test_gate_mode: str = "local_then_docker"
     healer_local_gate_policy: str = "auto"
     healer_completion_artifact_mode: str = "fallback_only"
@@ -128,6 +145,9 @@ class RelaySettings:
     healer_retry_max_backoff_seconds: int = 300
     healer_poll_use_conditional_requests: bool = True
     healer_poll_etag_ttl_seconds: int = 300
+    healer_status_cache_ttl_seconds: int = 5
+    healer_housekeeping_interval_seconds: int = 300
+    healer_blocked_label_repair_interval_seconds: int = 600
     healer_infra_dlq_threshold: int = 8
     healer_infra_dlq_cooldown_seconds: int = 3600
     healer_sqlite_busy_timeout_ms: int = 5000
@@ -199,8 +219,8 @@ class AppConfig:
                     healer_issue_required_labels=_list_of_str(item.get("issue_required_labels"), ["healer:ready"]),
                     healer_pr_actions_require_approval=bool(item.get("pr_actions_require_approval", False)),
                     healer_pr_required_label=str(item.get("pr_required_label") or "healer:pr-approved"),
-                    healer_pr_auto_approve_clean=bool(item.get("pr_auto_approve_clean", True)),
-                    healer_pr_auto_merge_clean=bool(item.get("pr_auto_merge_clean", True)),
+                    healer_pr_auto_approve_clean=bool(item.get("pr_auto_approve_clean", False)),
+                    healer_pr_auto_merge_clean=bool(item.get("pr_auto_merge_clean", False)),
                     healer_pr_merge_method=str(item.get("pr_merge_method") or "squash"),
                     healer_trusted_actors=_list_of_str(item.get("trusted_actors"), []),
                     healer_retry_budget=int(item.get("retry_budget") or 2),
@@ -213,6 +233,25 @@ class AppConfig:
                     ),
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
+                    healer_swarm_enabled=bool(item.get("swarm_enabled", False)),
+                    healer_swarm_mode=str(item.get("swarm_mode") or "failure_repair"),
+                    healer_swarm_max_parallel_agents=int(item.get("swarm_max_parallel_agents") or 4),
+                    healer_swarm_max_repair_cycles_per_attempt=int(
+                        item.get("swarm_max_repair_cycles_per_attempt") or 1
+                    ),
+                    healer_swarm_trigger_failure_classes=_list_of_str(
+                        item.get("swarm_trigger_failure_classes"),
+                        [
+                            "tests_failed",
+                            "verifier_failed",
+                            "no_workspace_change*",
+                            "patch_apply_failed",
+                            "malformed_diff",
+                            "scope_violation",
+                            "generated_artifact_contamination",
+                        ],
+                    ),
+                    healer_swarm_backend_strategy=str(item.get("swarm_backend_strategy") or "match_selected_backend"),
                     healer_verifier_policy=_normalize_verifier_policy(item.get("verifier_policy")),
                     healer_test_gate_mode=str(item.get("test_gate_mode") or "local_then_docker"),
                     healer_local_gate_policy=str(item.get("local_gate_policy") or "auto"),
@@ -251,6 +290,11 @@ class AppConfig:
                     healer_retry_max_backoff_seconds=int(item.get("retry_max_backoff_seconds") or 300),
                     healer_poll_use_conditional_requests=bool(item.get("poll_use_conditional_requests", True)),
                     healer_poll_etag_ttl_seconds=int(item.get("poll_etag_ttl_seconds") or 300),
+                    healer_status_cache_ttl_seconds=int(item.get("status_cache_ttl_seconds") or 5),
+                    healer_housekeeping_interval_seconds=int(item.get("housekeeping_interval_seconds") or 300),
+                    healer_blocked_label_repair_interval_seconds=int(
+                        item.get("blocked_label_repair_interval_seconds") or 600
+                    ),
                     healer_infra_dlq_threshold=int(item.get("infra_dlq_threshold") or 8),
                     healer_infra_dlq_cooldown_seconds=int(item.get("infra_dlq_cooldown_seconds") or 3600),
                     healer_sqlite_busy_timeout_ms=int(item.get("sqlite_busy_timeout_ms") or 5000),
@@ -269,7 +313,8 @@ class AppConfig:
                 enabled=bool(web_raw.get("enabled", True)),
                 host=str(web_raw.get("host") or "0.0.0.0"),
                 port=int(web_raw.get("port") or 8787),
-                auth_mode=str(web_raw.get("auth_mode") or "none"),
+                auth_mode=_normalize_web_auth_mode(web_raw.get("auth_mode")),
+                auth_token_env=str(web_raw.get("auth_token_env") or "FLOW_HEALER_WEB_TOKEN"),
             ),
             mail=MailControlSettings(
                 enabled=bool(mail_raw.get("enabled", False)),
@@ -345,10 +390,17 @@ def _apply_connector_routing_defaults(service: ServiceSettings) -> ServiceSettin
 
 
 def _normalize_verifier_policy(value: Any) -> str:
-    raw = str(value or "advisory").strip().lower().replace("-", "_")
+    raw = str(value or "required").strip().lower().replace("-", "_")
     if raw in {"advisory", "required"}:
         return raw
-    return "advisory"
+    return "required"
+
+
+def _normalize_web_auth_mode(value: Any) -> str:
+    raw = str(value or "token").strip().lower().replace("-", "_")
+    if raw in {"none", "token"}:
+        return raw
+    return "token"
 
 
 def _normalize_tracker_backend(value: Any) -> str:

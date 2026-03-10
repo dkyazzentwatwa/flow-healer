@@ -202,6 +202,40 @@ test('add keeps a leading undefined input on normal NaN semantics in longer list
   assert.ok(Number.isNaN(add(undefined, 1, 2)));
 });
 
+test('add rejects string operands in two-argument calls', () => {
+  assert.throws(() => add('2', 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(2, '3'), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add.call(null, '2', 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
+test('add rejects string operands in variadic calls', () => {
+  assert.throws(() => add('1', 2, 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(1, '2', 3), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add(1n, 2, '3'), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+  assert.throws(() => add.apply(null, [1, '2', 3]), {
+    name: 'TypeError',
+    message: 'add() does not accept string operands.',
+  });
+});
+
 test('add applies the same promotion rules to longer input lists', async (t) => {
   for (const testCase of longerInputListCases) {
     await t.test(testCase.name, () =>

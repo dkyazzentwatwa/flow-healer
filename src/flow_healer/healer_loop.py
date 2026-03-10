@@ -28,6 +28,7 @@ from .healer_preflight import (
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
 from .healer_runner import HealerRunner, _stage_workspace_changes
+from .healer_swarm import HealerSwarm, SwarmRecoveryOutcome, SwarmRecoveryPlan, build_connector_subagent_backend
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue, PullRequestDetails, PullRequestResult
 from .healer_task_spec import compile_task_spec
@@ -46,6 +47,7 @@ _FLOW_COMMENT_PERSONA = (
     "Professional, concise status updates in Markdown, "
     "and always sign off with '-- Flow Healer'."
 )
+_SWARM_STICKY_STATUSES = {"swarm_analyzing", "swarm_repairing"}
 _INFRA_FAILURE_CLASSES = {
     "connector_unavailable",
     "connector_runtime_error",
@@ -53,6 +55,7 @@ _INFRA_FAILURE_CLASSES = {
     "github_auth_missing",
     "github_network_error",
     "github_rate_limited",
+    "infra_pause",
     "lease_expired",
     "preflight_failed",
     "sqlite_busy",
@@ -99,6 +102,8 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "scope_violation":       {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt edited files outside the declared output targets. Keep the patch strictly scoped."},
     "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
     "generated_artifact_contamination": {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt left generated artifacts in the worktree. Clean workspace noise before retrying."},
+    "infra_pause":          {"backoff_multiplier": 1.0, "feedback_hint": "Infrastructure failed before validation could confirm the patch. Repair the local runtime and wait for the pause window to clear before retrying."},
+    "swarm_quarantine":     {"backoff_multiplier": 1.0, "feedback_hint": "Swarm quarantined the attempt because another autonomous edit would be speculative. Clear the blocker before retrying."},
 }
 
 
@@ -136,6 +141,12 @@ _FAILURE_USER_HINTS: dict[str, str] = {
     ),
     "verifier_failed": (
         "The AI verifier rejected the fix as potentially incorrect. Manual review recommended."
+    ),
+    "infra_pause": (
+        "Automation paused because infrastructure failed before validation reached the requested code path. Repair the local runtime and retry after the pause window."
+    ),
+    "swarm_quarantine": (
+        "Swarm quarantined this attempt because another autonomous edit would be speculative. Clear the blocker before retrying."
     ),
     "patch_apply_failed": (
         "The generated patch could not be applied cleanly. This may resolve on retry."
@@ -237,6 +248,7 @@ class AutonomousHealerLoop:
         self.runners_by_backend: dict[str, HealerRunner] = {}
         self.verifiers_by_backend: dict[str, HealerVerifier] = {}
         self.reviewers_by_backend: dict[str, HealerReviewer] = {}
+        self.swarms_by_backend: dict[str, HealerSwarm] = {}
         self.preflight_by_backend: dict[str, HealerPreflight] = {}
         for backend, backend_connector in self.connectors_by_backend.items():
             runner = HealerRunner(
@@ -254,6 +266,14 @@ class AutonomousHealerLoop:
             self.runners_by_backend[backend] = runner
             self.verifiers_by_backend[backend] = HealerVerifier(connector=backend_connector, timeout_seconds=300)
             self.reviewers_by_backend[backend] = HealerReviewer(connector=backend_connector)
+            self.swarms_by_backend[backend] = HealerSwarm(
+                build_connector_subagent_backend(backend_connector),
+                max_parallel_agents=max(1, int(getattr(settings, "healer_swarm_max_parallel_agents", 4))),
+                max_repair_cycles_per_attempt=max(
+                    1,
+                    int(getattr(settings, "healer_swarm_max_repair_cycles_per_attempt", 1)),
+                ),
+            )
             self.preflight_by_backend[backend] = HealerPreflight(
                 store=store,
                 runner=runner,
@@ -283,6 +303,10 @@ class AutonomousHealerLoop:
             enabled=settings.healer_learning_enabled,
         )
         self.preflight = self.preflight_by_backend[primary_backend]
+        self._last_housekeeping_at = 0.0
+        self._last_blocked_label_repair_at = 0.0
+        self._sticky_runtime_status = ""
+        self._sticky_runtime_issue_id = ""
 
     def _primary_backend(self) -> str:
         if self.connector_routing_mode == "exec_for_code":
@@ -303,14 +327,25 @@ class AutonomousHealerLoop:
     def _pipeline_for_task(
         self,
         task_spec: HealerTaskSpec,
-    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerPreflight]:
+    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerSwarm, HealerPreflight]:
         backend = self._select_backend_for_task(task_spec)
         connector = self.connectors_by_backend.get(backend, self.connector)
         runner = self.runners_by_backend.get(backend, self.runner)
         verifier = self.verifiers_by_backend.get(backend, self.verifier)
         reviewer = self.reviewers_by_backend.get(backend, self.reviewer)
+        swarm = self.swarms_by_backend.get(backend)
         preflight = self.preflight_by_backend.get(backend, self.preflight)
-        return backend, connector, runner, verifier, reviewer, preflight
+        if swarm is None:
+            swarm = HealerSwarm(
+                build_connector_subagent_backend(connector),
+                max_parallel_agents=max(1, int(getattr(self.settings, "healer_swarm_max_parallel_agents", 4))),
+                max_repair_cycles_per_attempt=max(
+                    1,
+                    int(getattr(self.settings, "healer_swarm_max_repair_cycles_per_attempt", 1)),
+                ),
+            )
+            self.swarms_by_backend[backend] = swarm
+        return backend, connector, runner, verifier, reviewer, swarm, preflight
 
     @property
     def enabled(self) -> bool:
@@ -364,8 +399,9 @@ class AutonomousHealerLoop:
             touch_tick_started=True,
         )
         self._record_worker_heartbeat(status="ticking")
-        reconcile_summary = self.reconciler.reconcile()
-        self._record_reconcile_summary(reconcile_summary)
+        reconcile_summary = self._maybe_run_housekeeping()
+        if reconcile_summary is not None:
+            self._record_reconcile_summary(reconcile_summary)
         self._maybe_recycle_helpers()
         if self.store.get_state("healer_paused") == "true":
             logger.info("Autonomous healer paused via system command; housekeeping complete, skipping cycle.")
@@ -374,12 +410,12 @@ class AutonomousHealerLoop:
         if not bool(getattr(self.tracker, "enabled", False)):
             failure_class = "github_auth_missing"
             failure_reason = "GitHub tracker is disabled (missing token or repo slug); skipping cycle."
-            self.store.set_state("healer_tracker_available", "false")
+            self.store.set_states({"healer_tracker_available": "false"})
             self._record_tracker_error(failure_class=failure_class, failure_reason=failure_reason)
             logger.warning("Autonomous healer tracker unavailable; skipping cycle. %s", failure_reason)
             self.store.update_runtime_status(status="tracker_unavailable", last_error=failure_reason, touch_tick_finished=True)
             return
-        self.store.set_state("healer_tracker_available", "true")
+        self.store.set_states({"healer_tracker_available": "true"})
         self._maybe_run_scan()
         self._ingest_ready_issues()
         self.preflight.refresh_all(force=False)
@@ -387,13 +423,16 @@ class AutonomousHealerLoop:
         open_pr_rows = [
             row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
         ]
-        self._reconcile_pr_outcomes(active_prs=active_pr_rows)
-        self._auto_approve_open_prs(active_prs=open_pr_rows)
-        self._auto_merge_open_prs(active_prs=open_pr_rows)
-        self._reconcile_pr_outcomes()
+        details_cache: dict[int, PullRequestDetails | None] = {}
+        viewer_login = self.tracker.viewer_login().lower()
+        self._reconcile_pr_outcomes(active_prs=active_pr_rows, details_cache=details_cache)
+        self._auto_approve_open_prs(active_prs=open_pr_rows, details_cache=details_cache, viewer_login=viewer_login)
+        merged = self._auto_merge_open_prs(active_prs=open_pr_rows, details_cache=details_cache)
+        if merged:
+            self._reconcile_pr_outcomes(details_cache={}, force_refresh=True)
         resumed_approved = self._resume_approved_pending_prs()
-        self._ingest_pr_feedback()
-        self._reconcile_blocked_issue_labels()
+        self._ingest_pr_feedback(active_prs=open_pr_rows, details_cache=details_cache, viewer_login=viewer_login)
+        self._maybe_reconcile_blocked_issue_labels()
         breaker = self._circuit_breaker_status()
         if breaker.open and resumed_approved == 0:
             logger.warning(
@@ -445,10 +484,19 @@ class AutonomousHealerLoop:
             if not issue:
                 break
             self._process_claimed_issue(issue)
-            self._reconcile_pr_outcomes()
+            self._reconcile_pr_outcomes(force_refresh=True)
             processed += 1
         self.store.update_runtime_status(status="idle", last_error="", touch_tick_finished=True)
         self._maybe_shutdown_idle_docker_runtime()
+
+    def _maybe_run_housekeeping(self) -> dict[str, int] | None:
+        interval = max(30.0, float(getattr(self.settings, "healer_housekeeping_interval_seconds", 300.0)))
+        now = time.monotonic()
+        last_housekeeping_at = float(getattr(self, "_last_housekeeping_at", 0.0))
+        if last_housekeeping_at and (now - last_housekeeping_at) < interval:
+            return None
+        self._last_housekeeping_at = now
+        return self.reconciler.reconcile()
 
     def _record_worker_heartbeat(
         self,
@@ -456,14 +504,26 @@ class AutonomousHealerLoop:
         status: str = "idle",
         issue_id: str = "",
         attempt_id: str = "",
+        force_emit: bool = False,
     ) -> None:
+        requested_status = str(status or "idle").strip() or "idle"
+        sticky_status = str(getattr(self, "_sticky_runtime_status", "") or "").strip()
+        sticky_issue_id = str(getattr(self, "_sticky_runtime_issue_id", "") or "").strip()
+        if requested_status == "processing" and issue_id and issue_id == sticky_issue_id and sticky_status in _SWARM_STICKY_STATUSES:
+            status = sticky_status
+        else:
+            status = requested_status
         now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        self.store.set_state("healer_active_worker_id", self.worker_id)
-        self.store.set_state("healer_active_worker_heartbeat_at", now)
+        self.store.set_states(
+            {
+                "healer_active_worker_id": self.worker_id,
+                "healer_active_worker_heartbeat_at": now,
+            }
+        )
         self.store.update_runtime_status(status=status, last_error="", touch_heartbeat=True)
         pulse_interval_minutes = max(0.25, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)) / 60.0)
         last_pulse_at = str(self.store.get_state("healer_last_pulse_at") or "").strip()
-        if last_pulse_at and _minutes_since(last_pulse_at) < pulse_interval_minutes:
+        if not force_emit and last_pulse_at and _minutes_since(last_pulse_at) < pulse_interval_minutes:
             return
         message = f"Worker pulse: {status}."
         if issue_id:
@@ -481,7 +541,7 @@ class AutonomousHealerLoop:
                 "heartbeat_at": now,
             },
         )
-        self.store.set_state("healer_last_pulse_at", now)
+        self.store.set_states({"healer_last_pulse_at": now})
         logger.info(
             "Worker pulse emitted (repo=%s status=%s issue=%s)",
             self.settings.repo_name,
@@ -489,10 +549,26 @@ class AutonomousHealerLoop:
             issue_id or "-",
         )
 
+    def _set_sticky_runtime_status(self, *, issue_id: str, status: str) -> None:
+        normalized_issue = str(issue_id or "").strip()
+        normalized_status = str(status or "").strip()
+        if normalized_issue and normalized_status in _SWARM_STICKY_STATUSES:
+            self._sticky_runtime_issue_id = normalized_issue
+            self._sticky_runtime_status = normalized_status
+
+    def _clear_sticky_runtime_status(self, *, issue_id: str = "") -> None:
+        normalized_issue = str(issue_id or "").strip()
+        sticky_issue_id = str(getattr(self, "_sticky_runtime_issue_id", "") or "").strip()
+        if normalized_issue and sticky_issue_id and normalized_issue != sticky_issue_id:
+            return
+        self._sticky_runtime_issue_id = ""
+        self._sticky_runtime_status = ""
+
     def _record_reconcile_summary(self, summary: dict[str, int]) -> None:
-        self.store.set_state("healer_last_reconcile_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+        payload = {"healer_last_reconcile_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")}
         for key, value in summary.items():
-            self.store.set_state(f"healer_reconcile_{key}", str(max(0, int(value))))
+            payload[f"healer_reconcile_{key}"] = str(max(0, int(value)))
+        self.store.set_states(payload)
 
     def _maybe_shutdown_idle_docker_runtime(self) -> None:
         if not docker_idle_shutdown_enabled():
@@ -518,8 +594,12 @@ class AutonomousHealerLoop:
                 f"Deferred helper recycle requested at {requested_at}; "
                 f"active issue processing is still in progress ({active_issue_ids or 'busy'})."
             )
-            self.store.set_state("healer_helper_recycle_status", "deferred_busy")
-            self.store.set_state("healer_helper_recycle_reason", reason[:500])
+            self.store.set_states(
+                {
+                    "healer_helper_recycle_status": "deferred_busy",
+                    "healer_helper_recycle_reason": reason[:500],
+                }
+            )
             logger.info(reason)
             return False
 
@@ -535,14 +615,17 @@ class AutonomousHealerLoop:
                 logger.warning("Failed to recycle %s helper backend for repo %s: %s", backend, self.settings.repo_name, exc)
             closed.add(id(connector))
         summary = ", ".join(sorted(set(recycled_backends))) or "none"
-        self.store.set_state("healer_helper_recycle_requested_at", "")
-        self.store.set_state("healer_helper_recycle_idle_only", "")
-        self.store.set_state("healer_helper_recycle_status", "completed")
-        self.store.set_state(
-            "healer_helper_recycle_reason",
-            f"Recycled helper backends: {summary}. They will restart lazily on next use.",
+        self.store.set_states(
+            {
+                "healer_helper_recycle_requested_at": "",
+                "healer_helper_recycle_idle_only": "",
+                "healer_helper_recycle_status": "completed",
+                "healer_helper_recycle_reason": (
+                    f"Recycled helper backends: {summary}. They will restart lazily on next use."
+                ),
+                "healer_helper_recycle_completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            }
         )
-        self.store.set_state("healer_helper_recycle_completed_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
         logger.info(
             "Recycled helper backends for repo %s (idle_only=%s, requested_at=%s, backends=%s)",
             self.settings.repo_name,
@@ -552,10 +635,16 @@ class AutonomousHealerLoop:
         )
         return True
 
-    def _ingest_pr_feedback(self, active_prs: list[dict[str, object]] | None = None) -> None:
+    def _ingest_pr_feedback(
+        self,
+        active_prs: list[dict[str, object]] | None = None,
+        *,
+        details_cache: dict[int, PullRequestDetails | None] | None = None,
+        viewer_login: str | None = None,
+    ) -> None:
         active_prs = active_prs or self._list_active_pr_rows(include_blocked=False)
-        self_actor = self.tracker.viewer_login().lower()
-        details_cache: dict[int, PullRequestDetails | None] = {}
+        self_actor = (viewer_login if viewer_login is not None else self.tracker.viewer_login()).lower()
+        details_cache = details_cache if details_cache is not None else {}
         for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
             if pr_number <= 0:
@@ -666,6 +755,358 @@ class AutonomousHealerLoop:
             clear_lease=True,
         )
 
+    def _swarm_enabled_for_failure(self, failure_class: str) -> bool:
+        if not bool(getattr(self.settings, "healer_swarm_enabled", False)):
+            return False
+        if str(getattr(self.settings, "healer_swarm_mode", "failure_repair") or "failure_repair").strip().lower() != "failure_repair":
+            return False
+        patterns = getattr(self.settings, "healer_swarm_trigger_failure_classes", None) or [
+            "tests_failed",
+            "verifier_failed",
+            "no_workspace_change*",
+            "patch_apply_failed",
+            "malformed_diff",
+            "scope_violation",
+            "generated_artifact_contamination",
+        ]
+        normalized = str(failure_class or "").strip()
+        for pattern in patterns:
+            token = str(pattern or "").strip()
+            if not token:
+                continue
+            if token.endswith("*") and normalized.startswith(token[:-1]):
+                return True
+            if normalized == token:
+                return True
+        return False
+
+    def _record_swarm_metrics(self, *, backend: str, outcome: SwarmRecoveryOutcome) -> None:
+        self._increment_state_counter("healer_swarm_runs")
+        self._increment_state_counter(f"healer_swarm_runs_backend_{backend}")
+        self._increment_state_counter(f"healer_swarm_strategy_{outcome.strategy}")
+        if outcome.recovered:
+            self._increment_state_counter("healer_swarm_recovered")
+            return
+        self._increment_state_counter("healer_swarm_unrecovered")
+
+    def _emit_swarm_event(
+        self,
+        *,
+        event_type: str,
+        message: str,
+        issue_id: str,
+        attempt_id: str,
+        payload: dict[str, Any],
+        level: str = "info",
+    ) -> None:
+        self.store.create_healer_event(
+            event_type=event_type,
+            level=level,
+            message=message,
+            issue_id=issue_id,
+            attempt_id=attempt_id,
+            payload=payload,
+        )
+        logger.info(
+            "Swarm event emitted (repo=%s event=%s issue=%s attempt=%s)",
+            self.settings.repo_name,
+            event_type,
+            issue_id or "-",
+            attempt_id or "-",
+        )
+
+    def _post_swarm_started_comment(
+        self,
+        *,
+        issue_id: str,
+        attempt_no: int,
+        failure_class: str,
+        failure_reason: str,
+    ) -> None:
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Swarm recovery started",
+                f"Attempt {attempt_no} hit `{failure_class}` and is switching to recovery subagents.",
+                [
+                    f"Failure class: `{failure_class}`",
+                    f"Reason: `{self._clean_comment_text(failure_reason, max_chars=220)}`",
+                ],
+            ),
+        )
+
+    def _post_swarm_finished_comment(
+        self,
+        *,
+        issue_id: str,
+        attempt_no: int,
+        outcome: SwarmRecoveryOutcome,
+    ) -> None:
+        intro = (
+            f"Attempt {attempt_no} was recovered by the swarm and is returning to the main fix flow."
+            if outcome.recovered
+            else f"Attempt {attempt_no} was not recovered by the swarm."
+        )
+        bullets = [
+            f"Recovered: `{'yes' if outcome.recovered else 'no'}`",
+            f"Strategy: `{outcome.strategy}`",
+            f"Summary: `{self._clean_comment_text(outcome.summary, max_chars=220)}`",
+        ]
+        if outcome.failure_reason and not outcome.recovered:
+            bullets.append(f"Failure: `{self._clean_comment_text(outcome.failure_reason, max_chars=220)}`")
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._format_flow_status_comment(
+                "Swarm recovery finished",
+                intro,
+                bullets,
+            ),
+        )
+
+    def _handle_swarm_telemetry(
+        self,
+        *,
+        issue: HealerIssue,
+        attempt_id: str,
+        attempt_no: int,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        normalized_payload = dict(payload or {})
+        normalized_payload.setdefault("attempt_no", attempt_no)
+        normalized_payload.setdefault("worker_id", self.worker_id)
+        level = "info"
+        if event_type == "swarm_started":
+            self._set_sticky_runtime_status(issue_id=issue.issue_id, status="swarm_analyzing")
+            self._record_worker_heartbeat(
+                status="swarm_analyzing",
+                issue_id=issue.issue_id,
+                attempt_id=attempt_id,
+                force_emit=True,
+            )
+            self._post_swarm_started_comment(
+                issue_id=issue.issue_id,
+                attempt_no=attempt_no,
+                failure_class=str(normalized_payload.get("failure_class") or ""),
+                failure_reason=str(normalized_payload.get("failure_reason") or ""),
+            )
+            message = (
+                "Swarm recovery started"
+                f" for failure {str(normalized_payload.get('failure_class') or 'unknown')}."
+            )
+        elif event_type == "swarm_role_completed":
+            role = str(normalized_payload.get("role") or "unknown")
+            stage = str(normalized_payload.get("stage") or "analysis")
+            success = bool(normalized_payload.get("success", False))
+            level = "info" if success else "warning"
+            message = f"Swarm {stage} role {role} completed ({'ok' if success else 'warning'})."
+        elif event_type == "swarm_plan_ready":
+            strategy = str(normalized_payload.get("strategy") or "repair")
+            if strategy == "repair":
+                self._set_sticky_runtime_status(issue_id=issue.issue_id, status="swarm_repairing")
+                self._record_worker_heartbeat(
+                    status="swarm_repairing",
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    force_emit=True,
+                )
+            message = f"Swarm recovery plan ready ({strategy})."
+        elif event_type == "swarm_finished":
+            recovered = bool(normalized_payload.get("recovered", False))
+            level = "info" if recovered else "warning"
+            summary = self._clean_comment_text(normalized_payload.get("summary") or "", max_chars=180)
+            message = (
+                f"Swarm recovery finished ({'recovered' if recovered else 'unrecovered'})."
+                + (f" {summary}" if summary else "")
+            )
+            self._post_swarm_finished_comment(
+                issue_id=issue.issue_id,
+                attempt_no=attempt_no,
+                outcome=SwarmRecoveryOutcome(
+                    recovered=recovered,
+                    strategy=str(normalized_payload.get("strategy") or "repair"),
+                    summary=str(normalized_payload.get("summary") or ""),
+                    analyzer_results=(),
+                    plan=SwarmRecoveryPlan(
+                        strategy=str(normalized_payload.get("strategy") or "repair"),
+                        summary=str(normalized_payload.get("summary") or ""),
+                        root_cause="",
+                        edit_scope=(),
+                        targeted_tests=(),
+                        validation_focus=(),
+                    ),
+                    failure_class=str(normalized_payload.get("failure_class") or ""),
+                    failure_reason=str(normalized_payload.get("failure_reason") or ""),
+                ),
+            )
+            self._clear_sticky_runtime_status(issue_id=issue.issue_id)
+            self._record_worker_heartbeat(
+                status="processing",
+                issue_id=issue.issue_id,
+                attempt_id=attempt_id,
+                force_emit=True,
+            )
+        else:
+            message = f"Swarm event: {event_type}"
+        self._emit_swarm_event(
+            event_type=event_type,
+            level=level,
+            message=message,
+            issue_id=issue.issue_id,
+            attempt_id=attempt_id,
+            payload=normalized_payload,
+        )
+
+    def _maybe_recover_with_swarm(
+        self,
+        *,
+        selected_backend: str,
+        selected_swarm: HealerSwarm,
+        selected_runner: HealerRunner,
+        issue: HealerIssue,
+        attempt_id: str,
+        attempt_no: int,
+        task_spec: HealerTaskSpec,
+        learned_context: str,
+        feedback_context: str,
+        failure_class: str,
+        failure_reason: str,
+        proposer_output: str,
+        test_summary: dict[str, Any],
+        verifier_summary: dict[str, Any],
+        workspace_status: dict[str, Any],
+        workspace: Path,
+        targeted_tests: list[str],
+    ) -> SwarmRecoveryOutcome | None:
+        if not self._swarm_enabled_for_failure(failure_class):
+            return None
+        telemetry_emitted = False
+
+        def _telemetry_callback(event_type: str, payload: dict[str, Any]) -> None:
+            nonlocal telemetry_emitted
+            telemetry_emitted = True
+            self._handle_swarm_telemetry(
+                issue=issue,
+                attempt_id=attempt_id,
+                attempt_no=attempt_no,
+                event_type=event_type,
+                payload=payload,
+            )
+
+        try:
+            outcome = selected_swarm.recover(
+                issue_id=issue.issue_id,
+                issue_title=issue.title,
+                issue_body=issue.body,
+                task_spec=task_spec,
+                learned_context=learned_context,
+                feedback_context=feedback_context,
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+                proposer_output=proposer_output,
+                test_summary=test_summary,
+                verifier_summary=verifier_summary,
+                workspace_status=workspace_status,
+                workspace=workspace,
+                runner=selected_runner,
+                max_diff_files=self.settings.healer_max_diff_files,
+                max_diff_lines=self.settings.healer_max_diff_lines,
+                max_failed_tests_allowed=self.settings.healer_max_failed_tests_allowed,
+                targeted_tests=targeted_tests,
+                telemetry_callback=_telemetry_callback,
+            )
+        except Exception as exc:
+            if telemetry_emitted:
+                self._handle_swarm_telemetry(
+                    issue=issue,
+                    attempt_id=attempt_id,
+                    attempt_no=attempt_no,
+                    event_type="swarm_finished",
+                    payload={
+                        "recovered": False,
+                        "strategy": "repair",
+                        "summary": "Swarm recovery aborted with an internal error.",
+                        "failure_class": "swarm_runtime_error",
+                        "failure_reason": str(exc),
+                    },
+                )
+            raise
+        self._record_swarm_metrics(backend=selected_backend, outcome=outcome)
+        return outcome
+
+    def _swarm_failure_override(
+        self,
+        *,
+        base_failure_class: str,
+        base_failure_reason: str,
+        swarm_outcome: SwarmRecoveryOutcome | None,
+    ) -> tuple[str, str]:
+        if swarm_outcome is None or swarm_outcome.recovered:
+            return base_failure_class, base_failure_reason
+        reason = (
+            str(swarm_outcome.failure_reason or "").strip()
+            or str(swarm_outcome.summary or "").strip()
+            or str(base_failure_reason or "").strip()
+        )
+        strategy = str(swarm_outcome.strategy or "").strip().lower()
+        if strategy == "infra_pause":
+            return "infra_pause", reason
+        if strategy == "quarantine":
+            if self._swarm_outcome_looks_infra(
+                summary=str(swarm_outcome.summary or ""),
+                reason=reason,
+                root_cause=str(swarm_outcome.plan.root_cause or ""),
+            ):
+                return "infra_pause", reason
+            return "swarm_quarantine", reason
+        return base_failure_class, reason
+
+    @staticmethod
+    def _swarm_outcome_looks_infra(*, summary: str, reason: str, root_cause: str) -> bool:
+        haystack = " ".join(
+            part.strip().lower()
+            for part in (summary, reason, root_cause)
+            if part and part.strip()
+        )
+        if not haystack:
+            return False
+        # Keep global infra pauses for genuine runtime outages only.
+        # SQL/schema/migration failures inside a healthy local stack should stay quarantined per issue.
+        non_infra_tokens = (
+            "assertion",
+            "constraint",
+            "migration",
+            "policy",
+            "schema",
+            "sql",
+            "table",
+            "column",
+        )
+        if any(token in haystack for token in non_infra_tokens):
+            return False
+        strong_infra_tokens = (
+            "cannot connect to the docker daemon",
+            "connector_unavailable",
+            "connector_runtime_error",
+            "docker daemon",
+            "github network",
+            "network timeout",
+            "permission denied",
+            "service unavailable",
+        )
+        if any(token in haystack for token in strong_infra_tokens):
+            return True
+        infra_tokens = (
+            "container",
+            "docker",
+            "environment",
+            "infra",
+            "network",
+            "runtime",
+            "stack unavailable",
+        )
+        return any(token in haystack for token in infra_tokens)
+
     def _discover_open_pr_for_issue(self, *, issue_id: str) -> PullRequestResult | None:
         try:
             pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
@@ -701,9 +1142,15 @@ class AutonomousHealerLoop:
             logger.warning("Healer scan failed for repo %s: %s", self.settings.repo_name, exc)
             return None
 
-    def _reconcile_pr_outcomes(self, active_prs: list[dict[str, object]] | None = None) -> int:
+    def _reconcile_pr_outcomes(
+        self,
+        active_prs: list[dict[str, object]] | None = None,
+        *,
+        details_cache: dict[int, PullRequestDetails | None] | None = None,
+        force_refresh: bool = False,
+    ) -> int:
         active_prs = active_prs or self._list_active_pr_rows(include_blocked=True)
-        details_cache: dict[int, PullRequestDetails | None] = {}
+        details_cache = details_cache if details_cache is not None else {}
         resolved = 0
         for row in active_prs:
             issue_id = str(row.get("issue_id") or "")
@@ -717,7 +1164,11 @@ class AutonomousHealerLoop:
             mergeable_state = ""
             head_ref = ""
             if pr_number > 0:
-                pr_details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
+                pr_details = self._get_pr_details_cached(
+                    pr_number=pr_number,
+                    cache=details_cache,
+                    force_refresh=force_refresh,
+                )
                 if pr_details is None:
                     continue
                 pr_state = pr_details.state
@@ -732,7 +1183,11 @@ class AutonomousHealerLoop:
                     details_cache[pr_number] = refreshed
                     head_ref = refreshed.head_ref
             else:
-                discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
+                try:
+                    discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
+                except Exception as exc:
+                    logger.warning("Failed to discover PR for issue #%s: %s", issue_id, exc)
+                    continue
                 if discovered_pr is None:
                     continue
                 pr_number = discovered_pr.number
@@ -873,8 +1328,9 @@ class AutonomousHealerLoop:
         *,
         pr_number: int,
         cache: dict[int, PullRequestDetails | None],
+        force_refresh: bool = False,
     ) -> PullRequestDetails | None:
-        if pr_number not in cache:
+        if force_refresh or pr_number not in cache:
             cache[pr_number] = self.tracker.get_pr_details(pr_number=pr_number)
         return cache[pr_number]
 
@@ -1407,19 +1863,25 @@ class AutonomousHealerLoop:
         )
         return True
 
-    def _auto_approve_open_prs(self, active_prs: list[dict[str, object]] | None = None) -> int:
+    def _auto_approve_open_prs(
+        self,
+        active_prs: list[dict[str, object]] | None = None,
+        *,
+        details_cache: dict[int, PullRequestDetails | None] | None = None,
+        viewer_login: str | None = None,
+    ) -> int:
         if not getattr(self.settings, "healer_pr_auto_approve_clean", True):
             return 0
-        viewer_login = self.tracker.viewer_login().strip().lower()
+        reviewer_login = (viewer_login if viewer_login is not None else self.tracker.viewer_login()).strip().lower()
         active_prs = active_prs or self.store.list_healer_issues(states=["pr_open"], limit=100)
-        details_cache: dict[int, PullRequestDetails | None] = {}
+        details_cache = details_cache if details_cache is not None else {}
         approved = 0
         for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
             if pr_number <= 0:
                 continue
             details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
-            approved += int(self._maybe_auto_approve_pr(pr_number=pr_number, viewer_login=viewer_login, details=details))
+            approved += int(self._maybe_auto_approve_pr(pr_number=pr_number, viewer_login=reviewer_login, details=details))
         return approved
 
     def _maybe_auto_approve_pr(
@@ -1468,11 +1930,16 @@ class AutonomousHealerLoop:
             logger.warning("Failed to auto-approve PR #%d: %s", pr_number, exc)
             return False
 
-    def _auto_merge_open_prs(self, active_prs: list[dict[str, object]] | None = None) -> int:
+    def _auto_merge_open_prs(
+        self,
+        active_prs: list[dict[str, object]] | None = None,
+        *,
+        details_cache: dict[int, PullRequestDetails | None] | None = None,
+    ) -> int:
         if not getattr(self.settings, "healer_pr_auto_merge_clean", True):
             return 0
         active_prs = active_prs or self.store.list_healer_issues(states=["pr_open"], limit=100)
-        details_cache: dict[int, PullRequestDetails | None] = {}
+        details_cache = details_cache if details_cache is not None else {}
         merged = 0
         for row in active_prs:
             pr_number = int(row.get("pr_number") or 0)
@@ -1617,9 +2084,27 @@ class AutonomousHealerLoop:
                 scope_key=scope_key,
                 dedupe_key=dedupe_key,
             )
-            discovered_pr = self._discover_open_pr_for_issue(issue_id=issue.issue_id)
+            existing_state = str((existing_issue or {}).get("state") or "").strip().lower()
+            issue_contract_changed = bool(
+                existing_issue is not None
+                and (
+                    str(existing_issue.get("title") or "") != issue.title
+                    or str(existing_issue.get("body") or "") != issue.body
+                    or list(existing_issue.get("labels") or []) != issue.labels
+                )
+            )
+            should_discover_pr = (
+                existing_issue is None
+                or int((existing_issue or {}).get("pr_number") or 0) > 0
+                or existing_state in {"pr_open", "pr_pending_approval", "blocked", "resolved"}
+                or issue_contract_changed
+            )
+            discovered_pr = (
+                self._discover_open_pr_for_issue(issue_id=issue.issue_id)
+                if should_discover_pr
+                else None
+            )
             if existing_issue is not None:
-                existing_state = str(existing_issue.get("state") or "").strip().lower()
                 existing_pr_state = str(existing_issue.get("pr_state") or "").strip().lower()
                 if discovered_pr is not None:
                     self._restore_open_pr_state(
@@ -1640,9 +2125,8 @@ class AutonomousHealerLoop:
                             clear_lease=True,
                         )
                     continue
-                if existing_state == "archived" or (
-                    existing_state == "blocked" and existing_pr_state != "conflict"
-                ) or (
+                should_requeue_blocked = existing_state == "blocked" and issue_contract_changed
+                if existing_state == "archived" or should_requeue_blocked or (
                     existing_state == "resolved" and existing_pr_state == "closed"
                 ):
                     self.store.set_healer_issue_state(
@@ -1741,6 +2225,7 @@ class AutonomousHealerLoop:
             priority=int(row.get("priority") or 100),
             html_url="",
         )
+        self._clear_sticky_runtime_status(issue_id=issue.issue_id)
         if not self._claim_is_actionable(issue):
             return
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
@@ -1789,6 +2274,7 @@ class AutonomousHealerLoop:
         actual_diff: list[str] = []
         test_summary: dict[str, object] = {}
         verifier_summary: dict[str, object] = {}
+        swarm_summary: dict[str, object] = {}
         failure_class = ""
         failure_reason = ""
         proposer_output_excerpt = ""
@@ -1814,7 +2300,7 @@ class AutonomousHealerLoop:
             return True
 
         try:
-            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_preflight = (
+            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_swarm, selected_preflight = (
                 self._pipeline_for_task(task_spec)
             )
             if not bool(getattr(self.tracker, "enabled", False)):
@@ -2074,41 +2560,85 @@ class AutonomousHealerLoop:
             )
             proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
             if not run_result.success:
-                failure_class = run_result.failure_class
-                failure_reason = run_result.failure_reason
-                if run_result.failure_fingerprint and not str(test_summary.get("failure_fingerprint") or "").strip():
-                    test_summary["failure_fingerprint"] = run_result.failure_fingerprint
-                logger.info(
-                    "Issue #%s attempt %s proposer/test phase failed (%s): %s",
-                    issue.issue_id,
-                    attempt_no,
-                    failure_class,
-                    failure_reason,
-                )
-                self._record_failure_fingerprint(
-                    issue_id=issue.issue_id,
-                    failure_class=failure_class,
-                    failure_fingerprint=run_result.failure_fingerprint,
-                    workspace_status=run_result.workspace_status,
-                )
-                if self._maybe_quarantine_failure_loop(
-                    issue_id=issue.issue_id,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
-                    failure_fingerprint=run_result.failure_fingerprint,
-                    workspace_status=run_result.workspace_status,
-                ):
-                    issue_state = "blocked"
-                    attempt_state = "blocked"
-                    return
-                issue_state = self._backoff_or_fail(
-                    issue_id=issue.issue_id,
+                swarm_outcome = self._maybe_recover_with_swarm(
+                    selected_backend=selected_backend,
+                    selected_swarm=selected_swarm,
+                    selected_runner=selected_runner,
+                    issue=issue,
+                    attempt_id=attempt_id,
                     attempt_no=attempt_no,
+                    task_spec=task_spec,
+                    learned_context=learned_context,
+                    feedback_context=feedback_context,
                     failure_class=run_result.failure_class,
                     failure_reason=run_result.failure_reason,
-                    issue_body=issue.body,
+                    proposer_output=run_result.proposer_output,
+                    test_summary=dict(run_result.test_summary or {}),
+                    verifier_summary={},
+                    workspace_status=run_result.workspace_status,
+                    workspace=workspace.path,
+                    targeted_tests=targeted_tests,
                 )
-                return
+                if swarm_outcome is not None:
+                    swarm_summary = _append_swarm_cycle(swarm_summary, swarm_outcome)
+                    if swarm_outcome.recovered and swarm_outcome.run_result is not None:
+                        run_result = swarm_outcome.run_result
+                        actual_diff = run_result.diff_paths
+                        test_summary = dict(run_result.test_summary or {})
+                        proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
+                        self._record_app_server_recovery_metrics(
+                            connector=selected_connector,
+                            workspace_status=run_result.workspace_status,
+                        )
+                failure_class = run_result.failure_class
+                failure_reason = run_result.failure_reason
+                if run_result.success:
+                    failure_class = ""
+                    failure_reason = ""
+                else:
+                    if swarm_outcome is not None and not swarm_outcome.recovered:
+                        failure_class, failure_reason = self._swarm_failure_override(
+                            base_failure_class=failure_class,
+                            base_failure_reason=failure_reason,
+                            swarm_outcome=swarm_outcome,
+                        )
+                        if not str(run_result.test_summary or "").strip():
+                            test_summary = dict(run_result.test_summary or {})
+                if not run_result.success:
+                    if run_result.failure_fingerprint and not str(test_summary.get("failure_fingerprint") or "").strip():
+                        test_summary["failure_fingerprint"] = run_result.failure_fingerprint
+                    logger.info(
+                        "Issue #%s attempt %s proposer/test phase failed (%s): %s",
+                        issue.issue_id,
+                        attempt_no,
+                        failure_class,
+                        failure_reason,
+                    )
+                    self._record_failure_fingerprint(
+                        issue_id=issue.issue_id,
+                        failure_class=failure_class,
+                        failure_fingerprint=run_result.failure_fingerprint,
+                        workspace_status=run_result.workspace_status,
+                    )
+                    if self._maybe_quarantine_failure_loop(
+                        issue_id=issue.issue_id,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        failure_fingerprint=run_result.failure_fingerprint,
+                        workspace_status=run_result.workspace_status,
+                    ):
+                        issue_state = "blocked"
+                        attempt_state = "blocked"
+                        return
+                    issue_state = self._backoff_or_fail(
+                        issue_id=issue.issue_id,
+                        attempt_no=attempt_no,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        issue_body=issue.body,
+                        feedback_context_override=_format_swarm_retry_feedback(swarm_summary),
+                    )
+                    return
 
             if _abort_for_lost_lease():
                 return
@@ -2165,19 +2695,79 @@ class AutonomousHealerLoop:
                     attempt_no,
                     failure_reason,
                 )
-                issue_state = self._backoff_or_fail(
-                    issue_id=issue.issue_id,
+                swarm_outcome = self._maybe_recover_with_swarm(
+                    selected_backend=selected_backend,
+                    selected_swarm=selected_swarm,
+                    selected_runner=selected_runner,
+                    issue=issue,
+                    attempt_id=attempt_id,
                     attempt_no=attempt_no,
+                    task_spec=task_spec,
+                    learned_context=learned_context,
+                    feedback_context=feedback_context,
                     failure_class="verifier_failed",
                     failure_reason=verification.summary,
-                    feedback_context_override=_format_verifier_retry_feedback(
-                        verdict=str(getattr(verification, "verdict", "")),
-                        hard_failure=bool(getattr(verification, "hard_failure", False)),
-                        parse_error=bool(getattr(verification, "parse_error", False)),
-                        summary=verification.summary,
-                    ),
+                    proposer_output=run_result.proposer_output,
+                    test_summary=dict(run_result.test_summary or {}),
+                    verifier_summary=verifier_summary,
+                    workspace_status=run_result.workspace_status,
+                    workspace=workspace.path,
+                    targeted_tests=targeted_tests,
                 )
-                return
+                if swarm_outcome is not None:
+                    swarm_summary = _append_swarm_cycle(swarm_summary, swarm_outcome)
+                    if swarm_outcome.recovered and swarm_outcome.run_result is not None:
+                        run_result = swarm_outcome.run_result
+                        actual_diff = run_result.diff_paths
+                        test_summary = dict(run_result.test_summary or {})
+                        proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
+                        if _abort_for_lost_lease():
+                            return
+                        verification = selected_verifier.verify(
+                            issue_id=issue.issue_id,
+                            issue_title=issue.title,
+                            issue_body=issue.body,
+                            task_spec=task_spec,
+                            diff_paths=run_result.diff_paths,
+                            test_summary=run_result.test_summary,
+                            proposer_output=run_result.proposer_output,
+                            learned_context=learned_context,
+                            language=detected_language,
+                            workspace_status=run_result.workspace_status,
+                            staged_diff_content=self._resolve_staged_diff_content(run_result=run_result, workspace=workspace.path),
+                            staged_diff_metadata=self._resolve_staged_diff_metadata(run_result=run_result),
+                        )
+                        verifier_summary = {
+                            "passed": verification.passed,
+                            "summary": verification.summary,
+                            "verdict": getattr(verification, "verdict", "pass" if verification.passed else "hard_fail"),
+                            "hard_failure": bool(getattr(verification, "hard_failure", not verification.passed)),
+                            "parse_error": bool(getattr(verification, "parse_error", False)),
+                            "policy": _verifier_policy_for_settings(self.settings),
+                        }
+                    else:
+                        failure_class, failure_reason = self._swarm_failure_override(
+                            base_failure_class=failure_class,
+                            base_failure_reason=failure_reason,
+                            swarm_outcome=swarm_outcome,
+                        )
+                if _should_block_on_verification(self.settings, verification):
+                    issue_state = self._backoff_or_fail(
+                        issue_id=issue.issue_id,
+                        attempt_no=attempt_no,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        feedback_context_override=_compose_retry_feedback_context(
+                            feedback_hint=_format_verifier_retry_feedback(
+                                verdict=str(getattr(verification, "verdict", "")),
+                                hard_failure=bool(getattr(verification, "hard_failure", False)),
+                                parse_error=bool(getattr(verification, "parse_error", False)),
+                                summary=verification.summary,
+                            ),
+                            override=_format_swarm_retry_feedback(swarm_summary),
+                        ),
+                    )
+                    return
 
             if _abort_for_lost_lease():
                 return
@@ -2321,6 +2911,7 @@ class AutonomousHealerLoop:
                 except Exception as exc:
                     logger.warning("Failed to generate or post code review for PR #%d: %s", pr.number, exc)
         finally:
+            self._clear_sticky_runtime_status(issue_id=issue.issue_id)
             lease_stop.set()
             lease_thread.join(timeout=1.0)
             if attempt_id:
@@ -2330,6 +2921,7 @@ class AutonomousHealerLoop:
                     actual_diff_set=actual_diff,
                     test_summary=test_summary,
                     verifier_summary=verifier_summary,
+                    swarm_summary=swarm_summary,
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                     proposer_output_excerpt=proposer_output_excerpt,
@@ -2563,10 +3155,25 @@ class AutonomousHealerLoop:
         except Exception as exc:
             logger.warning("Failed to sync blocked label for issue #%s: %s", issue_id, exc)
 
+    def _maybe_reconcile_blocked_issue_labels(self) -> None:
+        interval = max(
+            60.0,
+            float(getattr(self.settings, "healer_blocked_label_repair_interval_seconds", 600.0)),
+        )
+        now = time.monotonic()
+        last_repair_at = float(getattr(self, "_last_blocked_label_repair_at", 0.0))
+        if last_repair_at and (now - last_repair_at) < interval:
+            return
+        self._last_blocked_label_repair_at = now
+        self._reconcile_blocked_issue_labels()
+
     def _reconcile_blocked_issue_labels(self) -> None:
         if not bool(getattr(self.tracker, "enabled", False)):
             return
-        for row in self.store.list_healer_issues(limit=5000):
+        for row in self.store.list_healer_issues(
+            states=["blocked", "resolved", "queued", "pr_open", "pr_pending_approval", "failed"],
+            limit=500,
+        ):
             issue_id = str(row.get("issue_id") or "").strip()
             if not issue_id:
                 continue
@@ -2622,6 +3229,48 @@ class AutonomousHealerLoop:
         issue_body: str = "",
         feedback_context_override: str = "",
     ) -> str:
+        if failure_class == "infra_pause":
+            backoff_until = self._activate_infra_pause(
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+            )
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="queued",
+                backoff_until=backoff_until,
+                last_failure_class=failure_class,
+                last_failure_reason=failure_reason[:500],
+                clear_lease=True,
+            )
+            self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
+            now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            self.store.set_state("healer_connector_last_error_class", failure_class)
+            self.store.set_state("healer_connector_last_error_reason", failure_reason[:500])
+            self.store.set_state("healer_connector_last_error_at", now_str)
+            logger.warning(
+                "Issue #%s paused after attempt %s until %s (%s)",
+                issue_id,
+                attempt_no,
+                backoff_until,
+                failure_class,
+            )
+            _hint = _failure_user_hint(failure_class, issue_body=issue_body)
+            self._post_issue_status(
+                issue_id=issue_id,
+                body=self._format_flow_status_comment(
+                    "Issue paused for infrastructure recovery",
+                    "Validation failed before the code change could be trusted, so automation is waiting for the runtime lane to recover.",
+                    [
+                        f"Attempt: `{attempt_no}`",
+                        f"Failure class: `{failure_class}`",
+                        f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
+                        f"Pause until: `{backoff_until} UTC`",
+                        *([f"Hint: {_hint}"] if _hint else []),
+                    ],
+                ),
+            )
+            return "queued"
+
         is_infra = failure_class in _INFRA_FAILURE_CLASSES
         counts_against_trust = _counts_against_issue_trust(failure_class=failure_class, failure_reason=failure_reason)
         is_always_requeue = (
@@ -2652,6 +3301,7 @@ class AutonomousHealerLoop:
             )
             self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
             if is_infra:
+                self._note_infra_failure(failure_class=failure_class, failure_reason=failure_reason)
                 now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 self.store.set_state("healer_connector_last_error_class", failure_class)
                 self.store.set_state("healer_connector_last_error_reason", failure_reason[:500])
@@ -2791,11 +3441,15 @@ class AutonomousHealerLoop:
 
     def _record_connector_health(self, health: dict[str, str | bool]) -> None:
         available = "true" if bool(health.get("available")) else "false"
-        self.store.set_state("healer_connector_available", available)
-        self.store.set_state("healer_connector_configured_command", str(health.get("configured_command") or ""))
-        self.store.set_state("healer_connector_resolved_command", str(health.get("resolved_command") or ""))
-        self.store.set_state("healer_connector_availability_reason", str(health.get("availability_reason") or ""))
-        self.store.set_state("healer_connector_last_checked_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+        self.store.set_states(
+            {
+                "healer_connector_available": available,
+                "healer_connector_configured_command": str(health.get("configured_command") or ""),
+                "healer_connector_resolved_command": str(health.get("resolved_command") or ""),
+                "healer_connector_availability_reason": str(health.get("availability_reason") or ""),
+                "healer_connector_last_checked_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
 
     def _increment_state_counter(self, key: str, *, amount: int = 1) -> None:
         raw = str(self.store.get_state(key) or "").strip()
@@ -2851,13 +3505,17 @@ class AutonomousHealerLoop:
     ) -> None:
         if not failure_fingerprint:
             return
-        self.store.set_state("healer_last_failure_fingerprint", failure_fingerprint)
-        self.store.set_state("healer_last_failure_fingerprint_issue_id", issue_id)
-        self.store.set_state("healer_last_failure_fingerprint_class", failure_class)
         contamination = workspace_status or {}
         contamination_paths = contamination.get("contamination_paths") or contamination.get("cleaned_paths") or []
         rendered = ", ".join(str(item).strip() for item in contamination_paths if str(item).strip())
-        self.store.set_state("healer_last_contamination_paths", rendered)
+        self.store.set_states(
+            {
+                "healer_last_failure_fingerprint": failure_fingerprint,
+                "healer_last_failure_fingerprint_issue_id": issue_id,
+                "healer_last_failure_fingerprint_class": failure_class,
+                "healer_last_contamination_paths": rendered,
+            }
+        )
 
     def _maybe_quarantine_failure_loop(
         self,
@@ -3042,9 +3700,13 @@ class AutonomousHealerLoop:
 
     def _record_tracker_error(self, *, failure_class: str, failure_reason: str) -> None:
         now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        self.store.set_state("healer_tracker_last_error_class", str(failure_class or "")[:120])
-        self.store.set_state("healer_tracker_last_error_reason", str(failure_reason or "")[:500])
-        self.store.set_state("healer_tracker_last_error_at", now_str)
+        self.store.set_states(
+            {
+                "healer_tracker_last_error_class": str(failure_class or "")[:120],
+                "healer_tracker_last_error_reason": str(failure_reason or "")[:500],
+                "healer_tracker_last_error_at": now_str,
+            }
+        )
 
     @staticmethod
     def _classify_tracker_failure(error_class: str) -> str:
@@ -3063,15 +3725,19 @@ class AutonomousHealerLoop:
         if failure_class not in _INFRA_FAILURE_CLASSES:
             return
         streak = self._coerce_int(self.store.get_state("healer_infra_failure_streak"), default=0) + 1
-        self.store.set_state("healer_infra_failure_streak", str(streak))
+        self.store.set_states({"healer_infra_failure_streak": str(streak)})
         threshold = max(1, int(getattr(self.settings, "healer_infra_dlq_threshold", 8)))
         if streak < threshold:
             return
         cooldown_seconds = max(60, int(getattr(self.settings, "healer_infra_dlq_cooldown_seconds", 3600)))
         pause_until = datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
         pause_until_str = pause_until.strftime("%Y-%m-%d %H:%M:%S")
-        self.store.set_state("healer_infra_pause_until", pause_until_str)
-        self.store.set_state("healer_infra_pause_reason", f"{failure_class}: {failure_reason[:300]}")
+        self.store.set_states(
+            {
+                "healer_infra_pause_until": pause_until_str,
+                "healer_infra_pause_reason": f"{failure_class}: {failure_reason[:300]}",
+            }
+        )
         logger.warning(
             "Infra failure streak reached %d/%d. Pausing claims until %s.",
             streak,
@@ -3079,10 +3745,34 @@ class AutonomousHealerLoop:
             pause_until_str,
         )
 
+    def _activate_infra_pause(self, *, failure_class: str, failure_reason: str) -> str:
+        cooldown_seconds = max(300, int(getattr(self.settings, "healer_infra_dlq_cooldown_seconds", 3600)))
+        pause_until = datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
+        pause_until_str = pause_until.strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_states(
+            {
+                "healer_infra_failure_streak": str(
+                    max(1, self._coerce_int(self.store.get_state("healer_infra_failure_streak"), default=0) + 1)
+                ),
+                "healer_infra_pause_until": pause_until_str,
+                "healer_infra_pause_reason": f"{failure_class}: {failure_reason[:300]}",
+            }
+        )
+        logger.warning(
+            "Infra pause activated until %s (%s).",
+            pause_until_str,
+            failure_class,
+        )
+        return pause_until_str
+
     def _reset_infra_failure_streak(self) -> None:
-        self.store.set_state("healer_infra_failure_streak", "0")
-        self.store.set_state("healer_infra_pause_until", "")
-        self.store.set_state("healer_infra_pause_reason", "")
+        self.store.set_states(
+            {
+                "healer_infra_failure_streak": "0",
+                "healer_infra_pause_until": "",
+                "healer_infra_pause_reason": "",
+            }
+        )
 
     def _infra_pause_active(self) -> bool:
         raw = str(self.store.get_state("healer_infra_pause_until") or "").strip()
@@ -3493,6 +4183,40 @@ def _compose_retry_feedback_context(*, feedback_hint: str, override: str) -> str
     if extra:
         parts.append(extra)
     return "\n".join(parts)[:500]
+
+
+def _append_swarm_cycle(summary: dict[str, object], outcome: SwarmRecoveryOutcome) -> dict[str, object]:
+    cycles = []
+    existing = summary.get("cycles") if isinstance(summary, dict) else None
+    if isinstance(existing, list):
+        cycles.extend(existing)
+    cycles.append(outcome.as_summary())
+    return {"cycles": cycles}
+
+
+def _format_swarm_retry_feedback(summary: dict[str, object]) -> str:
+    cycles = summary.get("cycles") if isinstance(summary, dict) else None
+    if not isinstance(cycles, list) or not cycles:
+        return ""
+    latest = cycles[-1] if isinstance(cycles[-1], dict) else {}
+    strategy = str(latest.get("strategy") or "").strip()
+    summary_text = re.sub(r"\s+", " ", str(latest.get("summary") or "").strip())[:220]
+    roles = latest.get("roles")
+    role_names: list[str] = []
+    if isinstance(roles, list):
+        role_names = [
+            str(item.get("role") or "").strip()
+            for item in roles
+            if isinstance(item, dict) and str(item.get("role") or "").strip()
+        ]
+    lines = [
+        "[swarm_feedback]",
+        f"strategy={strategy or 'unknown'}",
+        f"summary={summary_text}",
+        f"roles={','.join(role_names)}" if role_names else "roles=",
+        "[/swarm_feedback]",
+    ]
+    return "\n".join(lines)[:420]
 
 
 def _format_verifier_retry_feedback(

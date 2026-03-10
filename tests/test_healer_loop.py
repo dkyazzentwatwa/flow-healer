@@ -12,6 +12,7 @@ from flow_healer.healer_loop import (
     _sanitize_execution_root,
     _push_issue_branch,
 )
+from flow_healer.healer_swarm import SwarmRecoveryOutcome, SwarmRecoveryPlan
 from flow_healer.healer_preflight import PreflightReport
 from flow_healer.healer_task_spec import HealerTaskSpec
 from flow_healer.healer_tracker import HealerIssue, PullRequestDetails, PullRequestResult
@@ -44,6 +45,23 @@ def _make_loop(store, **overrides):
         healer_max_wall_clock_seconds_per_issue=300,
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
+        healer_swarm_enabled=overrides.get("healer_swarm_enabled", False),
+        healer_swarm_mode=overrides.get("healer_swarm_mode", "failure_repair"),
+        healer_swarm_max_parallel_agents=overrides.get("healer_swarm_max_parallel_agents", 4),
+        healer_swarm_max_repair_cycles_per_attempt=overrides.get("healer_swarm_max_repair_cycles_per_attempt", 1),
+        healer_swarm_trigger_failure_classes=overrides.get(
+            "healer_swarm_trigger_failure_classes",
+            [
+                "tests_failed",
+                "verifier_failed",
+                "no_workspace_change*",
+                "patch_apply_failed",
+                "malformed_diff",
+                "scope_violation",
+                "generated_artifact_contamination",
+            ],
+        ),
+        healer_swarm_backend_strategy=overrides.get("healer_swarm_backend_strategy", "match_selected_backend"),
         healer_verifier_policy=overrides.get("healer_verifier_policy", "advisory"),
         healer_issue_required_labels=["healer:ready"],
         healer_pr_actions_require_approval=overrides.get("healer_pr_actions_require_approval", False),
@@ -73,6 +91,12 @@ def _make_loop(store, **overrides):
         healer_overlap_scope_queue_enabled=overrides.get("healer_overlap_scope_queue_enabled", True),
         healer_dedupe_enabled=overrides.get("healer_dedupe_enabled", True),
         healer_dedupe_close_duplicates=overrides.get("healer_dedupe_close_duplicates", True),
+        healer_infra_dlq_threshold=overrides.get("healer_infra_dlq_threshold", 8),
+        healer_infra_dlq_cooldown_seconds=overrides.get("healer_infra_dlq_cooldown_seconds", 3600),
+        healer_housekeeping_interval_seconds=overrides.get("healer_housekeeping_interval_seconds", 300),
+        healer_blocked_label_repair_interval_seconds=overrides.get(
+            "healer_blocked_label_repair_interval_seconds", 600
+        ),
         healer_max_diff_files=overrides.get("healer_max_diff_files", 8),
         healer_max_diff_lines=overrides.get("healer_max_diff_lines", 400),
         healer_max_failed_tests_allowed=overrides.get("healer_max_failed_tests_allowed", 0),
@@ -102,6 +126,7 @@ def _make_loop(store, **overrides):
     loop.memory = MagicMock()
     loop.verifier = MagicMock()
     loop.reviewer = MagicMock()
+    loop.swarm = MagicMock()
     loop.workspace_manager = MagicMock()
     loop.runner = MagicMock()
     loop.runner.resolve_execution.return_value = SimpleNamespace(
@@ -132,7 +157,10 @@ def _make_loop(store, **overrides):
     loop.runners_by_backend = overrides.get("runners_by_backend", {"exec": loop.runner})
     loop.verifiers_by_backend = overrides.get("verifiers_by_backend", {"exec": loop.verifier})
     loop.reviewers_by_backend = overrides.get("reviewers_by_backend", {"exec": loop.reviewer})
+    loop.swarms_by_backend = overrides.get("swarms_by_backend", {"exec": loop.swarm})
     loop.preflight_by_backend = overrides.get("preflight_by_backend", {"exec": loop.preflight})
+    loop._sticky_runtime_status = overrides.get("_sticky_runtime_status", "")
+    loop._sticky_runtime_issue_id = overrides.get("_sticky_runtime_issue_id", "")
     return loop
 
 
@@ -241,6 +269,33 @@ def test_reconcile_blocked_issue_labels_removes_stale_blocked_label(tmp_path):
     loop._reconcile_blocked_issue_labels()
 
     loop.tracker.remove_issue_label.assert_called_once_with(issue_id="431", label="agent:blocked")
+
+
+def test_maybe_reconcile_blocked_issue_labels_respects_interval(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="432",
+        repo="owner/repo",
+        title="Issue 432",
+        body="",
+        author="alice",
+        labels=["healer:ready", "agent:blocked"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="432", state="blocked")
+
+    loop = _make_loop(store, healer_blocked_label_repair_interval_seconds=600)
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "432",
+        "state": "open",
+        "labels": ["healer:ready", "agent:blocked"],
+    }
+
+    loop._maybe_reconcile_blocked_issue_labels()
+    loop._maybe_reconcile_blocked_issue_labels()
+
+    loop.tracker.get_issue.assert_called_once_with(issue_id="432")
 
 
 def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):
@@ -446,6 +501,46 @@ def test_record_worker_heartbeat_logs_pulse_message(tmp_path, caplog):
     loop._record_worker_heartbeat(status="idle")
 
     assert "Worker pulse emitted" in caplog.text
+
+
+def test_record_worker_heartbeat_force_emits_swarm_stage_statuses(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_pulse_interval_seconds=60)
+
+    loop._record_worker_heartbeat(status="swarm_analyzing", issue_id="811", attempt_id="hat_811", force_emit=True)
+    loop._record_worker_heartbeat(status="swarm_repairing", issue_id="811", attempt_id="hat_811", force_emit=True)
+
+    events = store.list_healer_events(limit=5)
+    runtime = store.get_runtime_status()
+    statuses = [str(event["payload"].get("status") or "") for event in events if event["event_type"] == "worker_pulse"]
+
+    assert "swarm_analyzing" in statuses
+    assert "swarm_repairing" in statuses
+    assert runtime is not None
+    assert runtime["status"] == "swarm_repairing"
+
+
+def test_record_worker_heartbeat_keeps_swarm_status_sticky_for_processing(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        healer_pulse_interval_seconds=60,
+        _sticky_runtime_status="swarm_analyzing",
+        _sticky_runtime_issue_id="811",
+    )
+
+    loop._record_worker_heartbeat(status="processing", issue_id="811", attempt_id="hat_811", force_emit=True)
+
+    events = store.list_healer_events(limit=5)
+    runtime = store.get_runtime_status()
+
+    assert events
+    assert events[0]["event_type"] == "worker_pulse"
+    assert events[0]["payload"]["status"] == "swarm_analyzing"
+    assert runtime is not None
+    assert runtime["status"] == "swarm_analyzing"
 
 
 def test_lease_heartbeat_emits_processing_pulse(tmp_path):
@@ -1059,6 +1154,360 @@ def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_p
     assert attempts[-1]["state"] == "pr_open"
     assert attempts[-1]["verifier_summary"]["verdict"] == "soft_fail"
     loop._commit_and_push.assert_called_once()
+
+
+def test_process_claimed_issue_swarm_recovers_failed_run(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50445",
+        repo="owner/repo",
+        title="Issue 50445",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False, healer_swarm_enabled=True)
+    workspace = tmp_path / "workspaces" / "issue-50445"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50445", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50445")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=False,
+        diff_paths=[],
+        test_summary={"failed_tests": 1, "failure_class": "tests_failed", "failure_reason": "boom"},
+        proposer_output="Initial attempt failed",
+        workspace_status={},
+        failure_class="tests_failed",
+        failure_reason="boom",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="ok",
+        verdict="pass",
+        hard_failure=False,
+        parse_error=False,
+    )
+    posted: list[str] = []
+    loop._post_issue_status = lambda issue_id, body: posted.append(body)
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.tracker.open_or_update_pr.return_value = PullRequestResult(
+        number=245,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/245",
+    )
+    expected_outcome = SwarmRecoveryOutcome(
+        recovered=True,
+        strategy="repair",
+        summary="Swarm repaired the failing path.",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="repair",
+            summary="Swarm repaired the failing path.",
+            root_cause="bad branch",
+            edit_scope=("src/flow_healer/service.py",),
+            targeted_tests=(),
+            validation_focus=("service",),
+        ),
+        repair_output="Edited service",
+        run_result=SimpleNamespace(
+            success=True,
+            diff_paths=["src/flow_healer/service.py"],
+            test_summary={"failed_tests": 0},
+            proposer_output="Edited service",
+            workspace_status={},
+            failure_class="",
+            failure_reason="",
+            failure_fingerprint="",
+        ),
+    )
+
+    def _swarm_recover(**kwargs):
+        telemetry = kwargs["telemetry_callback"]
+        telemetry(
+            "swarm_started",
+            {"failure_class": kwargs["failure_class"], "failure_reason": kwargs["failure_reason"]},
+        )
+        telemetry(
+            "swarm_role_completed",
+            {"role": "failure-triager", "stage": "analysis", "success": True, "summary": "triaged failure"},
+        )
+        telemetry(
+            "swarm_role_completed",
+            {"role": "recovery-manager", "stage": "planning", "success": True, "summary": "repair plan"},
+        )
+        telemetry(
+            "swarm_plan_ready",
+            {
+                "strategy": "repair",
+                "summary": expected_outcome.summary,
+                "root_cause": "bad branch",
+                "edit_scope": ["src/flow_healer/service.py"],
+                "targeted_tests": [],
+                "validation_focus": ["service"],
+            },
+        )
+        telemetry(
+            "swarm_role_completed",
+            {"role": "repair-executor", "stage": "repair", "success": True, "summary": "edited service"},
+        )
+        telemetry(
+            "swarm_finished",
+            {
+                "recovered": True,
+                "strategy": "repair",
+                "summary": expected_outcome.summary,
+                "failure_class": "",
+                "failure_reason": "",
+            },
+        )
+        return expected_outcome
+
+    loop.swarm.recover.side_effect = _swarm_recover
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50445")
+    attempts = store.list_healer_attempts(issue_id="50445")
+    events = store.list_healer_events(limit=20)
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert attempts[-1]["state"] == "pr_open"
+    assert attempts[-1]["swarm_summary"]["cycles"][0]["recovered"] is True
+    event_types = {event["event_type"] for event in events}
+    assert {"swarm_started", "swarm_role_completed", "swarm_plan_ready", "swarm_finished"}.issubset(event_types)
+    pulse_statuses = {
+        str(event["payload"].get("status") or "")
+        for event in events
+        if event["event_type"] == "worker_pulse"
+    }
+    assert {"swarm_analyzing", "swarm_repairing"}.issubset(pulse_statuses)
+    assert any("Swarm recovery started" in body for body in posted)
+    assert any("Swarm recovery finished" in body for body in posted)
+    loop.swarm.recover.assert_called_once()
+    loop._commit_and_push.assert_called_once()
+
+
+def test_process_claimed_issue_swarm_recovers_verifier_failure(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50446",
+        repo="owner/repo",
+        title="Issue 50446",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(
+        store,
+        healer_enable_review=False,
+        healer_swarm_enabled=True,
+        healer_verifier_policy="required",
+    )
+    workspace = tmp_path / "workspaces" / "issue-50446"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50446", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50446")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="Initial patch",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.side_effect = [
+        SimpleNamespace(
+            passed=False,
+            summary="Need stronger validation.",
+            verdict="hard_fail",
+            hard_failure=True,
+            parse_error=False,
+        ),
+        SimpleNamespace(
+            passed=True,
+            summary="ok",
+            verdict="pass",
+            hard_failure=False,
+            parse_error=False,
+        ),
+    ]
+    posted: list[str] = []
+    loop._post_issue_status = lambda issue_id, body: posted.append(body)
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.tracker.open_or_update_pr.return_value = PullRequestResult(
+        number=246,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/246",
+    )
+    expected_outcome = SwarmRecoveryOutcome(
+        recovered=True,
+        strategy="repair",
+        summary="Swarm addressed the verifier concern.",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="repair",
+            summary="Swarm addressed the verifier concern.",
+            root_cause="missing edge case",
+            edit_scope=("src/flow_healer/service.py",),
+            targeted_tests=(),
+            validation_focus=("verifier",),
+        ),
+        repair_output="Edited service again",
+        run_result=SimpleNamespace(
+            success=True,
+            diff_paths=["src/flow_healer/service.py"],
+            test_summary={"failed_tests": 0},
+            proposer_output="Edited service again",
+            workspace_status={},
+            failure_class="",
+            failure_reason="",
+            failure_fingerprint="",
+        ),
+    )
+
+    def _swarm_recover(**kwargs):
+        telemetry = kwargs["telemetry_callback"]
+        telemetry(
+            "swarm_started",
+            {"failure_class": kwargs["failure_class"], "failure_reason": kwargs["failure_reason"]},
+        )
+        telemetry(
+            "swarm_role_completed",
+            {"role": "scope-guard", "stage": "analysis", "success": True, "summary": "scope safe"},
+        )
+        telemetry(
+            "swarm_role_completed",
+            {"role": "recovery-manager", "stage": "planning", "success": True, "summary": "repair plan"},
+        )
+        telemetry(
+            "swarm_plan_ready",
+            {
+                "strategy": "repair",
+                "summary": expected_outcome.summary,
+                "root_cause": "missing edge case",
+                "edit_scope": ["src/flow_healer/service.py"],
+                "targeted_tests": [],
+                "validation_focus": ["verifier"],
+            },
+        )
+        telemetry(
+            "swarm_role_completed",
+            {"role": "repair-executor", "stage": "repair", "success": True, "summary": "edited service again"},
+        )
+        telemetry(
+            "swarm_finished",
+            {
+                "recovered": True,
+                "strategy": "repair",
+                "summary": expected_outcome.summary,
+                "failure_class": "",
+                "failure_reason": "",
+            },
+        )
+        return expected_outcome
+
+    loop.swarm.recover.side_effect = _swarm_recover
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50446")
+    attempts = store.list_healer_attempts(issue_id="50446")
+    events = store.list_healer_events(limit=20)
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert attempts[-1]["state"] == "pr_open"
+    assert attempts[-1]["swarm_summary"]["cycles"][0]["strategy"] == "repair"
+    assert any(event["event_type"] == "swarm_plan_ready" for event in events)
+    assert any("Swarm recovery started" in body for body in posted)
+    assert any("Swarm recovery finished" in body for body in posted)
+    assert loop.verifier.verify.call_count == 2
+    loop.swarm.recover.assert_called_once()
+    loop._commit_and_push.assert_called_once()
+
+
+def test_process_claimed_issue_swarm_infra_pause_requeues_with_infra_failure_class(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50447",
+        repo="owner/repo",
+        title="Issue 50447",
+        body="Fix e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(
+        store,
+        healer_enable_review=False,
+        healer_swarm_enabled=True,
+        healer_infra_dlq_cooldown_seconds=1800,
+    )
+    workspace = tmp_path / "workspaces" / "issue-50447"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50447", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50447")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=False,
+        diff_paths=["e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql"],
+        test_summary={"failed_tests": 1},
+        proposer_output="Initial attempt failed",
+        workspace_status={},
+        failure_class="tests_failed",
+        failure_reason="Failed tests=1 exceeds cap=0",
+        failure_fingerprint="",
+    )
+    loop._post_issue_status = MagicMock()
+    loop.swarm.recover.return_value = SwarmRecoveryOutcome(
+        recovered=False,
+        strategy="infra_pause",
+        summary="Local Supabase bootstrap failed before SQL assertions could run.",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="infra_pause",
+            summary="Local Supabase bootstrap failed before SQL assertions could run.",
+            root_cause="local Supabase bootstrap failure",
+            edit_scope=("e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql",),
+            targeted_tests=(),
+            validation_focus=("supabase",),
+        ),
+        failure_class="tests_failed",
+        failure_reason="Local Supabase bootstrap failed before SQL assertions could run.",
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50447")
+    attempts = store.list_healer_attempts(issue_id="50447")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "infra_pause"
+    assert issue["backoff_until"] == store.get_state("healer_infra_pause_until")
+    assert attempts[-1]["failure_class"] == "infra_pause"
+    assert store.get_state("healer_infra_pause_reason").startswith("infra_pause:")
+    loop.swarm.recover.assert_called_once()
 
 
 def test_process_claimed_issue_passes_staged_diff_payload_to_verifier(tmp_path):
@@ -1872,6 +2321,118 @@ def test_ingest_ready_issues_does_not_requeue_conflict_blocked_issue(tmp_path):
     loop.tracker.add_issue_reaction.assert_not_called()
 
 
+def test_ingest_ready_issues_keeps_non_conflict_blocked_issue_blocked_when_contract_unchanged(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60311",
+        repo="owner/repo",
+        title="Issue 60311",
+        body="Keep current contract",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="60311", state="blocked", pr_state="closed")
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="60311",
+            repo="owner/repo",
+            title="Issue 60311",
+            body="Keep current contract",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/60311",
+        )
+    ]
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("60311")
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["pr_state"] == "closed"
+    loop.tracker.add_issue_reaction.assert_not_called()
+
+
+def test_ingest_ready_issues_requeues_blocked_issue_when_contract_changes(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60312",
+        repo="owner/repo",
+        title="Issue 60312",
+        body="Original body",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60312",
+        state="blocked",
+        pr_state="closed",
+        last_failure_class="tests_failed",
+        last_failure_reason="deterministic failure",
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="60312",
+            repo="owner/repo",
+            title="Issue 60312",
+            body="Updated body with new validation",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/60312",
+        )
+    ]
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("60312")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == ""
+    assert issue["last_failure_reason"] == ""
+
+
+def test_ingest_ready_issues_skips_pr_discovery_for_existing_queued_issue(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60315",
+        repo="owner/repo",
+        title="Issue 60315",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="60315",
+            repo="owner/repo",
+            title="Issue 60315",
+            body="Fix src/flow_healer/service.py",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/60315",
+        )
+    ]
+
+    loop._ingest_ready_issues()
+
+    loop.tracker.find_pr_for_issue.assert_not_called()
+
+
 def test_conflicted_issue_is_ignored_by_auto_pr_actions_after_reconcile(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -2341,6 +2902,98 @@ def test_backoff_or_fail_connector_failure_does_not_exhaust_retry_budget(tmp_pat
     assert issue["state"] == "queued"
     assert issue["last_failure_class"] == "connector_unavailable"
     assert issue["backoff_until"]
+
+
+def test_backoff_or_fail_infra_pause_sets_long_pause_and_queue_backoff(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="3031",
+        repo="owner/repo",
+        title="Issue 3031",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    loop = _make_loop(store, healer_retry_budget=1, healer_infra_dlq_cooldown_seconds=1800)
+
+    state = loop._backoff_or_fail(
+        issue_id="3031",
+        attempt_no=4,
+        failure_class="infra_pause",
+        failure_reason="local Supabase stack would not start",
+    )
+    issue = store.get_healer_issue("3031")
+
+    assert state == "queued"
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["last_failure_class"] == "infra_pause"
+    assert issue["backoff_until"] == store.get_state("healer_infra_pause_until")
+    assert store.get_state("healer_infra_pause_reason").startswith("infra_pause:")
+
+
+def test_swarm_quarantine_with_sql_bootstrap_context_stays_quarantine(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    outcome = SwarmRecoveryOutcome(
+        recovered=False,
+        strategy="quarantine",
+        summary="Validation never reached the SQL assertion because the local Supabase stack would not start.",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="quarantine",
+            summary="Validation never reached the SQL assertion because the local Supabase stack would not start.",
+            root_cause="local Supabase bootstrap failure",
+            edit_scope=(),
+            targeted_tests=(),
+            validation_focus=(),
+        ),
+        failure_class="tests_failed",
+        failure_reason="The local Supabase runtime is broken.",
+    )
+
+    failure_class, failure_reason = loop._swarm_failure_override(
+        base_failure_class="tests_failed",
+        base_failure_reason="Failed tests=1 exceeds cap=0",
+        swarm_outcome=outcome,
+    )
+
+    assert failure_class == "swarm_quarantine"
+    assert "Supabase" in failure_reason
+
+
+def test_swarm_quarantine_with_daemon_connectivity_maps_to_infra_pause(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    outcome = SwarmRecoveryOutcome(
+        recovered=False,
+        strategy="quarantine",
+        summary="Cannot connect to the Docker daemon while launching validator containers.",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="quarantine",
+            summary="Cannot connect to the Docker daemon while launching validator containers.",
+            root_cause="docker daemon unavailable",
+            edit_scope=(),
+            targeted_tests=(),
+            validation_focus=(),
+        ),
+        failure_class="tests_failed",
+        failure_reason="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+    )
+
+    failure_class, failure_reason = loop._swarm_failure_override(
+        base_failure_class="tests_failed",
+        base_failure_reason="Failed tests=1 exceeds cap=0",
+        swarm_outcome=outcome,
+    )
+
+    assert failure_class == "infra_pause"
+    assert "docker daemon" in failure_reason.lower()
 
 
 def test_backoff_or_fail_no_patch_does_not_exhaust_retry_budget(tmp_path):

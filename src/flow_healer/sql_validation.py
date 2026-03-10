@@ -27,6 +27,7 @@ def load_sql_checks(
     manifest_path: Path,
     selected_paths: tuple[str, ...] = (),
 ) -> list[SqlCheck]:
+    project_root = project_dir.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError("SQL assertion manifest must be a JSON object.")
@@ -58,7 +59,7 @@ def load_sql_checks(
         }
         if normalized_selected_paths and not matched_for_check:
             continue
-        check_path = (project_dir / relative_path).resolve()
+        check_path = _resolve_project_relative_path(project_root=project_root, relative_path=relative_path)
         checks.append(
             SqlCheck(
                 name=name,
@@ -72,7 +73,7 @@ def load_sql_checks(
     if normalized_selected_paths:
         missing = sorted(normalized_selected_paths - matched_selected_paths)
         if missing:
-            checks.extend(_ad_hoc_sql_checks(project_dir=project_dir, selected_paths=tuple(missing)))
+            checks.extend(_ad_hoc_sql_checks(project_dir=project_root, selected_paths=tuple(missing)))
         if not checks:
             raise ValueError("SQL assertion manifest did not match any requested check paths.")
     return checks
@@ -93,6 +94,7 @@ def ensure_local_supabase_stack(*, project_dir: Path) -> None:
     _ensure_command_available("docker")
     _ensure_command_available("supabase")
     project_id = project_id_for_project_dir(project_dir)
+    resume_local_database_container(project_id=project_id)
     status = subprocess.run(
         ["supabase", "status"],
         cwd=str(project_dir),
@@ -101,8 +103,12 @@ def ensure_local_supabase_stack(*, project_dir: Path) -> None:
         text=True,
     )
     if status.returncode == 0:
-        resume_local_database_container(project_id=project_id)
         wait_for_database_ready(project_id=project_id)
+        return
+    # `supabase status` can report an unhealthy stack even when the local Postgres
+    # container is already accepting connections. For DB-only validation we can
+    # proceed as soon as the database probe succeeds.
+    if wait_for_database_ready(project_id=project_id, timeout_seconds=5.0, poll_interval_seconds=1.0):
         return
     subprocess.run(
         ["supabase", "start"],
@@ -125,8 +131,6 @@ def reset_local_database(*, project_dir: Path, project_id: str) -> None:
     )
     if proc.returncode == 0:
         wait_for_database_ready(project_id=project_id)
-        return
-    if wait_for_database_ready(project_id=project_id, timeout_seconds=45.0, poll_interval_seconds=1.0):
         return
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     raise RuntimeError(f"supabase db reset failed:\n{output}")
@@ -337,7 +341,9 @@ def _ensure_command_available(command: str) -> None:
 
 
 def _normalize_manifest_relative_path(path: str) -> str:
-    value = str(path or "").strip().replace("\\", "/").lstrip("./")
+    value = str(path or "").strip().replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
     return value
 
 
@@ -347,10 +353,22 @@ def _selected_path_matches_manifest_path(*, selected_path: str, manifest_path: s
     return selected_path.endswith(f"/{manifest_path}")
 
 
+def _resolve_project_relative_path(*, project_root: Path, relative_path: str) -> Path:
+    root = project_root.resolve()
+    candidate = (root / relative_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Requested SQL assertion path is outside the project directory: {relative_path}"
+        ) from exc
+    return candidate
+
+
 def _ad_hoc_sql_checks(*, project_dir: Path, selected_paths: tuple[str, ...]) -> list[SqlCheck]:
     checks: list[SqlCheck] = []
     for selected_path in selected_paths:
-        check_path = (project_dir / selected_path).resolve()
+        check_path = _resolve_project_relative_path(project_root=project_dir, relative_path=selected_path)
         if not check_path.is_file():
             raise ValueError(f"Requested SQL assertion path does not exist: {selected_path}")
         checks.append(

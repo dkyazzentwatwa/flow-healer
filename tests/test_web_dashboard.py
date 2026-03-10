@@ -9,8 +9,10 @@ from flow_healer.web_dashboard import (
     _collect_recent_logs,
     _overview_payload,
     _parse_log_activity_row,
+    _render_repo_action_cards,
     _render_dashboard,
     _tail_file_lines,
+    _web_request_is_authorized,
 )
 
 
@@ -71,6 +73,28 @@ def test_overview_payload_includes_rows_commands_and_logs(tmp_path: Path) -> Non
     assert "generated_at" in payload
     assert isinstance(payload["logs"]["lines"], list)
     assert isinstance(payload["activity"], list)
+
+
+def test_overview_payload_reuses_single_status_snapshot(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    calls = 0
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        nonlocal calls
+        calls += 1
+        return [
+            {
+                "repo": "demo",
+                "recent_attempts": [],
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    payload = _overview_payload(config, service)
+
+    assert calls == 1
+    assert payload["rows"][0]["repo"] == "demo"
 
 
 def test_parse_log_activity_row_extracts_issue_and_attempt_metadata() -> None:
@@ -151,6 +175,32 @@ def test_collect_activity_includes_commands_events_attempts_and_logs(tmp_path: P
     assert {"command", "event", "attempt", "log"}.issubset(kinds)
 
 
+def test_collect_activity_marks_swarm_events_as_running(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    store.create_healer_event(
+        event_type="swarm_started",
+        message="Swarm recovery started for failure tests_failed.",
+        issue_id="612",
+        attempt_id="hat_612",
+        payload={"strategy": "repair", "failure_class": "tests_failed"},
+    )
+    store.close()
+
+    activity = _collect_activity(config, service)
+    swarm_event = next(row for row in activity if row["kind"] == "event" and row["message"] == "swarm_started")
+
+    assert swarm_event["signal"] == "running"
+    assert swarm_event["subsystem"] == "healer swarm"
+    assert swarm_event["issue_id"] == "612"
+    assert swarm_event["attempt_id"] == "hat_612"
+
+
 def test_render_dashboard_includes_activity_console_and_inspector(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
@@ -161,3 +211,42 @@ def test_render_dashboard_includes_activity_console_and_inspector(tmp_path: Path
     assert "openInspector(item.id)" in html
     assert "Copy full text" in html
     assert "/api/activity" not in html
+
+
+def test_render_repo_action_cards_include_auth_field_when_token_mode_enabled(tmp_path: Path) -> None:
+    config, _service = _make_service(tmp_path)
+
+    html = _render_repo_action_cards(config)
+
+    assert "name='auth_token'" in html
+    assert "FLOW_HEALER_WEB_TOKEN" in html
+
+
+def test_web_request_is_authorized_accepts_form_token(tmp_path: Path, monkeypatch) -> None:
+    config, _service = _make_service(tmp_path)
+    monkeypatch.setenv("FLOW_HEALER_WEB_TOKEN", "demo-token")
+
+    allowed, status, reason = _web_request_is_authorized(
+        config,
+        headers={},
+        params={"auth_token": "demo-token"},
+    )
+
+    assert allowed is True
+    assert status == 200
+    assert reason == ""
+
+
+def test_web_request_is_authorized_rejects_missing_token(tmp_path: Path, monkeypatch) -> None:
+    config, _service = _make_service(tmp_path)
+    monkeypatch.setenv("FLOW_HEALER_WEB_TOKEN", "demo-token")
+
+    allowed, status, reason = _web_request_is_authorized(
+        config,
+        headers={},
+        params={},
+    )
+
+    assert allowed is False
+    assert status == 401
+    assert "token" in reason.lower()

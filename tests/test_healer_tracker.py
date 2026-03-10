@@ -371,29 +371,54 @@ def test_get_pr_details_includes_updated_at(monkeypatch):
     assert details.updated_at == "2026-03-07T12:00:00Z"
 
 
-def test_find_pr_for_issue_uses_all_prs_and_detects_merged(monkeypatch):
+def test_find_pr_for_issue_uses_search_and_detects_merged(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
+    calls: list[str] = []
 
     def fake_request(path: str, *, method: str = "GET", body=None):
-        assert path == "/repos/owner/repo/pulls?state=all&per_page=100"
+        calls.append(path)
         assert method == "GET"
-        return [
-            {
+        if path == '/search/issues?q=repo%3Aowner/repo%20is%3Apr%20%22issue%20%23123%22&per_page=20':
+            return {
+                "items": [
+                    {
+                        "number": 11,
+                        "state": "closed",
+                        "updated_at": "2026-03-06T00:00:00Z",
+                        "html_url": "https://github.com/owner/repo/pull/11",
+                    },
+                    {
+                        "number": 12,
+                        "state": "closed",
+                        "updated_at": "2026-03-07T00:00:00Z",
+                        "html_url": "https://github.com/owner/repo/pull/12",
+                    },
+                ]
+            }
+        if path == "/repos/owner/repo/pulls/11":
+            return {
                 "number": 11,
-                "title": "healer: fix issue #123 - older",
                 "state": "closed",
                 "html_url": "https://github.com/owner/repo/pull/11",
                 "merged_at": "2026-03-06T00:00:00Z",
-            },
-            {
+                "mergeable_state": "clean",
+                "updated_at": "2026-03-06T00:00:00Z",
+                "user": {"login": "alice"},
+                "head": {"ref": "healer/issue-11"},
+            }
+        if path == "/repos/owner/repo/pulls/12":
+            return {
                 "number": 12,
-                "title": "healer: fix issue #123 - latest",
                 "state": "closed",
                 "html_url": "https://github.com/owner/repo/pull/12",
                 "merged_at": "2026-03-07T00:00:00Z",
-            },
-        ]
+                "mergeable_state": "clean",
+                "updated_at": "2026-03-07T00:00:00Z",
+                "user": {"login": "alice"},
+                "head": {"ref": "healer/issue-12"},
+            }
+        raise AssertionError(path)
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
     pr = tracker.find_pr_for_issue(issue_id="123")
@@ -401,6 +426,35 @@ def test_find_pr_for_issue_uses_all_prs_and_detects_merged(monkeypatch):
     assert pr.number == 12
     assert pr.state == "merged"
     assert pr.html_url == "https://github.com/owner/repo/pull/12"
+    assert calls[0].startswith("/search/issues?q=")
+
+
+def test_request_metrics_snapshot_aggregates_by_path(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_urlopen(req, timeout=20):
+        class _Response:
+            status = 200
+            headers = {}
+
+            def read(self):
+                return b'{"number": 42, "state": "open", "html_url": "https://github.com/owner/repo/pull/42", "mergeable_state": "clean", "updated_at": "2026-03-07T12:00:00Z", "user": {"login": "alice"}, "head": {"ref": "healer/issue-42"}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        return _Response()
+
+    monkeypatch.setattr("flow_healer.healer_tracker.urlopen", fake_urlopen)
+
+    assert tracker.get_pr_details(pr_number=42) is not None
+    metrics = tracker.request_metrics_snapshot()
+
+    assert metrics["counts"]["GET /repos/owner/repo/pulls/:id 200"] == 1
 
 
 def test_pr_state_from_payload_prefers_closed_over_dirty():

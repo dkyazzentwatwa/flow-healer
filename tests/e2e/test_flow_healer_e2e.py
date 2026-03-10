@@ -899,9 +899,20 @@ def test_e2e_scan_creates_and_dedupes_issue(tmp_path: Path, monkeypatch, fake_gi
     second = service.run_scan("demo", dry_run=False)
 
     assert first[0]["summary"]["findings_over_threshold"] == 1
-    assert len(first[0]["summary"]["created_issues"]) == 1
-    assert second[0]["summary"]["deduped_count"] == 1
+    assert first[0]["summary"]["created_issues"] == []
+    assert first[0]["summary"]["skipped_non_sandbox_count"] == 1
+    assert second[0]["summary"]["skipped_non_sandbox_count"] == 1
+    assert second[0]["summary"]["deduped_count"] == 0
     assert second[0]["summary"]["created_issues"] == []
+
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    findings = store.list_scan_findings(statuses=["skipped_non_sandbox"])
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["status"] == "skipped_non_sandbox"
+    assert finding["payload"]["selector"] == "tests/test_demo.py::test_add"
+    store.close()
 
 
 def test_e2e_pending_approval_posts_issue_comment(tmp_path: Path, monkeypatch, fake_github) -> None:

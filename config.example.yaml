@@ -15,7 +15,8 @@ control:
     enabled: true
     host: 0.0.0.0
     port: 8787
-    auth_mode: none
+    auth_mode: token
+    auth_token_env: FLOW_HEALER_WEB_TOKEN
   mail:
     enabled: false
     account: ops@example.com
@@ -46,8 +47,8 @@ repos:
       - healer:ready
     pr_actions_require_approval: false
     pr_required_label: healer:pr-approved
-    pr_auto_approve_clean: true
-    pr_auto_merge_clean: true
+    pr_auto_approve_clean: false
+    pr_auto_merge_clean: false
     pr_merge_method: squash
     trusted_actors: []
     max_concurrent_issues: 3
@@ -59,6 +60,7 @@ repos:
     circuit_breaker_cooldown_seconds: 900
     learning_enabled: true
     enable_review: true
+    verifier_policy: required
     test_gate_mode: local_then_docker
     # local gate policy:
     # - auto  -> skip local gate when toolchain is unavailable

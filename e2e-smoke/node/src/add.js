@@ -29,28 +29,6 @@ function normalizeZero(sum) {
     : (Object.is(sum, -0) ? 0 : sum);
 }
 
-function hasBigIntOperand(a, b) {
-  return typeof a === 'bigint' || typeof b === 'bigint';
-}
-
-function getInitialAccumulatedSum(operands) {
-  return operands.length === 0 ? 0 : normalizeZero(operands[0]);
-}
-
-function shouldPromoteSafeIntegerSum(a, b, numericSum) {
-  return Number.isSafeInteger(a)
-    && Number.isSafeInteger(b)
-    && !Number.isSafeInteger(numericSum);
-}
-
-function throwBigIntUnsafeIntegerError() {
-  throw new RangeError(BIGINT_UNSAFE_INTEGER_MESSAGE);
-}
-
-function throwVariadicOverflowUnsafeIntegerError() {
-  throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
-}
-
 function isPrimitive(value) {
   return value === null || (typeof value !== 'object' && typeof value !== 'function');
 }
@@ -93,7 +71,11 @@ function toAddPrimitive(value) {
   return ordinaryToPrimitive(value);
 }
 
-function normalizeOperand(value) {
+function isStringOperand(value) {
+  return typeof value === 'string' || typeof toAddPrimitive(value) === 'string';
+}
+
+function normalizeAddOperand(value) {
   const primitive = toAddPrimitive(value);
 
   if (typeof primitive === 'string') {
@@ -107,27 +89,58 @@ function throwStringOperandTypeError() {
   throw new TypeError(STRING_OPERAND_TYPE_ERROR_MESSAGE);
 }
 
+function assertNoStringOperands(operands) {
+  if (operands.some(isStringOperand)) {
+    throwStringOperandTypeError();
+  }
+}
+
+function hasBigIntOperand(a, b) {
+  return typeof a === 'bigint' || typeof b === 'bigint';
+}
+
+function getInitialAccumulatedSum(operands) {
+  return operands.length === 0 ? 0 : normalizeZero(operands[0]);
+}
+
+function shouldPromoteSafeIntegerSum(a, b, numericSum) {
+  return Number.isSafeInteger(a)
+    && Number.isSafeInteger(b)
+    && !Number.isSafeInteger(numericSum);
+}
+
+function throwBigIntUnsafeIntegerError() {
+  throw new RangeError(BIGINT_UNSAFE_INTEGER_MESSAGE);
+}
+
+function throwVariadicOverflowUnsafeIntegerError() {
+  throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
+}
+
 function addPair(a, b) {
+  const normalizedA = normalizeAddOperand(a);
+  const normalizedB = normalizeAddOperand(b);
+
   const canPromoteOperandsToBigInt =
-    canConvertToBigInt(a) && canConvertToBigInt(b);
+    canConvertToBigInt(normalizedA) && canConvertToBigInt(normalizedB);
 
   if (canPromoteOperandsToBigInt) {
-    if (hasBigIntOperand(a, b)) {
-      if (isUnsafeIntegerNumber(a) || isUnsafeIntegerNumber(b)) {
+    if (hasBigIntOperand(normalizedA, normalizedB)) {
+      if (isUnsafeIntegerNumber(normalizedA) || isUnsafeIntegerNumber(normalizedB)) {
         throwBigIntUnsafeIntegerError();
       }
 
-      return normalizeZero(toBigInt(a) + toBigInt(b));
+      return normalizeZero(toBigInt(normalizedA) + toBigInt(normalizedB));
     }
 
-    const numericSum = a + b;
+    const numericSum = normalizedA + normalizedB;
 
-    if (shouldPromoteSafeIntegerSum(a, b, numericSum)) {
-      return normalizeZero(toBigInt(a) + toBigInt(b));
+    if (shouldPromoteSafeIntegerSum(normalizedA, normalizedB, numericSum)) {
+      return normalizeZero(toBigInt(normalizedA) + toBigInt(normalizedB));
     }
   }
 
-  return normalizeZero(a + b);
+  return normalizeZero(normalizedA + normalizedB);
 }
 
 function isVariadicOverflowPromotion(accumulatedSum, operand) {
@@ -158,15 +171,17 @@ function shouldDemoteOverflowPromotedBigInt(
 }
 
 function sumOperands(operands) {
+  const normalizedOperands = operands.map(normalizeAddOperand);
+
   // Start from the original first operand so oversized numbers keep plain-number
   // semantics until a later bigint operand intentionally promotes the result.
-  let accumulatedSum = getInitialAccumulatedSum(operands);
+  let accumulatedSum = getInitialAccumulatedSum(normalizedOperands);
   let hasOverflowBoundaryPromotion = false;
   let hasExplicitBigIntOperand = typeof accumulatedSum === 'bigint';
   let hasUnsafeIntegerOperand = isUnsafeIntegerNumber(accumulatedSum);
 
-  for (let index = 1; index < operands.length; index += 1) {
-    const operand = operands[index];
+  for (let index = 1; index < normalizedOperands.length; index += 1) {
+    const operand = normalizedOperands[index];
 
     if (typeof accumulatedSum === 'number' && Number.isNaN(accumulatedSum)) {
       return Number.NaN;

@@ -92,6 +92,8 @@ run_backend() {
 
 run_db() {
   need_cmd python3
+  : "${FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE:=0}"
+  export FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE
   python3 "$REPO_ROOT/scripts/flow_healer_sql_validate.py" \
     --project-dir "$ROOT_DIR" \
     --manifest "supabase/assertions/manifest.json"

@@ -731,6 +731,65 @@ def test_resolve_execution_leaves_language_empty_for_ambiguous_repo_markers(tmp_
 
     assert resolved.language_detected == ""
     assert resolved.language_effective == ""
+    assert resolved.strategy.local_test_cmd == []
+    assert resolved.strategy.docker_test_cmd == []
+
+
+def test_validate_workspace_fails_closed_for_ambiguous_repo_markers_without_language_hints(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+
+    runner = HealerRunner(connector=None, timeout_seconds=30)  # type: ignore[arg-type]
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/demo.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    summary = runner.validate_workspace(
+        tmp_path,
+        task_spec=task_spec,
+        targeted_tests=[],
+        mode="local_then_docker",
+    )
+
+    assert summary["failed_tests"] == 1
+    assert summary["failure_class"] == "language_unresolved"
+    assert "explicit issue language or validation command" in summary["failure_reason"]
+    assert summary["local_full_status"] == "failed"
+    assert summary["local_full_reason"] == "language_unresolved"
+
+
+def test_run_test_gates_preserves_python3_pytest_command_with_execution_root(monkeypatch, tmp_path):
+    calls: list[tuple[str, object]] = []
+
+    def fake_explicit(workspace: Path, commands: tuple[str, ...], timeout_seconds: int):
+        calls.append(("explicit", commands))
+        return {"exit_code": 0, "output_tail": "explicit ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_explicit_validation_commands", fake_explicit)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_then_docker",
+        resolved_execution=ResolvedExecution(
+            language_detected="python",
+            language_effective="python",
+            execution_root="e2e-apps/python-fastapi",
+            execution_root_source="issue",
+            execution_path=tmp_path,
+            strategy=get_strategy("python"),
+        ),
+        validation_commands=("cd e2e-apps/python-fastapi && python3 -m pytest -q",),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("explicit", ("python3 -m pytest -q",))]
+    assert summary["validation_commands"] == ["python3 -m pytest -q"]
 
 
 def test_stage_workspace_changes_excludes_python_packaging_artifacts(tmp_path):
@@ -2358,14 +2417,15 @@ def test_task_execution_instructions_keep_sandbox_validation_local():
         HealerTaskSpec(
             task_kind="fix",
             output_mode="patch",
-            output_targets=("e2e-apps/swift-todo/Sources/TodoCore/TodoService.swift",),
+            output_targets=("e2e-apps/python-fastapi/app/service.py",),
             tool_policy="repo_only",
             validation_profile="code_change",
-            execution_root="e2e-apps/swift-todo",
+            execution_root="e2e-apps/python-fastapi",
         )
     )
     lowered = instructions.lower()
     assert "sandbox-scoped" in lowered
+    assert "exact allowlist for edits" in lowered
     assert "do not suggest or claim repo-root pytest/full-suite validation" in lowered
 
 

@@ -194,6 +194,7 @@ def test_run_scan_skips_non_sandbox_pytest_issue_creation(monkeypatch, fake_stor
 
     assert summary["findings_total"] == 1
     assert summary["created_issues"] == []
+    assert summary["skipped_non_sandbox_count"] == 1
     finding = fake_store.get_scan_finding("fp_py_non_sandbox")
     assert finding is not None
     assert finding["status"] == "skipped_non_sandbox"

@@ -43,17 +43,21 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert config.service.connector_model == "gpt-5.4"
     assert config.service.connector_reasoning_effort == "medium"
     assert config.control.web.enabled is True
-    assert config.control.web.auth_mode == "none"
+    assert config.control.web.auth_mode == "token"
+    assert config.control.web.auth_token_env == "FLOW_HEALER_WEB_TOKEN"
     assert config.control.mail.subject_prefix == "FH:"
     assert config.select_repos("demo")[0].repo_name == "demo"
     relay = config.select_repos("demo")[0]
     assert relay.healer_max_concurrent_issues == 3
     assert relay.healer_pr_actions_require_approval is False
-    assert relay.healer_pr_auto_approve_clean is True
-    assert relay.healer_pr_auto_merge_clean is True
+    assert relay.healer_pr_auto_approve_clean is False
+    assert relay.healer_pr_auto_merge_clean is False
     assert relay.healer_pr_merge_method == "squash"
-    assert relay.healer_verifier_policy == "advisory"
+    assert relay.healer_verifier_policy == "required"
     assert relay.healer_local_gate_policy == "auto"
+    assert relay.healer_status_cache_ttl_seconds == 5
+    assert relay.healer_housekeeping_interval_seconds == 300
+    assert relay.healer_blocked_label_repair_interval_seconds == 600
     assert relay.healer_language == ""
     assert relay.healer_docker_image == ""
     assert relay.healer_test_command == ""
@@ -90,6 +94,31 @@ def test_load_reads_language_strategy_overrides(tmp_path) -> None:
     assert relay.healer_docker_image == "node:22"
     assert relay.healer_test_command == "npm run test:ci -- --watch=false"
     assert relay.healer_install_command == "npm ci"
+
+
+def test_load_reads_runtime_optimization_overrides(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    status_cache_ttl_seconds: 9",
+                "    housekeeping_interval_seconds: 120",
+                "    blocked_label_repair_interval_seconds: 240",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+    relay = config.select_repos("demo")[0]
+
+    assert relay.healer_status_cache_ttl_seconds == 9
+    assert relay.healer_housekeeping_interval_seconds == 120
+    assert relay.healer_blocked_label_repair_interval_seconds == 240
 
 
 def test_load_rejects_removed_language_override(tmp_path) -> None:
@@ -223,7 +252,7 @@ def test_load_normalizes_verifier_policy(tmp_path) -> None:
     assert relay.healer_verifier_policy == "required"
 
 
-def test_load_normalizes_unknown_verifier_policy_to_advisory(tmp_path) -> None:
+def test_load_normalizes_unknown_verifier_policy_to_required(tmp_path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "\n".join(
@@ -241,7 +270,31 @@ def test_load_normalizes_unknown_verifier_policy_to_advisory(tmp_path) -> None:
     config = AppConfig.load(config_path)
 
     relay = config.select_repos("demo")[0]
-    assert relay.healer_verifier_policy == "advisory"
+    assert relay.healer_verifier_policy == "required"
+
+
+def test_load_reads_web_auth_overrides(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "control:",
+                "  web:",
+                "    auth_mode: none",
+                "    auth_token_env: CUSTOM_WEB_TOKEN",
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    assert config.control.web.auth_mode == "none"
+    assert config.control.web.auth_token_env == "CUSTOM_WEB_TOKEN"
 
 
 def test_relay_settings_stuck_pr_timeout_defaults_to_60(tmp_path) -> None:
@@ -336,3 +389,38 @@ def test_relay_settings_conflict_requeue_and_dedupe_configurable(tmp_path) -> No
     assert relay.healer_overlap_scope_queue_enabled is False
     assert relay.healer_dedupe_enabled is False
     assert relay.healer_dedupe_close_duplicates is False
+
+
+def test_app_config_loads_swarm_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "service:\n"
+            "  state_root: ~/.flow-healer\n"
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    repo_slug: owner/repo\n"
+            "    swarm_enabled: true\n"
+            "    swarm_mode: failure_repair\n"
+            "    swarm_max_parallel_agents: 6\n"
+            "    swarm_max_repair_cycles_per_attempt: 2\n"
+            "    swarm_backend_strategy: match_selected_backend\n"
+            "    swarm_trigger_failure_classes:\n"
+            "      - tests_failed\n"
+            "      - verifier_failed\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_swarm_enabled is True
+    assert repo.healer_swarm_mode == "failure_repair"
+    assert repo.healer_swarm_max_parallel_agents == 6
+    assert repo.healer_swarm_max_repair_cycles_per_attempt == 2
+    assert repo.healer_swarm_backend_strategy == "match_selected_backend"
+    assert repo.healer_swarm_trigger_failure_classes == ["tests_failed", "verifier_failed"]

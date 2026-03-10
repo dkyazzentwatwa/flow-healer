@@ -1,0 +1,526 @@
+{
+  "generated_at": "2026-01-30T01:00:17.537262",
+  "initial_balance": 100000.0,
+  "focus_symbols": [
+    "BTC/USDT",
+    "ETH/USDT"
+  ],
+  "pairs": [
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "15m",
+      "entry_rule": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+      "exit_rule": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+      "base": {
+        "entry": {
+          "id": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+          "name": "BTC 15m Mean Reversion",
+          "min_score": 10.0,
+          "stop_loss_pct": 2.5,
+          "take_profit_pct": 5.0,
+          "trailing_stop_pct": 1.5
+        },
+        "exit": {
+          "id": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+          "name": "BTC 15m Mean Reversion Exit",
+          "min_score": -10.0,
+          "min_profit_pct": null,
+          "break_even_after_pct": null,
+          "max_hold_bars": null
+        },
+        "metrics": {
+          "final_balance": 100000.0,
+          "return_pct": 0.0,
+          "win_rate": 0,
+          "total_trades": 0,
+          "max_drawdown_pct": 0.0
+        }
+      },
+      "top": [
+        {
+          "entry": {
+            "id": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+            "name": "BTC 15m Mean Reversion",
+            "min_score": 8.0,
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 3.0,
+            "trailing_stop_pct": 1.5
+          },
+          "exit": {
+            "id": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+            "name": "BTC 15m Mean Reversion Exit",
+            "min_score": -12.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100000.0,
+            "return_pct": 0.0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "max_drawdown_pct": 0.0
+          }
+        },
+        {
+          "entry": {
+            "id": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+            "name": "BTC 15m Mean Reversion",
+            "min_score": 8.0,
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 3.0,
+            "trailing_stop_pct": 1.5
+          },
+          "exit": {
+            "id": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+            "name": "BTC 15m Mean Reversion Exit",
+            "min_score": -12.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 1.0,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100000.0,
+            "return_pct": 0.0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "max_drawdown_pct": 0.0
+          }
+        },
+        {
+          "entry": {
+            "id": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+            "name": "BTC 15m Mean Reversion",
+            "min_score": 8.0,
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 3.0,
+            "trailing_stop_pct": 1.5
+          },
+          "exit": {
+            "id": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+            "name": "BTC 15m Mean Reversion Exit",
+            "min_score": -12.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 1.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100000.0,
+            "return_pct": 0.0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "max_drawdown_pct": 0.0
+          }
+        },
+        {
+          "entry": {
+            "id": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+            "name": "BTC 15m Mean Reversion",
+            "min_score": 8.0,
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 3.0,
+            "trailing_stop_pct": 1.5
+          },
+          "exit": {
+            "id": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+            "name": "BTC 15m Mean Reversion Exit",
+            "min_score": -12.0,
+            "min_profit_pct": 0.5,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100000.0,
+            "return_pct": 0.0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "max_drawdown_pct": 0.0
+          }
+        },
+        {
+          "entry": {
+            "id": "16f90cfc-321c-4392-8015-d38d22fe6ef3",
+            "name": "BTC 15m Mean Reversion",
+            "min_score": 8.0,
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 3.0,
+            "trailing_stop_pct": 1.5
+          },
+          "exit": {
+            "id": "c10531f0-dc70-4016-b3c9-30327394ae4a",
+            "name": "BTC 15m Mean Reversion Exit",
+            "min_score": -12.0,
+            "min_profit_pct": 0.5,
+            "break_even_after_pct": 1.0,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100000.0,
+            "return_pct": 0.0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "max_drawdown_pct": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "1h",
+      "entry_rule": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+      "exit_rule": "d055a353-a59d-4c5b-9554-30454877b141",
+      "base": {
+        "entry": {
+          "id": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+          "name": "BTC 1h Trend Continuation",
+          "min_score": 15.0,
+          "stop_loss_pct": 3.5,
+          "take_profit_pct": 7.5,
+          "trailing_stop_pct": 2.0
+        },
+        "exit": {
+          "id": "d055a353-a59d-4c5b-9554-30454877b141",
+          "name": "BTC 1h Trend Exhaustion",
+          "min_score": -15.0,
+          "min_profit_pct": null,
+          "break_even_after_pct": null,
+          "max_hold_bars": null
+        },
+        "metrics": {
+          "final_balance": 100124.09752795273,
+          "return_pct": 0.12,
+          "win_rate": 14.81,
+          "total_trades": 27,
+          "max_drawdown_pct": 0.21
+        }
+      },
+      "top": [
+        {
+          "entry": {
+            "id": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+            "name": "BTC 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 5.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "d055a353-a59d-4c5b-9554-30454877b141",
+            "name": "BTC 1h Trend Exhaustion",
+            "min_score": -17.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100427.29519560949,
+            "return_pct": 0.43,
+            "win_rate": 33.33,
+            "total_trades": 9,
+            "max_drawdown_pct": 0.19
+          }
+        },
+        {
+          "entry": {
+            "id": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+            "name": "BTC 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 5.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "d055a353-a59d-4c5b-9554-30454877b141",
+            "name": "BTC 1h Trend Exhaustion",
+            "min_score": -17.0,
+            "min_profit_pct": 0.5,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100427.29519560949,
+            "return_pct": 0.43,
+            "win_rate": 33.33,
+            "total_trades": 9,
+            "max_drawdown_pct": 0.19
+          }
+        },
+        {
+          "entry": {
+            "id": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+            "name": "BTC 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 5.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "d055a353-a59d-4c5b-9554-30454877b141",
+            "name": "BTC 1h Trend Exhaustion",
+            "min_score": -17.0,
+            "min_profit_pct": 1.0,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100427.29519560949,
+            "return_pct": 0.43,
+            "win_rate": 33.33,
+            "total_trades": 9,
+            "max_drawdown_pct": 0.19
+          }
+        },
+        {
+          "entry": {
+            "id": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+            "name": "BTC 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 5.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "d055a353-a59d-4c5b-9554-30454877b141",
+            "name": "BTC 1h Trend Exhaustion",
+            "min_score": -15.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100427.29519560949,
+            "return_pct": 0.43,
+            "win_rate": 33.33,
+            "total_trades": 9,
+            "max_drawdown_pct": 0.19
+          }
+        },
+        {
+          "entry": {
+            "id": "3fa90b29-16b6-4886-be96-bceb14c295c2",
+            "name": "BTC 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 5.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "d055a353-a59d-4c5b-9554-30454877b141",
+            "name": "BTC 1h Trend Exhaustion",
+            "min_score": -15.0,
+            "min_profit_pct": 0.5,
+            "break_even_after_pct": 0.5,
+            "max_hold_bars": null
+          },
+          "metrics": {
+            "final_balance": 100427.29519560949,
+            "return_pct": 0.43,
+            "win_rate": 33.33,
+            "total_trades": 9,
+            "max_drawdown_pct": 0.19
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "4h",
+      "entry_rule": "78a030f1-0757-435c-b883-c7f313a0cd66",
+      "exit_rule": "7b733c53-3b45-4b07-b6df-2c85b187cde9",
+      "error": "Not enough historical data. Try downloading it first."
+    },
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "1d",
+      "entry_rule": "58e49dcd-1dd0-4cf5-814e-c129c12f901a",
+      "exit_rule": "7b4587d2-47cf-433d-8fa6-982b54ded2c1",
+      "error": "Not enough historical data. Try downloading it first."
+    },
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "1m",
+      "entry_rule": "a5c4e13a-f310-4b62-9a39-01f1f3436b3a",
+      "exit_rule": "8e57f7ad-7ef8-422c-8bd7-e2453d648f88",
+      "error": "Not enough historical data. Try downloading it first."
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "15m",
+      "entry_rule": "6aae93b2-0535-4eaa-a118-f1620bb06b98",
+      "exit_rule": "e7f34e42-ca83-4bf2-86cb-d3a6f0448152",
+      "error": "Not enough historical data. Try downloading it first."
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "1h",
+      "entry_rule": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+      "exit_rule": "dfef3d80-cb03-4ded-bccb-141969174563",
+      "base": {
+        "entry": {
+          "id": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+          "name": "ETH 1h Trend Continuation",
+          "min_score": 15.0,
+          "stop_loss_pct": 3.5,
+          "take_profit_pct": 7.5,
+          "trailing_stop_pct": 2.0
+        },
+        "exit": {
+          "id": "dfef3d80-cb03-4ded-bccb-141969174563",
+          "name": "ETH 1h Trend Exhaustion",
+          "min_score": -15.0,
+          "min_profit_pct": 0.5,
+          "break_even_after_pct": 1.0,
+          "max_hold_bars": 72
+        },
+        "metrics": {
+          "final_balance": 100251.51121869011,
+          "return_pct": 0.25,
+          "win_rate": 38.46,
+          "total_trades": 13,
+          "max_drawdown_pct": 0.45
+        }
+      },
+      "top": [
+        {
+          "entry": {
+            "id": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+            "name": "ETH 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 7.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "dfef3d80-cb03-4ded-bccb-141969174563",
+            "name": "ETH 1h Trend Exhaustion",
+            "min_score": -17.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 1.5,
+            "max_hold_bars": 72
+          },
+          "metrics": {
+            "final_balance": 100305.70165138975,
+            "return_pct": 0.31,
+            "win_rate": 50.0,
+            "total_trades": 12,
+            "max_drawdown_pct": 0.41
+          }
+        },
+        {
+          "entry": {
+            "id": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+            "name": "ETH 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 7.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "dfef3d80-cb03-4ded-bccb-141969174563",
+            "name": "ETH 1h Trend Exhaustion",
+            "min_score": -17.0,
+            "min_profit_pct": 0.5,
+            "break_even_after_pct": 1.5,
+            "max_hold_bars": 72
+          },
+          "metrics": {
+            "final_balance": 100305.70165138975,
+            "return_pct": 0.31,
+            "win_rate": 50.0,
+            "total_trades": 12,
+            "max_drawdown_pct": 0.41
+          }
+        },
+        {
+          "entry": {
+            "id": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+            "name": "ETH 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 7.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "dfef3d80-cb03-4ded-bccb-141969174563",
+            "name": "ETH 1h Trend Exhaustion",
+            "min_score": -17.0,
+            "min_profit_pct": 1.0,
+            "break_even_after_pct": 1.5,
+            "max_hold_bars": 72
+          },
+          "metrics": {
+            "final_balance": 100305.70165138975,
+            "return_pct": 0.31,
+            "win_rate": 50.0,
+            "total_trades": 12,
+            "max_drawdown_pct": 0.41
+          }
+        },
+        {
+          "entry": {
+            "id": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+            "name": "ETH 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 7.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "dfef3d80-cb03-4ded-bccb-141969174563",
+            "name": "ETH 1h Trend Exhaustion",
+            "min_score": -15.0,
+            "min_profit_pct": 0.25,
+            "break_even_after_pct": 1.5,
+            "max_hold_bars": 72
+          },
+          "metrics": {
+            "final_balance": 100305.70165138975,
+            "return_pct": 0.31,
+            "win_rate": 50.0,
+            "total_trades": 12,
+            "max_drawdown_pct": 0.41
+          }
+        },
+        {
+          "entry": {
+            "id": "7ba2215e-c835-4ffc-9595-d9218deb3896",
+            "name": "ETH 1h Trend Continuation",
+            "min_score": 15.0,
+            "stop_loss_pct": 2.5,
+            "take_profit_pct": 7.5,
+            "trailing_stop_pct": 2.0
+          },
+          "exit": {
+            "id": "dfef3d80-cb03-4ded-bccb-141969174563",
+            "name": "ETH 1h Trend Exhaustion",
+            "min_score": -15.0,
+            "min_profit_pct": 0.5,
+            "break_even_after_pct": 1.5,
+            "max_hold_bars": 72
+          },
+          "metrics": {
+            "final_balance": 100305.70165138975,
+            "return_pct": 0.31,
+            "win_rate": 50.0,
+            "total_trades": 12,
+            "max_drawdown_pct": 0.41
+          }
+        }
+      ]
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "4h",
+      "entry_rule": "3abe0939-2719-4066-8ae7-6fb8ed5481b3",
+      "exit_rule": "d243bfb9-4ec6-41bd-87b6-c8ebc460d2d6",
+      "error": "Not enough historical data. Try downloading it first."
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "1d",
+      "entry_rule": "8d5d7fc0-39ba-42be-b354-d4eaa83098f4",
+      "exit_rule": "f297beeb-bbe3-4b58-8f94-1811f62508e9",
+      "error": "Not enough historical data. Try downloading it first."
+    }
+  ]
+}

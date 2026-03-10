@@ -20,7 +20,7 @@ BEGIN
       AND tc.constraint_type = 'UNIQUE'
     GROUP BY tc.constraint_name
   ) AS unique_constraints
-  WHERE columns = ARRAY['business_id', 'key']
+  WHERE columns::text[] = ARRAY['business_id', 'key']
   LIMIT 1;
 
   IF existing_constraint_name IS NULL THEN

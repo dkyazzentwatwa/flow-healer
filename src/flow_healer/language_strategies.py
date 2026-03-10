@@ -56,6 +56,14 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
         supports_targeted_paths=True,
     ),
 }
+_EMPTY_STRATEGY = LanguageStrategy(
+    docker_image="",
+    docker_install_cmd="",
+    docker_test_cmd=[],
+    local_test_cmd=[],
+    supports_targeted_paths=False,
+    supports_docker=False,
+)
 
 
 def parse_command(command: str) -> list[str]:
@@ -101,7 +109,8 @@ def get_strategy(
     test_command: str = "",
     install_command: str = "",
 ) -> LanguageStrategy:
-    base = _STRATEGIES.get(str(language or "").strip()) or _STRATEGIES["unknown"]
+    normalized = str(language or "").strip()
+    base = _EMPTY_STRATEGY if not normalized else (_STRATEGIES.get(normalized) or _STRATEGIES["unknown"])
 
     resolved_image = docker_image.strip() or base.docker_image
     resolved_install = install_command.strip() if install_command.strip() else base.docker_install_cmd
@@ -133,6 +142,6 @@ def _supports_targeted_paths(command: list[str]) -> bool:
     first = command[0]
     if first in {"pytest", "py.test", "rspec"}:
         return True
-    if first == "python" and "pytest" in command:
+    if first.startswith("python") and "pytest" in command:
         return True
     return False
