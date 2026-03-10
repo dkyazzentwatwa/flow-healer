@@ -46,6 +46,8 @@ def _make_loop(store, **overrides):
         healer_max_wall_clock_seconds_per_issue=300,
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
+        healer_issue_contract_mode=overrides.get("healer_issue_contract_mode", "lenient"),
+        healer_parse_confidence_threshold=overrides.get("healer_parse_confidence_threshold", 0.3),
         healer_swarm_enabled=overrides.get("healer_swarm_enabled", False),
         healer_swarm_mode=overrides.get("healer_swarm_mode", "failure_repair"),
         healer_swarm_max_parallel_agents=overrides.get("healer_swarm_max_parallel_agents", 4),
@@ -358,6 +360,52 @@ def test_process_claimed_issue_low_confidence_sets_needs_clarification_label(tmp
         call.kwargs.get("label") == "healer:needs-clarification"
         for call in loop.tracker.add_issue_label.call_args_list
     )
+
+
+def test_clarification_reasons_strict_mode_requires_validation_and_outputs(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        healer_issue_contract_mode="strict",
+        healer_parse_confidence_threshold=0.3,
+    )
+    spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=(),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+        parse_confidence=0.95,
+        validation_commands=(),
+    )
+
+    reasons = loop._clarification_reasons_for_task_spec(task_spec=spec)
+
+    assert reasons == ["missing_required_outputs", "missing_validation"]
+
+
+def test_clarification_reasons_lenient_mode_only_uses_confidence_threshold(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        healer_issue_contract_mode="lenient",
+        healer_parse_confidence_threshold=0.4,
+    )
+    spec = HealerTaskSpec(
+        task_kind="docs",
+        output_mode="artifact_file",
+        output_targets=(),
+        tool_policy="summary_only",
+        validation_profile="artifact_only",
+        parse_confidence=0.35,
+        validation_commands=(),
+    )
+
+    reasons = loop._clarification_reasons_for_task_spec(task_spec=spec)
+
+    assert reasons == ["low_confidence"]
 
 
 def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):

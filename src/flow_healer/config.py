@@ -93,6 +93,8 @@ class RelaySettings:
     healer_max_concurrent_issues: int = 3
     healer_max_wall_clock_seconds_per_issue: int = 300
     healer_issue_required_labels: list[str] = field(default_factory=lambda: ["healer:ready"])
+    healer_issue_contract_mode: str = "lenient"
+    healer_parse_confidence_threshold: float = 0.3
     healer_pr_actions_require_approval: bool = False
     healer_pr_required_label: str = "healer:pr-approved"
     healer_pr_auto_approve_clean: bool = False
@@ -240,6 +242,10 @@ class AppConfig:
                         item.get("max_wall_clock_seconds_per_issue") or service.connector_timeout_seconds
                     ),
                     healer_issue_required_labels=_list_of_str(item.get("issue_required_labels"), ["healer:ready"]),
+                    healer_issue_contract_mode=_normalize_issue_contract_mode(item.get("issue_contract_mode")),
+                    healer_parse_confidence_threshold=_normalize_parse_confidence_threshold(
+                        item.get("parse_confidence_threshold")
+                    ),
                     healer_pr_actions_require_approval=bool(item.get("pr_actions_require_approval", False)),
                     healer_pr_required_label=str(item.get("pr_required_label") or "healer:pr-approved"),
                     healer_pr_auto_approve_clean=bool(item.get("pr_auto_approve_clean", False)),
@@ -412,6 +418,21 @@ def _normalize_connector_routing_mode(value: Any) -> str:
     if raw in {"single_backend", "exec_for_code"}:
         return raw
     return "single_backend"
+
+
+def _normalize_issue_contract_mode(value: Any) -> str:
+    raw = str(value or "lenient").strip().lower()
+    if raw in {"strict", "lenient"}:
+        return raw
+    return "lenient"
+
+
+def _normalize_parse_confidence_threshold(value: Any) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        threshold = 0.3
+    return max(0.0, min(1.0, threshold))
 
 
 def _apply_connector_routing_defaults(service: ServiceSettings) -> ServiceSettings:

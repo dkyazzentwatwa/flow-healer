@@ -55,6 +55,8 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert relay.healer_pr_merge_method == "squash"
     assert relay.healer_verifier_policy == "required"
     assert relay.healer_local_gate_policy == "auto"
+    assert relay.healer_issue_contract_mode == "lenient"
+    assert relay.healer_parse_confidence_threshold == 0.3
     assert relay.healer_status_cache_ttl_seconds == 5
     assert relay.healer_housekeeping_interval_seconds == 300
     assert relay.healer_blocked_label_repair_interval_seconds == 600
@@ -119,6 +121,52 @@ def test_load_reads_runtime_optimization_overrides(tmp_path) -> None:
     assert relay.healer_status_cache_ttl_seconds == 9
     assert relay.healer_housekeeping_interval_seconds == 120
     assert relay.healer_blocked_label_repair_interval_seconds == 240
+
+
+def test_load_reads_issue_contract_mode_and_parse_threshold(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    issue_contract_mode: strict",
+                "    parse_confidence_threshold: 0.55",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+    relay = config.select_repos("demo")[0]
+
+    assert relay.healer_issue_contract_mode == "strict"
+    assert relay.healer_parse_confidence_threshold == 0.55
+
+
+def test_load_normalizes_invalid_issue_contract_mode_and_threshold(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repos:",
+                "  - name: demo",
+                f"    path: {tmp_path}",
+                "    issue_contract_mode: relaxed",
+                "    parse_confidence_threshold: 4.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+    relay = config.select_repos("demo")[0]
+
+    assert relay.healer_issue_contract_mode == "lenient"
+    assert relay.healer_parse_confidence_threshold == 1.0
 
 
 def test_load_rejects_removed_language_override(tmp_path) -> None:

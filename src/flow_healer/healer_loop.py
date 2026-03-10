@@ -2308,18 +2308,19 @@ class AutonomousHealerLoop:
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
         self._record_worker_heartbeat(status="processing", issue_id=issue.issue_id)
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
-        if task_spec.parse_confidence < 0.3:
+        clarification_reasons = self._clarification_reasons_for_task_spec(task_spec=task_spec)
+        if clarification_reasons:
             clarification_key = f"healer_clarification_posted:{issue.issue_id}"
             already_posted = self.store.get_state(clarification_key) == "true"
             if not already_posted:
                 logger.info(
-                    "Issue #%s has low parse_confidence (%.2f); posting needs-clarification comment.",
+                    "Issue #%s requires clarification (%s); posting needs-clarification comment.",
                     issue.issue_id,
-                    task_spec.parse_confidence,
+                    ", ".join(clarification_reasons),
                 )
                 self._post_issue_status(
                     issue_id=issue.issue_id,
-                    body=self._build_needs_clarification_comment(),
+                    body=self._build_needs_clarification_comment(clarification_reasons),
                 )
                 self.store.set_state(clarification_key, "true")
             self.store.set_healer_issue_state(
@@ -3978,12 +3979,50 @@ class AutonomousHealerLoop:
                 if attempt == 0:
                     time.sleep(2)
 
+    def _issue_contract_mode(self) -> str:
+        raw = str(getattr(self.settings, "healer_issue_contract_mode", "lenient") or "lenient")
+        normalized = raw.strip().lower()
+        return normalized if normalized in {"strict", "lenient"} else "lenient"
+
+    def _parse_confidence_threshold(self) -> float:
+        raw = getattr(self.settings, "healer_parse_confidence_threshold", 0.3)
+        try:
+            threshold = float(raw)
+        except (TypeError, ValueError):
+            threshold = 0.3
+        return max(0.0, min(1.0, threshold))
+
+    def _clarification_reasons_for_task_spec(self, *, task_spec: HealerTaskSpec) -> list[str]:
+        reasons: list[str] = []
+        threshold = self._parse_confidence_threshold()
+        if float(task_spec.parse_confidence) < threshold:
+            reasons.append("low_confidence")
+        if self._issue_contract_mode() == "strict":
+            if not task_spec.output_targets:
+                reasons.append("missing_required_outputs")
+            if not task_spec.validation_commands:
+                reasons.append("missing_validation")
+        return reasons
+
     @staticmethod
-    @staticmethod
-    def _build_needs_clarification_comment() -> str:
+    def _build_needs_clarification_comment(reasons: list[str] | None = None) -> str:
+        reason_lines: list[str] = []
+        normalized_reasons = [str(item or "").strip() for item in (reasons or []) if str(item or "").strip()]
+        reason_map = {
+            "low_confidence": "Parser confidence is below the configured threshold for autonomous edits.",
+            "missing_required_outputs": "Strict issue-contract mode requires `Required code outputs:`.",
+            "missing_validation": "Strict issue-contract mode requires a `Validation:` command.",
+        }
+        for reason in normalized_reasons:
+            rendered = reason_map.get(reason, reason.replace("_", " "))
+            reason_lines.append(f"- {rendered}")
+        reason_block = ""
+        if reason_lines:
+            reason_block = "Detected issue-contract gaps:\n" + "\n".join(reason_lines) + "\n\n"
         return (
             "## Flow Healer — Needs Clarification\n\n"
             "This issue doesn't have enough structured information for me to reliably generate a fix.\n"
+            f"{reason_block}"
             "Please add one or more of the following to the issue body:\n\n"
             "**Required code outputs** (the files I should edit):\n"
             "```\n"
