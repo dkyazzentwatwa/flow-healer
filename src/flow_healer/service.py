@@ -347,6 +347,7 @@ class FlowHealerService:
                             "reports": preflight_report_rows,
                         },
                         "app_server_metrics": _app_server_metrics(runtime.store),
+                        "codex_native_multi_agent_metrics": _codex_native_multi_agent_metrics(runtime.store),
                         "swarm_metrics": _swarm_metrics(runtime.store),
                         "failure_domain_metrics": _failure_domain_metrics(runtime.store),
                         "reliability_canary": _reliability_canary_metrics(runtime.store),
@@ -701,6 +702,18 @@ def _swarm_metrics(store: SQLiteStore) -> dict[str, object]:
         "strategy_counts": strategy_counts,
         "skipped_domain": _safe_state_int(store, "healer_swarm_skipped_domain"),
         "skipped_by_domain": skipped_by_domain,
+    }
+
+
+def _codex_native_multi_agent_metrics(store: SQLiteStore) -> dict[str, int]:
+    return {
+        "attempts": _safe_state_int(store, "healer_codex_native_multi_agent_attempts"),
+        "success": _safe_state_int(store, "healer_codex_native_multi_agent_success"),
+        "recovery_attempts": _safe_state_int(store, "healer_codex_native_multi_agent_recovery_attempts"),
+        "recovery_success": _safe_state_int(store, "healer_codex_native_multi_agent_recovery_success"),
+        "fallback_to_swarm": _safe_state_int(store, "healer_codex_native_multi_agent_fallback_to_swarm"),
+        "skipped_backend": _safe_state_int(store, "healer_codex_native_multi_agent_skipped_backend"),
+        "skipped_task_kind": _safe_state_int(store, "healer_codex_native_multi_agent_skipped_task_kind"),
     }
 
 

@@ -144,6 +144,8 @@ class HealerRunner:
         max_diff_lines: int,
         max_failed_tests_allowed: int,
         targeted_tests: list[str],
+        native_multi_agent_profile: str = "",
+        native_multi_agent_max_subagents: int = 0,
     ) -> HealerRunResult:
         self._bind_connector_workspace(workspace)
         resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
@@ -198,6 +200,8 @@ class HealerRunner:
             feedback_context=feedback_context,
             language_hint=language_hint,
             prefer_workspace_edits=workspace_edit_mode,
+            native_multi_agent_profile=native_multi_agent_profile,
+            native_multi_agent_max_subagents=native_multi_agent_max_subagents,
         )
         proposer_output = ""
         failure_class = ""
@@ -406,6 +410,8 @@ class HealerRunner:
                             continue_same_thread=False,
                             attempt_number=proposer_attempt,
                             issue_id=issue_id,
+                            native_multi_agent_profile=native_multi_agent_profile,
+                            native_multi_agent_max_subagents=native_multi_agent_max_subagents,
                         )
                         app_server_forced_serialized_recovery_attempted = True
                         _annotate_app_server_recovery_status(workspace_status)
@@ -552,6 +558,8 @@ class HealerRunner:
                     require_exact_target_file_bodies=same_thread_retry,
                     attempt_number=proposer_attempt,
                     issue_id=issue_id,
+                    native_multi_agent_profile=native_multi_agent_profile,
+                    native_multi_agent_max_subagents=native_multi_agent_max_subagents,
                 )
                 continue
             patch = _extract_diff_block(proposer_output)
@@ -581,6 +589,8 @@ class HealerRunner:
                         prefer_workspace_edits=workspace_edit_mode,
                         attempt_number=proposer_attempt,
                         issue_id=issue_id,
+                        native_multi_agent_profile=native_multi_agent_profile,
+                        native_multi_agent_max_subagents=native_multi_agent_max_subagents,
                     )
                     continue
                 patch_applied, patch_apply_error = _apply_unified_diff_patch(
@@ -705,6 +715,8 @@ class HealerRunner:
                 prefer_workspace_edits=workspace_edit_mode,
                 attempt_number=proposer_attempt,
                 issue_id=issue_id,
+                native_multi_agent_profile=native_multi_agent_profile,
+                native_multi_agent_max_subagents=native_multi_agent_max_subagents,
             )
 
         workspace_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
@@ -2432,9 +2444,19 @@ def _build_retry_prompt(
     require_exact_target_file_bodies: bool = False,
     attempt_number: int = 0,
     issue_id: str = "",
+    native_multi_agent_profile: str = "",
+    native_multi_agent_max_subagents: int = 0,
 ) -> str:
     tailored_lines: list[str] = []
     sandbox_scoped = _is_issue_scoped_sandbox(task_spec)
+    native_guidance = _native_multi_agent_guidance(
+        task_spec=task_spec,
+        profile=native_multi_agent_profile,
+        max_subagents=native_multi_agent_max_subagents,
+        prefer_workspace_edits=prefer_workspace_edits,
+    ).strip()
+    if native_guidance:
+        tailored_lines.append(native_guidance)
     if failure_class in {"no_patch", "empty_diff"} or _is_no_workspace_change_failure_class(failure_class):
         if prefer_workspace_edits:
             tailored_lines.append(
@@ -2570,6 +2592,8 @@ def _build_proposer_prompt(
     feedback_context: str,
     language_hint: str,
     prefer_workspace_edits: bool,
+    native_multi_agent_profile: str = "",
+    native_multi_agent_max_subagents: int = 0,
 ) -> str:
     output_contract = (
         "Your output MUST be direct file edits via your file editor tools."
@@ -2602,11 +2626,62 @@ def _build_proposer_prompt(
         [
             task_spec_to_prompt_block(task_spec),
             _task_execution_instructions(task_spec),
+            _native_multi_agent_guidance(
+                task_spec=task_spec,
+                profile=native_multi_agent_profile,
+                max_subagents=native_multi_agent_max_subagents,
+                prefer_workspace_edits=prefer_workspace_edits,
+            ),
             _output_rules(task_spec, prefer_workspace_edits=prefer_workspace_edits),
             _completion_criteria(task_spec, prefer_workspace_edits=prefer_workspace_edits),
         ]
     )
     return "\n\n".join(section.strip() for section in sections if section.strip())
+
+
+def _native_multi_agent_guidance(
+    *,
+    task_spec: HealerTaskSpec | None,
+    profile: str,
+    max_subagents: int,
+    prefer_workspace_edits: bool,
+) -> str:
+    normalized_profile = str(profile or "").strip().lower()
+    if normalized_profile not in {"initial", "recovery"}:
+        return ""
+    if task_spec is None:
+        return ""
+    normalized_task_kind = str(task_spec.task_kind or "").strip().lower()
+    if normalized_task_kind not in {"fix", "build", "edit"}:
+        return ""
+    limit = max(1, int(max_subagents or 3))
+    final_output = (
+        "produce the final workspace edit"
+        if prefer_workspace_edits
+        else "produce the final patch"
+    )
+    lines = ["### Codex Native Multi-Agent"]
+    if normalized_profile == "recovery":
+        lines.append(
+            "This is a native multi-agent recovery attempt. Re-evaluate the failure before changing the fix path."
+        )
+        lines.append(
+            f"Spawn at most {limit} read-only subagents using the `explorer`, `test_forensics`, and `patch_critic` roles."
+        )
+        lines.append(f"Synthesize their findings, then {final_output} in the parent session.")
+    else:
+        lines.append(
+            f"Use Codex native multi-agent only for read-heavy parallel work. Spawn at most {limit} read-only subagents."
+        )
+        lines.append("Use the `explorer`, `test_forensics`, and `patch_critic` roles when delegation will reduce context noise.")
+    lines.append(
+        "Delegate only codebase exploration, failing-test analysis, or patch critique. Do not delegate the immediate blocking code change."
+    )
+    lines.append(f"Only the parent session may {final_output}.")
+    lines.append(
+        "If child-agent findings conflict, choose the narrowest fix path that satisfies the issue contract and validation."
+    )
+    return "\n".join(lines)
 
 
 def _task_execution_instructions(task_spec: HealerTaskSpec) -> str:

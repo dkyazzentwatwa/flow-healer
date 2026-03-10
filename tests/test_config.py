@@ -541,3 +541,28 @@ def test_app_config_loads_swarm_settings(tmp_path: Path) -> None:
     assert repo.healer_swarm_orphan_subagent_ttl_seconds == 1200
     assert repo.healer_swarm_backend_strategy == "match_selected_backend"
     assert repo.healer_swarm_trigger_failure_classes == ["tests_failed", "verifier_failed"]
+
+
+def test_app_config_loads_codex_native_multi_agent_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "service:\n"
+            "  state_root: ~/.flow-healer\n"
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    repo_slug: owner/repo\n"
+            "    codex_native_multi_agent_enabled: true\n"
+            "    codex_native_multi_agent_max_subagents: 5\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_codex_native_multi_agent_enabled is True
+    assert repo.healer_codex_native_multi_agent_max_subagents == 5

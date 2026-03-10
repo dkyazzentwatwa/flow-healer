@@ -828,6 +828,50 @@ class AutonomousHealerLoop:
                 return True
         return False
 
+    def _codex_native_multi_agent_max_subagents(self) -> int:
+        return max(1, int(getattr(self.settings, "healer_codex_native_multi_agent_max_subagents", 3)))
+
+    def _codex_native_multi_agent_profile_for_task(
+        self,
+        *,
+        selected_backend: str,
+        task_spec: HealerTaskSpec,
+        recovery: bool,
+        count_skips: bool = False,
+    ) -> str:
+        if not bool(getattr(self.settings, "healer_codex_native_multi_agent_enabled", False)):
+            return ""
+        if str(selected_backend or "").strip().lower() != "exec":
+            if count_skips:
+                self._increment_state_counter("healer_codex_native_multi_agent_skipped_backend")
+            return ""
+        normalized_task_kind = str(task_spec.task_kind or "").strip().lower()
+        if normalized_task_kind not in {"fix", "build", "edit"} or task_spec.validation_profile != "code_change":
+            if count_skips:
+                self._increment_state_counter("healer_codex_native_multi_agent_skipped_task_kind")
+            return ""
+        return "recovery" if recovery else "initial"
+
+    def _native_codex_recovery_feedback_context(
+        self,
+        *,
+        feedback_context: str,
+        failure_class: str,
+        failure_reason: str,
+        proposer_output: str,
+    ) -> str:
+        parts = [feedback_context.strip()] if feedback_context.strip() else []
+        parts.append(
+            "[native_codex_recovery]\n"
+            f"Failure class: {failure_class}\n"
+            f"Failure reason: {failure_reason}\n"
+            "Use native multi-agent delegation to re-check root cause before producing the final patch."
+        )
+        trimmed_output = str(proposer_output or "").strip()
+        if trimmed_output:
+            parts.append(f"Previous proposer output (truncated):\n{trimmed_output[:4000]}")
+        return "\n\n".join(part for part in parts if part).strip()
+
     def _record_swarm_metrics(self, *, backend: str, outcome: SwarmRecoveryOutcome) -> None:
         self._increment_state_counter("healer_swarm_runs")
         self._increment_state_counter(f"healer_swarm_runs_backend_{backend}")
@@ -836,6 +880,14 @@ class AutonomousHealerLoop:
             self._increment_state_counter("healer_swarm_recovered")
             return
         self._increment_state_counter("healer_swarm_unrecovered")
+
+    def _record_codex_native_multi_agent_attempt(self) -> None:
+        self._increment_state_counter("healer_codex_native_multi_agent_attempts")
+
+    def _record_codex_native_multi_agent_recovery_attempt(self, *, success: bool) -> None:
+        self._increment_state_counter("healer_codex_native_multi_agent_recovery_attempts")
+        if success:
+            self._increment_state_counter("healer_codex_native_multi_agent_recovery_success")
 
     def _emit_swarm_event(
         self,
@@ -1013,6 +1065,58 @@ class AutonomousHealerLoop:
             attempt_id=attempt_id,
             payload=normalized_payload,
         )
+
+    def _maybe_recover_with_native_codex(
+        self,
+        *,
+        selected_backend: str,
+        selected_runner: HealerRunner,
+        issue: HealerIssue,
+        task_spec: HealerTaskSpec,
+        learned_context: str,
+        feedback_context: str,
+        failure_class: str,
+        failure_reason: str,
+        workspace: Path,
+        targeted_tests: list[str],
+        proposer_output: str = "",
+    ) -> HealerRunResult | None:
+        profile = self._codex_native_multi_agent_profile_for_task(
+            selected_backend=selected_backend,
+            task_spec=task_spec,
+            recovery=True,
+            count_skips=True,
+        )
+        if not profile:
+            return None
+        failure_domain = classify_failure_domain(
+            failure_class=failure_class,
+            failure_reason=failure_reason,
+        )
+        if failure_domain != "code":
+            return None
+        result = selected_runner.run_attempt(
+            issue_id=issue.issue_id,
+            issue_title=issue.title,
+            issue_body=issue.body,
+            task_spec=task_spec,
+            learned_context=learned_context,
+            feedback_context=self._native_codex_recovery_feedback_context(
+                feedback_context=feedback_context,
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+                proposer_output=proposer_output,
+            ),
+            workspace=workspace,
+            max_diff_files=self.settings.healer_max_diff_files,
+            max_diff_lines=self.settings.healer_max_diff_lines,
+            max_failed_tests_allowed=self.settings.healer_max_failed_tests_allowed,
+            targeted_tests=targeted_tests,
+            native_multi_agent_profile=profile,
+            native_multi_agent_max_subagents=self._codex_native_multi_agent_max_subagents(),
+        )
+        self._record_codex_native_multi_agent_recovery_attempt(success=result.success)
+        return result
 
     def _maybe_recover_with_swarm(
         self,
@@ -2614,6 +2718,15 @@ class AutonomousHealerLoop:
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                 )
+            native_multi_agent_profile = self._codex_native_multi_agent_profile_for_task(
+                selected_backend=selected_backend,
+                task_spec=task_spec,
+                recovery=False,
+                count_skips=True,
+            )
+            native_multi_agent_max_subagents = self._codex_native_multi_agent_max_subagents()
+            if native_multi_agent_profile:
+                self._record_codex_native_multi_agent_attempt()
             run_result = selected_runner.run_attempt(
                 issue_id=issue.issue_id,
                 issue_title=issue.title,
@@ -2626,7 +2739,11 @@ class AutonomousHealerLoop:
                 max_diff_lines=self.settings.healer_max_diff_lines,
                 max_failed_tests_allowed=self.settings.healer_max_failed_tests_allowed,
                 targeted_tests=targeted_tests,
+                native_multi_agent_profile=native_multi_agent_profile,
+                native_multi_agent_max_subagents=native_multi_agent_max_subagents,
             )
+            if native_multi_agent_profile and run_result.success:
+                self._increment_state_counter("healer_codex_native_multi_agent_success")
             actual_diff = run_result.diff_paths
             test_summary = dict(run_result.test_summary or {})
             self._record_app_server_attempt_metrics(
@@ -2640,25 +2757,51 @@ class AutonomousHealerLoop:
             )
             proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
             if not run_result.success:
-                swarm_outcome = self._maybe_recover_with_swarm(
+                swarm_outcome: SwarmRecoveryOutcome | None = None
+                native_recovery_result = self._maybe_recover_with_native_codex(
                     selected_backend=selected_backend,
-                    selected_swarm=selected_swarm,
                     selected_runner=selected_runner,
                     issue=issue,
-                    attempt_id=attempt_id,
-                    attempt_no=attempt_no,
                     task_spec=task_spec,
                     learned_context=learned_context,
                     feedback_context=feedback_context,
                     failure_class=run_result.failure_class,
                     failure_reason=run_result.failure_reason,
                     proposer_output=run_result.proposer_output,
-                    test_summary=dict(run_result.test_summary or {}),
-                    verifier_summary={},
-                    workspace_status=run_result.workspace_status,
                     workspace=workspace.path,
                     targeted_tests=targeted_tests,
                 )
+                if native_recovery_result is not None:
+                    run_result = native_recovery_result
+                    actual_diff = run_result.diff_paths
+                    test_summary = dict(run_result.test_summary or {})
+                    proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
+                    self._record_app_server_recovery_metrics(
+                        connector=selected_connector,
+                        workspace_status=run_result.workspace_status,
+                    )
+                    if not run_result.success:
+                        self._increment_state_counter("healer_codex_native_multi_agent_fallback_to_swarm")
+                if not run_result.success:
+                    swarm_outcome = self._maybe_recover_with_swarm(
+                        selected_backend=selected_backend,
+                        selected_swarm=selected_swarm,
+                        selected_runner=selected_runner,
+                        issue=issue,
+                        attempt_id=attempt_id,
+                        attempt_no=attempt_no,
+                        task_spec=task_spec,
+                        learned_context=learned_context,
+                        feedback_context=feedback_context,
+                        failure_class=run_result.failure_class,
+                        failure_reason=run_result.failure_reason,
+                        proposer_output=run_result.proposer_output,
+                        test_summary=dict(run_result.test_summary or {}),
+                        verifier_summary={},
+                        workspace_status=run_result.workspace_status,
+                        workspace=workspace.path,
+                        targeted_tests=targeted_tests,
+                    )
                 if swarm_outcome is not None:
                     swarm_summary = _append_swarm_cycle(swarm_summary, swarm_outcome)
                     if swarm_outcome.recovered and swarm_outcome.run_result is not None:
@@ -2775,25 +2918,72 @@ class AutonomousHealerLoop:
                     attempt_no,
                     failure_reason,
                 )
-                swarm_outcome = self._maybe_recover_with_swarm(
+                swarm_outcome: SwarmRecoveryOutcome | None = None
+                native_recovery_result = self._maybe_recover_with_native_codex(
                     selected_backend=selected_backend,
-                    selected_swarm=selected_swarm,
                     selected_runner=selected_runner,
                     issue=issue,
-                    attempt_id=attempt_id,
-                    attempt_no=attempt_no,
                     task_spec=task_spec,
                     learned_context=learned_context,
                     feedback_context=feedback_context,
                     failure_class="verifier_failed",
                     failure_reason=verification.summary,
                     proposer_output=run_result.proposer_output,
-                    test_summary=dict(run_result.test_summary or {}),
-                    verifier_summary=verifier_summary,
-                    workspace_status=run_result.workspace_status,
                     workspace=workspace.path,
                     targeted_tests=targeted_tests,
                 )
+                if native_recovery_result is not None:
+                    run_result = native_recovery_result
+                    actual_diff = run_result.diff_paths
+                    test_summary = dict(run_result.test_summary or {})
+                    proposer_output_excerpt = (run_result.proposer_output or "")[:1500]
+                    if not run_result.success:
+                        self._increment_state_counter("healer_codex_native_multi_agent_fallback_to_swarm")
+                    else:
+                        if _abort_for_lost_lease():
+                            return
+                        verification = selected_verifier.verify(
+                            issue_id=issue.issue_id,
+                            issue_title=issue.title,
+                            issue_body=issue.body,
+                            task_spec=task_spec,
+                            diff_paths=run_result.diff_paths,
+                            test_summary=run_result.test_summary,
+                            proposer_output=run_result.proposer_output,
+                            learned_context=learned_context,
+                            language=detected_language,
+                            workspace_status=run_result.workspace_status,
+                            staged_diff_content=self._resolve_staged_diff_content(run_result=run_result, workspace=workspace.path),
+                            staged_diff_metadata=self._resolve_staged_diff_metadata(run_result=run_result),
+                        )
+                        verifier_summary = {
+                            "passed": verification.passed,
+                            "summary": verification.summary,
+                            "verdict": getattr(verification, "verdict", "pass" if verification.passed else "hard_fail"),
+                            "hard_failure": bool(getattr(verification, "hard_failure", not verification.passed)),
+                            "parse_error": bool(getattr(verification, "parse_error", False)),
+                            "policy": _verifier_policy_for_settings(self.settings),
+                        }
+                if _should_block_on_verification(self.settings, verification):
+                    swarm_outcome = self._maybe_recover_with_swarm(
+                        selected_backend=selected_backend,
+                        selected_swarm=selected_swarm,
+                        selected_runner=selected_runner,
+                        issue=issue,
+                        attempt_id=attempt_id,
+                        attempt_no=attempt_no,
+                        task_spec=task_spec,
+                        learned_context=learned_context,
+                        feedback_context=feedback_context,
+                        failure_class="verifier_failed",
+                        failure_reason=verification.summary,
+                        proposer_output=run_result.proposer_output,
+                        test_summary=dict(run_result.test_summary or {}),
+                        verifier_summary=verifier_summary,
+                        workspace_status=run_result.workspace_status,
+                        workspace=workspace.path,
+                        targeted_tests=targeted_tests,
+                    )
                 if swarm_outcome is not None:
                     swarm_summary = _append_swarm_cycle(swarm_summary, swarm_outcome)
                     if swarm_outcome.recovered and swarm_outcome.run_result is not None:

@@ -109,6 +109,8 @@ class RelaySettings:
     healer_circuit_breaker_cooldown_seconds: int = 900
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
+    healer_codex_native_multi_agent_enabled: bool = False
+    healer_codex_native_multi_agent_max_subagents: int = 3
     healer_swarm_enabled: bool = False
     healer_swarm_mode: str = "failure_repair"
     healer_swarm_max_parallel_agents: int = 4
@@ -262,6 +264,13 @@ class AppConfig:
                     ),
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
+                    healer_codex_native_multi_agent_enabled=bool(
+                        item.get("codex_native_multi_agent_enabled", False)
+                    ),
+                    healer_codex_native_multi_agent_max_subagents=max(
+                        1,
+                        int(item.get("codex_native_multi_agent_max_subagents") or 3),
+                    ),
                     healer_swarm_enabled=bool(item.get("swarm_enabled", False)),
                     healer_swarm_mode=str(item.get("swarm_mode") or "failure_repair"),
                     healer_swarm_max_parallel_agents=int(item.get("swarm_max_parallel_agents") or 4),

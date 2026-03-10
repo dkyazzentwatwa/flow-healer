@@ -48,6 +48,10 @@ def _make_loop(store, **overrides):
         healer_enable_review=overrides.get("healer_enable_review", True),
         healer_issue_contract_mode=overrides.get("healer_issue_contract_mode", "lenient"),
         healer_parse_confidence_threshold=overrides.get("healer_parse_confidence_threshold", 0.3),
+        healer_codex_native_multi_agent_enabled=overrides.get("healer_codex_native_multi_agent_enabled", False),
+        healer_codex_native_multi_agent_max_subagents=overrides.get(
+            "healer_codex_native_multi_agent_max_subagents", 3
+        ),
         healer_swarm_enabled=overrides.get("healer_swarm_enabled", False),
         healer_swarm_mode=overrides.get("healer_swarm_mode", "failure_repair"),
         healer_swarm_max_parallel_agents=overrides.get("healer_swarm_max_parallel_agents", 4),
@@ -1675,6 +1679,137 @@ def test_maybe_recover_with_swarm_runs_for_code_failure_domain(tmp_path):
     assert store.get_state("healer_swarm_runs") == "1"
     assert store.get_state("healer_swarm_unrecovered") == "1"
     assert store.get_state("healer_swarm_skipped_domain") in {None, ""}
+
+
+def test_maybe_recover_with_native_codex_skips_non_exec_backend(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_codex_native_multi_agent_enabled=True)
+    workspace = tmp_path / "workspaces" / "issue-504463"
+    workspace.mkdir(parents=True)
+    issue = HealerIssue(
+        issue_id="504463",
+        repo="owner/repo",
+        title="Issue 504463",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+        html_url="https://github.com/owner/repo/issues/504463",
+    )
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=("src/flow_healer/service.py",),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+    )
+
+    outcome = loop._maybe_recover_with_native_codex(
+        selected_backend="app_server",
+        selected_runner=loop.runner,
+        issue=issue,
+        task_spec=task_spec,
+        learned_context="",
+        feedback_context="",
+        failure_class="tests_failed",
+        failure_reason="AssertionError: expected 200 got 500",
+        workspace=workspace,
+        targeted_tests=[],
+    )
+
+    assert outcome is None
+    loop.runner.run_attempt.assert_not_called()
+    assert store.get_state("healer_codex_native_multi_agent_skipped_backend") == "1"
+
+
+def test_process_claimed_issue_tries_native_codex_recovery_before_swarm(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="504464",
+        repo="owner/repo",
+        title="Issue 504464",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(
+        store,
+        healer_enable_review=False,
+        healer_codex_native_multi_agent_enabled=True,
+        healer_swarm_enabled=True,
+    )
+    workspace = tmp_path / "workspaces" / "issue-504464"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "504464", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-504464")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=False,
+        diff_paths=[],
+        test_summary={"failed_tests": 1},
+        proposer_output="Initial attempt failed",
+        workspace_status={},
+        failure_class="tests_failed",
+        failure_reason="AssertionError",
+        failure_fingerprint="",
+    )
+    call_order: list[str] = []
+    loop._maybe_recover_with_native_codex = MagicMock(
+        side_effect=lambda **kwargs: call_order.append("native") or None
+    )
+    expected_outcome = SwarmRecoveryOutcome(
+        recovered=True,
+        strategy="repair",
+        summary="Swarm repaired the failing path.",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="repair",
+            summary="Swarm repaired the failing path.",
+            root_cause="bad branch",
+            edit_scope=("src/flow_healer/service.py",),
+            targeted_tests=(),
+            validation_focus=("service",),
+        ),
+        repair_output="Edited service",
+        run_result=SimpleNamespace(
+            success=True,
+            diff_paths=["src/flow_healer/service.py"],
+            test_summary={"failed_tests": 0},
+            proposer_output="Edited service",
+            workspace_status={},
+            failure_class="",
+            failure_reason="",
+            failure_fingerprint="",
+        ),
+    )
+    loop._maybe_recover_with_swarm = MagicMock(
+        side_effect=lambda **kwargs: call_order.append("swarm") or expected_outcome
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+    loop.tracker.open_or_update_pr.return_value = PullRequestResult(
+        number=246,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/246",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="ok",
+        verdict="pass",
+        hard_failure=False,
+        parse_error=False,
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    assert call_order == ["native", "swarm"]
+    loop._maybe_recover_with_native_codex.assert_called_once()
 
 
 def test_process_claimed_issue_swarm_infra_pause_requeues_with_infra_failure_class(tmp_path):

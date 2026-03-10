@@ -3039,6 +3039,89 @@ def test_build_proposer_prompt_prefers_workspace_edits_for_app_server_docs_tasks
     assert "end with a brief operator summary" in lowered
 
 
+def test_build_proposer_prompt_adds_native_multi_agent_guidance_for_code_tasks(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    prompt = _build_proposer_prompt(
+        issue_id="915",
+        issue_title="Fix runtime routing",
+        issue_body="Fix src/flow_healer/service.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("src/flow_healer/service.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        learned_context="",
+        feedback_context="",
+        language_hint="",
+        prefer_workspace_edits=False,
+        native_multi_agent_profile="initial",
+        native_multi_agent_max_subagents=3,
+    )
+
+    lowered = prompt.lower()
+    assert "codex native multi-agent" in lowered
+    assert "spawn at most 3 read-only subagents" in lowered
+    assert "explorer" in lowered
+    assert "test_forensics" in lowered
+    assert "patch_critic" in lowered
+    assert "only the parent session may produce the final patch" in lowered
+
+
+def test_build_proposer_prompt_skips_native_multi_agent_guidance_for_docs_tasks(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    prompt = _build_proposer_prompt(
+        issue_id="916",
+        issue_title="Write runtime note",
+        issue_body="Create docs/runtime-reset-smoke.md",
+        task_spec=HealerTaskSpec(
+            task_kind="docs",
+            output_mode="patch",
+            output_targets=("docs/runtime-reset-smoke.md",),
+            tool_policy="repo_only",
+            validation_profile="artifact_only",
+        ),
+        workspace=workspace,
+        learned_context="",
+        feedback_context="",
+        language_hint="",
+        prefer_workspace_edits=False,
+        native_multi_agent_profile="initial",
+        native_multi_agent_max_subagents=3,
+    )
+
+    assert "codex native multi-agent" not in prompt.lower()
+
+
+def test_build_retry_prompt_adds_native_multi_agent_recovery_guidance():
+    prompt = _build_retry_prompt(
+        base_prompt="Base prompt",
+        failure_class="tests_failed",
+        failure_reason="AssertionError",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("src/demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        prefer_workspace_edits=False,
+        native_multi_agent_profile="recovery",
+        native_multi_agent_max_subagents=3,
+    )
+
+    lowered = prompt.lower()
+    assert "native multi-agent recovery attempt" in lowered
+    assert "spawn at most 3 read-only subagents" in lowered
+    assert "synthesize their findings, then produce the final patch in the parent session" in lowered
+
+
 def test_run_attempt_app_server_artifact_task_materializes_output_without_diff(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

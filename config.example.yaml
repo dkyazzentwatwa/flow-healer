@@ -89,6 +89,8 @@ repos:
     circuit_breaker_cooldown_seconds: 900
     learning_enabled: true
     enable_review: true
+    codex_native_multi_agent_enabled: false
+    codex_native_multi_agent_max_subagents: 3
     swarm_enabled: false
     swarm_mode: failure_repair
     swarm_max_parallel_agents: 4

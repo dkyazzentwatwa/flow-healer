@@ -187,6 +187,45 @@ def test_status_rows_report_swarm_domain_skip_counters(tmp_path) -> None:
     assert swarm_metrics["skipped_by_domain"] == {"infra": 2, "contract": 1, "unknown": 1}
 
 
+def test_status_rows_report_codex_native_multi_agent_counters(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_state("healer_codex_native_multi_agent_attempts", "3")
+    runtime.store.set_state("healer_codex_native_multi_agent_success", "1")
+    runtime.store.set_state("healer_codex_native_multi_agent_recovery_attempts", "2")
+    runtime.store.set_state("healer_codex_native_multi_agent_recovery_success", "1")
+    runtime.store.set_state("healer_codex_native_multi_agent_fallback_to_swarm", "1")
+    runtime.store.set_state("healer_codex_native_multi_agent_skipped_backend", "4")
+    runtime.store.set_state("healer_codex_native_multi_agent_skipped_task_kind", "2")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    assert rows[0]["codex_native_multi_agent_metrics"] == {
+        "attempts": 3,
+        "success": 1,
+        "recovery_attempts": 2,
+        "recovery_success": 1,
+        "fallback_to_swarm": 1,
+        "skipped_backend": 4,
+        "skipped_task_kind": 2,
+    }
+
+
 def test_status_rows_report_failure_domain_counters(tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
