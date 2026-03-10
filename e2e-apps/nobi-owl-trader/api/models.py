@@ -1,11 +1,27 @@
-from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Any
+from dataclasses import asdict, dataclass
+from typing import Optional, List, Dict, Any, ClassVar
 from datetime import datetime, timedelta
 import json
 from api.database import get_db_connection
 
+
+class SerializableModel:
+    _bool_fields: ClassVar[tuple[str, ...]] = ()
+
+    def __post_init__(self):
+        for field_name in self._bool_fields:
+            setattr(self, field_name, bool(getattr(self, field_name)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True)
+
+
 @dataclass
-class Trade:
+class Trade(SerializableModel):
+    _bool_fields: ClassVar[tuple[str, ...]] = ("paper", "is_trailing")
     id: str
     timestamp: int
     symbol: str
@@ -25,7 +41,12 @@ class Trade:
     lowest_price: Optional[float] = None
 
 @dataclass
-class AutomationRule:
+class AutomationRule(SerializableModel):
+    _bool_fields: ClassVar[tuple[str, ...]] = (
+        "only_if_in_position",
+        "reduce_only",
+        "is_active",
+    )
     id: str
     name: str
     symbol: str
@@ -50,7 +71,7 @@ class AutomationRule:
     conditions: Optional[str] = None # JSON string of logic conditions
 
 @dataclass
-class PortfolioSnapshot:
+class PortfolioSnapshot(SerializableModel):
     date: str
     total_value: float
     cash_balance: float
@@ -58,7 +79,7 @@ class PortfolioSnapshot:
     realized_pnl_today: float
 
 @dataclass
-class LogEntry:
+class LogEntry(SerializableModel):
     id: Optional[int]
     timestamp: int
     level: str
