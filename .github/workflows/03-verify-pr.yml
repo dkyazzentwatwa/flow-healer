@@ -33,3 +33,23 @@ jobs:
       - name: Lightweight validation
         run: |
           pytest -q
+
+      - name: Run reliability canary benchmark pack
+        run: |
+          python scripts/run_reliability_canary.py --output reliability-canary-report.json
+
+      - name: Enforce reliability canary gate
+        run: |
+          python scripts/evaluate_reliability_canary_gate.py \
+            --report reliability-canary-report.json \
+            --policy .github/reliability-canary-policy.json \
+            --mode enforce \
+            --summary-output reliability-canary-summary.md
+
+      - name: Upload reliability canary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-canary-manual-verify
+          path: |
+            reliability-canary-report.json
+            reliability-canary-summary.md

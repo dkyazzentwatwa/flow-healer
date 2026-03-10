@@ -1,0 +1,28 @@
+{
+  "required_groups": [
+    "docs",
+    "code",
+    "mixed"
+  ],
+  "minimum_first_pass_success_rate": 1.0,
+  "maximum_no_op_rate": 0.1,
+  "maximum_wrong_root_execution_rate": 0.1,
+  "maximum_mean_time_to_valid_pr_minutes": 6.0,
+  "maximum_group_duration_seconds": {
+    "docs": 240,
+    "code": 300,
+    "mixed": 240
+  },
+  "baseline": {
+    "first_pass_success_rate": 1.0,
+    "wrong_root_execution_rate": 0.0,
+    "no_op_rate": 0.0,
+    "mean_time_to_valid_pr_minutes": 1.0
+  },
+  "allowed_regression": {
+    "first_pass_success_rate": 0.0,
+    "wrong_root_execution_rate": 0.05,
+    "no_op_rate": 0.05,
+    "mean_time_to_valid_pr_minutes": 3.0
+  }
+}
