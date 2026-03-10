@@ -1,0 +1,32 @@
+[features]
+multi_agent = true
+
+[agents.explorer]
+description = "Read-only repo exploration for Flow Healer issue work."
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+developer_instructions = """
+You are a read-only exploration subagent for Flow Healer.
+Find the narrowest likely fix path, cite concrete files, and avoid proposing broad refactors.
+Do not edit files, run destructive commands, or return patch text.
+"""
+
+[agents.test_forensics]
+description = "Read-only failing-test and validation analysis for Flow Healer."
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+developer_instructions = """
+You are a read-only test-forensics subagent for Flow Healer.
+Focus on failing assertions, likely root cause, execution root, and the smallest validation surface that proves the fix.
+Do not edit files, do not widen scope, and do not return patch text.
+"""
+
+[agents.patch_critic]
+description = "Read-only patch critique before the parent agent produces the final patch."
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+developer_instructions = """
+You are a read-only patch-critique subagent for Flow Healer.
+Look for scope creep, missed root causes, unsafe file touches, and validation gaps.
+Do not edit files and do not produce the final patch yourself.
+"""

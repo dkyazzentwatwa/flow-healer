@@ -429,7 +429,7 @@ def _python_framework_templates() -> tuple[IssueTemplate, ...]:
                 "e2e-smoke/py-django/app/add.py",
                 "e2e-smoke/py-django/tests/test_add.py",
             ),
-            validation_command="cd e2e-smoke/py-django && pytest -q",
+            validation_command="cd e2e-smoke/py-django && python -m pytest -q",
         ),
         IssueTemplate(
             kind="Python framework regression: Flask service behavior",

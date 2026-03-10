@@ -265,6 +265,44 @@ def test_render_dashboard_includes_reliability_and_domain_metric_cards(tmp_path:
     assert "x-text='activities.length'" not in html
 
 
+def test_render_dashboard_includes_gamification_cards_and_getters(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Flow Healer Progress" in html
+    assert "Agent Level" in html
+    assert "Flow Cash (Simulated)" in html
+    assert "ROI Multiple" in html
+    assert "get agentPoints()" in html
+    assert "get agentLevel()" in html
+    assert "get simulatedCashUsd()" in html
+    assert "get roiMultiple()" in html
+
+
+def test_render_dashboard_includes_collapsible_infra_ops_deep_dive(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Infra/Ops Deep Dive" in html
+    assert "showAdvancedMetrics" in html
+    assert "@click='showAdvancedMetrics = !showAdvancedMetrics'" in html
+
+
+def test_render_dashboard_includes_dark_light_theme_toggle_and_persistence(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Dark / Light" in html
+    assert "themeMode: 'dark'" in html
+    assert "toggleTheme()" in html
+    assert "initTheme()" in html
+    assert "localStorage.setItem('flow-healer-theme'" in html
+    assert "document.documentElement.setAttribute('data-theme', this.themeMode)" in html
+
+
 def test_render_dashboard_includes_mobile_activity_cards(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 

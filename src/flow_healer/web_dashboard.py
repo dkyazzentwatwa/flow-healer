@@ -190,6 +190,9 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Flow Healer Dashboard</title>
+  <link rel='preconnect' href='https://fonts.googleapis.com'>
+  <link rel='preconnect' href='https://fonts.gstatic.com' crossorigin>
+  <link href='https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap' rel='stylesheet'>
   <script src='https://cdn.tailwindcss.com'></script>
   <script defer src='https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js'></script>
   <script>
@@ -197,21 +200,97 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
       theme: {{
         extend: {{
           fontFamily: {{
-            display: ['ui-sans-serif', 'system-ui', 'sans-serif'],
-            mono: ['SFMono-Regular', 'ui-monospace', 'monospace']
+            display: ['Space Grotesk', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['IBM Plex Mono', 'SFMono-Regular', 'ui-monospace', 'monospace']
           }},
           boxShadow: {{
-            glow: '0 20px 60px rgba(15, 23, 42, 0.45)'
+            glow: '6px 6px 0 rgba(2, 6, 23, 0.95)'
           }}
         }}
       }}
     }}
   </script>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --fh-bg: #0a0a0a;
+      --fh-panel: #121212;
+      --fh-panel-soft: #191919;
+      --fh-panel-mute: #101010;
+      --fh-border: #f3f4f6;
+      --fh-border-soft: #4b5563;
+      --fh-text: #f3f4f6;
+      --fh-muted: #9ca3af;
+      --fh-shadow: rgba(0, 0, 0, 0.92);
+      --fh-atmosphere: linear-gradient(180deg, #050505 0%, #101010 52%, #050505 100%);
+    }}
+    :root[data-theme='light'] {{
+      color-scheme: light;
+      --fh-bg: #f2efe9;
+      --fh-panel: #ffffff;
+      --fh-panel-soft: #f8f4ee;
+      --fh-panel-mute: #ece7dc;
+      --fh-border: #111827;
+      --fh-border-soft: #6b7280;
+      --fh-text: #111827;
+      --fh-muted: #4b5563;
+      --fh-shadow: rgba(17, 24, 39, 0.35);
+      --fh-atmosphere: linear-gradient(180deg, #f7f4ed 0%, #efe9dd 52%, #e8e1d3 100%);
+    }}
+    body {{
+      background: var(--fh-bg) !important;
+      color: var(--fh-text) !important;
+      font-family: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+    }}
+    .app-atmosphere {{
+      background: var(--fh-atmosphere);
+    }}
+    .dashboard-root [class*='rounded-'] {{
+      border-radius: 0.2rem !important;
+    }}
+    .dashboard-root .shadow-glow,
+    .dashboard-root .shadow-2xl,
+    .dashboard-root .shadow-lg {{
+      box-shadow: 6px 6px 0 var(--fh-shadow) !important;
+    }}
+    .dashboard-root .backdrop-blur,
+    .dashboard-root .backdrop-blur-sm,
+    .dashboard-root .backdrop-blur-xl {{
+      backdrop-filter: none !important;
+    }}
+    .dashboard-root .bg-slate-900\\/80,
+    .dashboard-root .bg-slate-900\\/75,
+    .dashboard-root .bg-slate-900\\/70,
+    .dashboard-root .bg-slate-950\\/95,
+    .dashboard-root .bg-slate-950\\/80,
+    .dashboard-root .bg-slate-950\\/20 {{
+      background-color: var(--fh-panel-soft) !important;
+    }}
+    .dashboard-root .bg-white\\/5,
+    .dashboard-root .bg-white\\/\\[0\\.03\\],
+    .dashboard-root .bg-black\\/30 {{
+      background-color: var(--fh-panel-mute) !important;
+    }}
+    .dashboard-root .border-white\\/10,
+    .dashboard-root .border-white\\/5 {{
+      border-color: var(--fh-border-soft) !important;
+    }}
+    .dashboard-root .text-white,
+    .dashboard-root .text-slate-100,
+    .dashboard-root .text-slate-200 {{
+      color: var(--fh-text) !important;
+    }}
+    .dashboard-root .text-slate-300,
+    .dashboard-root .text-slate-400,
+    .dashboard-root .text-slate-500 {{
+      color: var(--fh-muted) !important;
+    }}
+  </style>
 </head>
-<body class='min-h-screen bg-slate-950 text-slate-100'>
-  <div class='absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_30%),radial-gradient(circle_at_top_right,_rgba(244,114,182,0.14),_transparent_28%),linear-gradient(180deg,_#020617_0%,_#0f172a_52%,_#020617_100%)]'></div>
+<body class='min-h-screen'>
+  <div class='app-atmosphere absolute inset-0 -z-10'></div>
 
-  <main class='mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8' x-data='dashboardApp()' x-init='init()' @keydown.window.escape='closeInspector()'>
+  <main class='dashboard-root mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8' x-data='dashboardApp()' x-init='init()' @keydown.window.escape='closeInspector()'>
     {notice_html}
 
     <header class='mb-6 rounded-[32px] border border-white/10 bg-slate-900/80 px-5 py-5 shadow-glow backdrop-blur-xl'>
@@ -228,7 +307,7 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
             </p>
           </div>
         </div>
-        <div class='grid grid-cols-2 gap-3 sm:grid-cols-4'>
+        <div class='grid grid-cols-2 gap-3 sm:grid-cols-5'>
           <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
             <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Refresh</div>
             <div class='mt-2 text-lg font-semibold text-white'>5s</div>
@@ -247,6 +326,14 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
               class='inline-flex items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/15 px-4 py-3 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/20'
             >
               Refresh now
+            </button>
+          </div>
+          <div class='flex items-center justify-end'>
+            <button
+              @click='toggleTheme()'
+              class='inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-slate-100 transition hover:bg-white/10'
+            >
+              Dark / Light
             </button>
           </div>
         </div>
@@ -276,57 +363,124 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
       </div>
     </section>
 
-    <section class='mb-6 grid grid-cols-2 gap-4 xl:grid-cols-6'>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary First Pass</div>
-        <div class='mt-3 text-3xl font-semibold text-emerald-300' x-text='canaryFirstPassRate'></div>
+    <section class='mb-6 rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-5 shadow-glow backdrop-blur'>
+      <div class='flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between'>
+        <div>
+          <h2 class='text-xl font-semibold text-white'>Flow Healer Progress</h2>
+          <p class='mt-1 text-sm text-slate-300'>
+            Educational game mode: points and cash are simulated from live outcomes to make reliability trends easier to learn.
+          </p>
+        </div>
+        <div class='rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] uppercase tracking-[0.24em] text-slate-300'>
+          Simulated & Educational
+        </div>
       </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary No-op</div>
-        <div class='mt-3 text-3xl font-semibold text-amber-300' x-text='canaryNoOpRate'></div>
+      <div class='mt-4 grid grid-cols-2 gap-4 xl:grid-cols-6'>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Agent Level</div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='agentLevel'></div>
+        </div>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Agent Points</div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='agentPoints'></div>
+        </div>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Flow Cash (Simulated)</div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='simulatedCashUsd'></div>
+        </div>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>ROI Multiple</div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='roiMultiple'></div>
+        </div>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Win Rate</div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='winRate'></div>
+        </div>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Resolved vs Failed</div>
+          <div class='mt-2 text-2xl font-semibold text-white' x-text='`${{resolvedCount}} / ${{failedIssueCount}}`'></div>
+        </div>
       </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary Wrong Root</div>
-        <div class='mt-3 text-3xl font-semibold text-rose-300' x-text='canaryWrongRootRate'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary Mean TTVP</div>
-        <div class='mt-3 text-3xl font-semibold text-cyan-200' x-text='canaryMeanTimeToValidPr'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Swarm Domain Skips</div>
-        <div class='mt-3 text-3xl font-semibold text-slate-100' x-text='swarmDomainSkips'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Native Recovery</div>
-        <div class='mt-3 text-3xl font-semibold text-fuchsia-200' x-text='nativeRecoveryRate'></div>
+      <div class='mt-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+        <div class='mb-2 flex items-center justify-between text-xs uppercase tracking-[0.2em] text-slate-400'>
+          <span>XP Progress</span>
+          <span x-text='`${{xpInLevel}} / 1000`'></span>
+        </div>
+        <div class='h-4 border border-white/10 bg-slate-950/20'>
+          <div class='h-full bg-cyan-400/40 transition-all duration-500' :style='`width: ${{xpProgressPct}}%`'></div>
+        </div>
+        <p class='mt-2 text-xs text-slate-300' x-text='`${{xpToNext}} XP to next level`'></p>
       </div>
     </section>
 
-    <section class='mb-6 grid grid-cols-1 gap-4 xl:grid-cols-6'>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Needs Clarification</div>
-        <div class='mt-3 text-3xl font-semibold text-amber-200' x-text='needsClarificationIssues'></div>
+    <section class='mb-6 rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-5 shadow-glow backdrop-blur'>
+      <div class='flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between'>
+        <div>
+          <h2 class='text-xl font-semibold text-white'>Infra/Ops Deep Dive</h2>
+          <p class='mt-1 text-sm text-slate-300'>Expanded diagnostics for canary, swarm routing, failure domains, and retry patterns.</p>
+        </div>
+        <button
+          type='button'
+          @click='showAdvancedMetrics = !showAdvancedMetrics'
+          class='rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10'
+          x-text='showAdvancedMetrics ? "Hide deep dive" : "Show deep dive"'
+        ></button>
       </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Infra</div>
-        <div class='mt-3 text-3xl font-semibold text-rose-200' x-text='failureDomainInfra'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Contract</div>
-        <div class='mt-3 text-3xl font-semibold text-orange-200' x-text='failureDomainContract'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Retry Playbook Runs</div>
-        <div class='mt-3 text-3xl font-semibold text-lime-200' x-text='retryPlaybookRuns'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Retry Hotspot</div>
-        <div class='mt-3 text-2xl font-semibold text-lime-100' x-text='retryPlaybookHotspot'></div>
-      </div>
-      <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
-        <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>7d First-pass Delta</div>
-        <div class='mt-3 text-3xl font-semibold text-cyan-100' x-text='firstPassTrend7d'></div>
+
+      <div x-show='showAdvancedMetrics' x-transition.opacity class='mt-4 space-y-4'>
+        <div class='grid grid-cols-2 gap-4 xl:grid-cols-6'>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary First Pass</div>
+            <div class='mt-3 text-3xl font-semibold text-emerald-300' x-text='canaryFirstPassRate'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary No-op</div>
+            <div class='mt-3 text-3xl font-semibold text-amber-300' x-text='canaryNoOpRate'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary Wrong Root</div>
+            <div class='mt-3 text-3xl font-semibold text-rose-300' x-text='canaryWrongRootRate'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Canary Mean TTVP</div>
+            <div class='mt-3 text-3xl font-semibold text-cyan-200' x-text='canaryMeanTimeToValidPr'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Swarm Domain Skips</div>
+            <div class='mt-3 text-3xl font-semibold text-slate-100' x-text='swarmDomainSkips'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Native Recovery</div>
+            <div class='mt-3 text-3xl font-semibold text-fuchsia-200' x-text='nativeRecoveryRate'></div>
+          </div>
+        </div>
+
+        <div class='grid grid-cols-1 gap-4 xl:grid-cols-6'>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Needs Clarification</div>
+            <div class='mt-3 text-3xl font-semibold text-amber-200' x-text='needsClarificationIssues'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Infra</div>
+            <div class='mt-3 text-3xl font-semibold text-rose-200' x-text='failureDomainInfra'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Failure Domain Contract</div>
+            <div class='mt-3 text-3xl font-semibold text-orange-200' x-text='failureDomainContract'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Retry Playbook Runs</div>
+            <div class='mt-3 text-3xl font-semibold text-lime-200' x-text='retryPlaybookRuns'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>Retry Hotspot</div>
+            <div class='mt-3 text-2xl font-semibold text-lime-100' x-text='retryPlaybookHotspot'></div>
+          </div>
+          <div class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-4 shadow-glow backdrop-blur'>
+            <div class='text-[11px] uppercase tracking-[0.24em] text-slate-400'>7d First-pass Delta</div>
+            <div class='mt-3 text-3xl font-semibold text-cyan-100' x-text='firstPassTrend7d'></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -573,6 +727,8 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
         selectedActivitySnapshot: null,
         generatedAt: '',
         logFiles: [],
+        showAdvancedMetrics: false,
+        themeMode: 'dark',
         kindTabs: [
           {{ value: 'all', label: 'All activity' }},
           {{ value: 'log', label: 'Logs' }},
@@ -586,6 +742,77 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
         get pausedRepos() {{
           return this.rows.filter((row) => !!row.paused).length;
+        }},
+
+        get resolvedCount() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.state_counts || {{}}).resolved || 0), 0);
+        }},
+
+        get failedIssueCount() {{
+          return this.rows.reduce((acc, row) => acc + Number((row.state_counts || {{}}).failed || 0), 0);
+        }},
+
+        get avgFirstPassRate() {{
+          const values = this.rows
+            .map((row) => Number((row.reliability_canary || {{}}).first_pass_success_rate || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return 0;
+          return values.reduce((acc, value) => acc + value, 0) / values.length;
+        }},
+
+        get avgNoOpRate() {{
+          const values = this.rows
+            .map((row) => Number((row.reliability_canary || {{}}).no_op_rate || 0))
+            .filter((value) => !Number.isNaN(value));
+          if (!values.length) return 0;
+          return values.reduce((acc, value) => acc + value, 0) / values.length;
+        }},
+
+        get agentPoints() {{
+          const score = Math.round(
+            (this.resolvedCount * 500)
+            - (this.failedIssueCount * 120)
+            + (this.avgFirstPassRate * 1000)
+            - (this.avgNoOpRate * 500)
+          );
+          return Math.max(0, score);
+        }},
+
+        get agentLevel() {{
+          return Math.floor(this.agentPoints / 1000) + 1;
+        }},
+
+        get xpInLevel() {{
+          return this.agentPoints % 1000;
+        }},
+
+        get xpToNext() {{
+          return 1000 - this.xpInLevel;
+        }},
+
+        get xpProgressPct() {{
+          return Math.max(0, Math.min(100, (this.xpInLevel / 1000) * 100));
+        }},
+
+        get simulatedCashValue() {{
+          const value = (this.resolvedCount * 180) - (this.failedIssueCount * 42);
+          return Math.max(0, value);
+        }},
+
+        get simulatedCashUsd() {{
+          return this.formatCurrency(this.simulatedCashValue);
+        }},
+
+        get roiMultiple() {{
+          const baseline = 600;
+          if (baseline <= 0) return '0.00x';
+          return `${{(this.simulatedCashValue / baseline).toFixed(2)}}x`;
+        }},
+
+        get winRate() {{
+          const total = this.resolvedCount + this.failedIssueCount;
+          if (total <= 0) return '0.0%';
+          return `${{((this.resolvedCount / total) * 100).toFixed(1)}}%`;
         }},
 
         get canaryFirstPassRate() {{
@@ -766,6 +993,7 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
         }},
 
         async init() {{
+          this.initTheme();
           try {{
             const script = document.getElementById('initial-data');
             if (script) {{
@@ -776,6 +1004,34 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
             console.error('Failed to parse initial payload', error);
           }}
           setInterval(() => this.refresh(), this.refreshMs);
+        }},
+
+        initTheme() {{
+          let mode = 'dark';
+          try {{
+            const stored = localStorage.getItem('flow-healer-theme');
+            if (stored === 'light' || stored === 'dark') {{
+              mode = stored;
+            }}
+          }} catch (_error) {{
+            mode = 'dark';
+          }}
+          this.themeMode = mode;
+          this.applyTheme();
+        }},
+
+        applyTheme() {{
+          document.documentElement.setAttribute('data-theme', this.themeMode);
+        }},
+
+        toggleTheme() {{
+          this.themeMode = this.themeMode === 'dark' ? 'light' : 'dark';
+          this.applyTheme();
+          try {{
+            localStorage.setItem('flow-healer-theme', this.themeMode);
+          }} catch (_error) {{
+            console.warn('Theme preference could not be saved');
+          }}
         }},
 
         async refresh() {{
@@ -833,6 +1089,16 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           }} catch (_error) {{
             console.warn('Clipboard write failed');
           }}
+        }},
+
+        formatCurrency(value) {{
+          const amount = Number(value || 0);
+          const rounded = Number.isFinite(amount) ? Math.max(0, amount) : 0;
+          return new Intl.NumberFormat('en-US', {{
+            style: 'currency',
+            currency: 'USD',
+            maximumFractionDigits: 0,
+          }}).format(rounded);
         }},
 
         contextChips(item) {{

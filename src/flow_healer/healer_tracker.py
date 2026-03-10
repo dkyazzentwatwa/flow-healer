@@ -652,6 +652,15 @@ class GitHubHealerTracker:
                     self._record_request_metric(method=method_upper, path=path, status="304", started_at=started_at)
                     return cached_payload
                 reason = self._http_error_reason(exc)
+                if self._is_missing_label_delete_noop(
+                    method=method_upper,
+                    path=path,
+                    status_code=int(exc.code),
+                    reason=reason,
+                ):
+                    # Deleting a label that does not exist is idempotently successful.
+                    self._record_request_metric(method=method_upper, path=path, status=str(exc.code), started_at=started_at)
+                    return []
                 is_rate_limited = self._is_rate_limited_error(exc=exc, reason=reason)
                 self._last_error_class = "github_rate_limited" if is_rate_limited else "github_api_error"
                 self._last_error_reason = reason[:500]
@@ -702,6 +711,14 @@ class GitHubHealerTracker:
                 logger.warning(self._last_error_reason)
                 return {}
         return {}
+
+    @staticmethod
+    def _is_missing_label_delete_noop(*, method: str, path: str, status_code: int, reason: str) -> bool:
+        if method != "DELETE" or status_code != 404:
+            return False
+        if not re.search(r"/issues/[^/]+/labels/[^/]+$", path or ""):
+            return False
+        return "label does not exist" in (reason or "").lower()
 
     def _record_request_metric(self, *, method: str, path: str, status: str, started_at: float) -> None:
         normalized_path = self._normalize_metric_path(path)

@@ -98,3 +98,15 @@ def test_build_issue_drafts_supports_python_framework_family() -> None:
     assert len(drafts) == 1
     assert "e2e-smoke/py-" in drafts[0].body
     assert "Validation:\n- cd e2e-smoke/py-" in drafts[0].body
+
+
+def test_build_issue_drafts_uses_module_pytest_for_django_smoke() -> None:
+    drafts = build_issue_drafts(
+        count=3,
+        prefix="Python framework task",
+        ready_label="healer:ready",
+        family=PYTHON_FRAMEWORK_FAMILY,
+    )
+
+    django_draft = next(draft for draft in drafts if "e2e-smoke/py-django/" in draft.body)
+    assert "Validation:\n- cd e2e-smoke/py-django && python -m pytest -q\n" in django_draft.body

@@ -14,11 +14,17 @@ function isTranscriptCandidate(value: unknown): value is TranscriptCandidate {
 }
 
 function normalizeRole(role: unknown): TranscriptMessage["role"] | null {
-  if (role === "user") {
+  if (typeof role !== "string") {
+    return null;
+  }
+
+  const normalizedRole = role.trim().toLowerCase();
+
+  if (normalizedRole === "user") {
     return "user";
   }
 
-  if (role === "assistant" || role === "bot") {
+  if (normalizedRole === "assistant" || normalizedRole === "bot") {
     return "bot";
   }
 

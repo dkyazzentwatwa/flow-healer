@@ -6,11 +6,11 @@ def test_add() -> None:
 
 
 def test_add_accepts_stringable_values() -> None:
-    class LazyNumber:
+    class DjangoStringable:
         def __init__(self, value: str) -> None:
             self.value = value
 
         def __str__(self) -> str:
             return self.value
 
-    assert add(LazyNumber("2"), LazyNumber("3")) == 5
+    assert add(DjangoStringable("2"), DjangoStringable("3")) == 5

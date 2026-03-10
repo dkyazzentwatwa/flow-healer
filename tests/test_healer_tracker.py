@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+from urllib.error import HTTPError
 from pathlib import Path
 
 from flow_healer.healer_tracker import GitHubHealerTracker
@@ -305,6 +307,26 @@ def test_remove_issue_label(monkeypatch):
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
     assert tracker.remove_issue_label(issue_id="123", label="agent:blocked") is True
+
+
+def test_remove_issue_label_treats_missing_label_404_as_noop(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_urlopen(req, timeout=20):
+        raise HTTPError(
+            req.full_url,
+            404,
+            "Not Found",
+            hdrs={},
+            fp=io.BytesIO(
+                b'{"message":"Label does not exist","documentation_url":"https://docs.github.com/rest/issues/labels#remove-a-label-from-an-issue","status":"404"}'
+            ),
+        )
+
+    monkeypatch.setattr("flow_healer.healer_tracker.urlopen", fake_urlopen)
+
+    assert tracker.remove_issue_label(issue_id="123", label="healer:done-code") is True
 
 
 def test_close_pr_posts_comment_and_closes(monkeypatch):
