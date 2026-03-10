@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -348,6 +349,7 @@ class FlowHealerService:
                         "app_server_metrics": _app_server_metrics(runtime.store),
                         "swarm_metrics": _swarm_metrics(runtime.store),
                         "failure_domain_metrics": _failure_domain_metrics(runtime.store),
+                        "reliability_canary": _reliability_canary_metrics(runtime.store),
                         "recent_attempts": annotated_attempts,
                     }
                 )
@@ -730,6 +732,119 @@ def _worker_runtime_state(store: SQLiteStore) -> dict[str, object]:
         "interrupted_inactive_attempts": _safe_state_int(store, "healer_reconcile_interrupted_inactive_attempts"),
         "interrupted_superseded_attempts": _safe_state_int(store, "healer_reconcile_interrupted_superseded_attempts"),
     }
+
+
+def _reliability_canary_metrics(store: SQLiteStore, *, window: int = 50) -> dict[str, object]:
+    attempts = store.list_recent_healer_attempts(limit=max(1, int(window)))
+    if not attempts:
+        return {
+            "window": max(1, int(window)),
+            "sample_size": 0,
+            "issue_count": 0,
+            "first_pass_success_rate": 0.0,
+            "retries_per_success": 0.0,
+            "wrong_root_execution_rate": 0.0,
+            "no_op_rate": 0.0,
+            "mean_time_to_valid_pr_minutes": 0.0,
+        }
+
+    issue_attempts: dict[str, list[dict[str, object]]] = {}
+    wrong_root_count = 0
+    no_op_count = 0
+    valid_pr_durations: list[float] = []
+    success_states = {"pr_open", "pr_pending_approval"}
+    wrong_root_sources = {"fallback", "language_default", "unknown"}
+
+    for attempt in attempts:
+        issue_id = str(attempt.get("issue_id") or "").strip()
+        if issue_id:
+            issue_attempts.setdefault(issue_id, []).append(attempt)
+        failure_class = str(attempt.get("failure_class") or "").strip()
+        no_op = failure_class in {"no_patch", "empty_diff"} or failure_class.startswith("no_workspace_change")
+        if no_op:
+            no_op_count += 1
+        summary = attempt.get("test_summary") or {}
+        execution_root_source = ""
+        if isinstance(summary, dict):
+            execution_root_source = str(summary.get("execution_root_source") or "").strip().lower()
+        wrong_root = failure_class == "language_unresolved" or execution_root_source in wrong_root_sources
+        if wrong_root:
+            wrong_root_count += 1
+        state = str(attempt.get("state") or "").strip().lower()
+        if state == "pr_open":
+            duration = _attempt_duration_minutes(attempt)
+            if duration is not None:
+                valid_pr_durations.append(duration)
+
+    first_pass_successes = 0
+    retries_before_success: list[int] = []
+    for per_issue_attempts in issue_attempts.values():
+        sorted_attempts = sorted(
+            per_issue_attempts,
+            key=lambda item: int(item.get("attempt_no") or 0),
+        )
+        if not sorted_attempts:
+            continue
+        first = sorted_attempts[0]
+        if str(first.get("state") or "").strip().lower() in success_states:
+            first_pass_successes += 1
+        first_success_attempt = next(
+            (
+                int(item.get("attempt_no") or 0)
+                for item in sorted_attempts
+                if str(item.get("state") or "").strip().lower() in success_states
+            ),
+            0,
+        )
+        if first_success_attempt > 0:
+            retries_before_success.append(max(0, first_success_attempt - 1))
+
+    sample_size = len(attempts)
+    issue_count = len(issue_attempts)
+    first_pass_success_rate = (
+        float(first_pass_successes) / float(max(1, issue_count))
+        if issue_count > 0
+        else 0.0
+    )
+    retries_per_success = (
+        float(sum(retries_before_success)) / float(len(retries_before_success))
+        if retries_before_success
+        else 0.0
+    )
+    wrong_root_execution_rate = float(wrong_root_count) / float(max(1, sample_size))
+    no_op_rate = float(no_op_count) / float(max(1, sample_size))
+    mean_time_to_valid_pr = (
+        float(sum(valid_pr_durations)) / float(len(valid_pr_durations))
+        if valid_pr_durations
+        else 0.0
+    )
+
+    return {
+        "window": max(1, int(window)),
+        "sample_size": sample_size,
+        "issue_count": issue_count,
+        "first_pass_success_rate": round(first_pass_success_rate, 4),
+        "retries_per_success": round(retries_per_success, 4),
+        "wrong_root_execution_rate": round(wrong_root_execution_rate, 4),
+        "no_op_rate": round(no_op_rate, 4),
+        "mean_time_to_valid_pr_minutes": round(mean_time_to_valid_pr, 2),
+    }
+
+
+def _attempt_duration_minutes(attempt: dict[str, object]) -> float | None:
+    started_at = str(attempt.get("started_at") or "").strip()
+    finished_at = str(attempt.get("finished_at") or "").strip()
+    if not started_at or not finished_at:
+        return None
+    try:
+        start_dt = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        end_dt = datetime.strptime(finished_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    elapsed = (end_dt - start_dt).total_seconds() / 60.0
+    if elapsed < 0:
+        return None
+    return elapsed
 
 
 def _launch_agent_path(label: str) -> str:

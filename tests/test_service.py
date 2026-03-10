@@ -144,6 +144,12 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert swarm_metrics["skipped_by_domain"]["unknown"] == 0
     failure_domains = rows[0]["failure_domain_metrics"]
     assert failure_domains == {"total": 0, "infra": 0, "contract": 0, "code": 0, "unknown": 0}
+    canary = rows[0]["reliability_canary"]
+    assert canary["sample_size"] >= 1
+    assert 0.0 <= canary["first_pass_success_rate"] <= 1.0
+    assert canary["retries_per_success"] >= 0.0
+    assert 0.0 <= canary["wrong_root_execution_rate"] <= 1.0
+    assert 0.0 <= canary["no_op_rate"] <= 1.0
     resource_audit = rows[0]["resource_audit"]
     assert resource_audit["worktrees"]["count"] == 0
     assert resource_audit["leases"]["total"] == 0
@@ -214,6 +220,106 @@ def test_status_rows_report_failure_domain_counters(tmp_path) -> None:
         "code": 1,
         "unknown": 1,
     }
+
+
+def test_status_rows_report_reliability_canary_metrics(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="9001",
+        repo="owner/repo",
+        title="Issue 9001",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.upsert_healer_issue(
+        issue_id="9002",
+        repo="owner/repo",
+        title="Issue 9002",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_9001_1",
+        issue_id="9001",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_9001_1",
+        state="pr_open",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "issue"},
+        verifier_summary={},
+        failure_class="",
+        failure_reason="",
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_9002_1",
+        issue_id="9002",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_9002_1",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "fallback"},
+        verifier_summary={},
+        failure_class="no_patch",
+        failure_reason="no patch",
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_9002_2",
+        issue_id="9002",
+        attempt_no=2,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_9002_2",
+        state="pr_open",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "issue"},
+        verifier_summary={},
+        failure_class="",
+        failure_reason="",
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    canary = rows[0]["reliability_canary"]
+    assert canary["sample_size"] == 3
+    assert canary["issue_count"] == 2
+    assert canary["first_pass_success_rate"] == 0.5
+    assert canary["retries_per_success"] == 0.5
+    assert canary["wrong_root_execution_rate"] == 0.3333
+    assert canary["no_op_rate"] == 0.3333
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
