@@ -10,10 +10,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import yaml
 
 from .docker_runtime import ensure_docker_runtime_running, record_docker_activity
 from .language_detector import detect_language_details
@@ -2875,28 +2878,106 @@ def _render_input_context_file(*, relative_path: str, workspace: Path) -> str:
 def _validate_artifact_outputs(*, workspace: Path, diff_paths: list[str]) -> dict[str, Any]:
     checked_files: list[str] = []
     broken_links: list[dict[str, str]] = []
+    parse_errors: list[dict[str, str]] = []
     for rel_path in diff_paths:
-        if not _is_markdown_artifact_path(rel_path):
-            continue
         file_path = workspace / rel_path
         if not file_path.exists() or not file_path.is_file():
             continue
+        if _is_markdown_artifact_path(rel_path):
+            checked_files.append(rel_path)
+            broken_links.extend(_find_broken_markdown_links(file_path=file_path, rel_path=rel_path))
+            continue
+        structured_error = _validate_structured_artifact(file_path=file_path, rel_path=rel_path)
+        if structured_error is None:
+            continue
         checked_files.append(rel_path)
-        broken_links.extend(_find_broken_markdown_links(file_path=file_path, rel_path=rel_path))
-    passed = not broken_links
-    summary = "Artifact validation passed." if passed else f"Artifact validation failed with {len(broken_links)} broken relative link(s)."
+        parse_errors.append(structured_error)
+    passed = not broken_links and not parse_errors
+    summary = _artifact_validation_summary(broken_links=broken_links, parse_errors=parse_errors)
     return {
         "mode": "artifact_validation",
         "passed": passed,
         "failed_tests": 0 if passed else 1,
         "checked_files": checked_files,
         "broken_links": broken_links,
+        "parse_errors": parse_errors,
         "summary": summary,
     }
 
 
 def _is_markdown_artifact_path(path: str) -> bool:
     return Path(path).suffix.lower() in {".md", ".mdx", ".rst", ".txt"}
+
+
+def _structured_artifact_type(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".json":
+        return "json"
+    if suffix in {".yaml", ".yml"}:
+        return "yaml"
+    if suffix == ".toml":
+        return "toml"
+    return ""
+
+
+def _artifact_validation_summary(*, broken_links: list[dict[str, str]], parse_errors: list[dict[str, str]]) -> str:
+    if not broken_links and not parse_errors:
+        return "Artifact validation passed."
+    parts: list[str] = []
+    if broken_links:
+        parts.append(f"{len(broken_links)} broken relative link(s)")
+    if parse_errors:
+        parts.append(f"{len(parse_errors)} structured file parse error(s)")
+    return "Artifact validation failed with " + " and ".join(parts) + "."
+
+
+def _validate_structured_artifact(*, file_path: Path, rel_path: str) -> dict[str, str] | None:
+    artifact_type = _structured_artifact_type(rel_path)
+    if not artifact_type:
+        return None
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return {"file": rel_path, "type": artifact_type, "error": f"Unicode decode error: {exc}"}
+    if artifact_type == "json":
+        try:
+            json.loads(content)
+            return None
+        except json.JSONDecodeError as exc:
+            return {
+                "file": rel_path,
+                "type": artifact_type,
+                "line": str(exc.lineno),
+                "column": str(exc.colno),
+                "error": exc.msg,
+            }
+    if artifact_type == "yaml":
+        try:
+            yaml.safe_load(content)
+            return None
+        except yaml.YAMLError as exc:
+            problem_mark = getattr(exc, "problem_mark", None)
+            error: dict[str, str] = {
+                "file": rel_path,
+                "type": artifact_type,
+                "error": str(exc).splitlines()[0],
+            }
+            if problem_mark is not None:
+                error["line"] = str(int(getattr(problem_mark, "line", 0)) + 1)
+                error["column"] = str(int(getattr(problem_mark, "column", 0)) + 1)
+            return error
+    try:
+        tomllib.loads(content)
+        return None
+    except tomllib.TOMLDecodeError as exc:
+        error: dict[str, str] = {"file": rel_path, "type": artifact_type, "error": str(exc)}
+        lineno = getattr(exc, "lineno", None)
+        colno = getattr(exc, "colno", None)
+        if lineno is not None:
+            error["line"] = str(lineno)
+        if colno is not None:
+            error["column"] = str(colno)
+        return error
 
 
 def _find_broken_markdown_links(*, file_path: Path, rel_path: str) -> list[dict[str, str]]:

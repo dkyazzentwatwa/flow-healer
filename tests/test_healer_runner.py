@@ -496,6 +496,57 @@ def test_validate_artifact_outputs_fails_broken_relative_links(tmp_path):
     assert summary["broken_links"] == [{"file": "README.md", "line": "1", "target": "docs/missing.md"}]
 
 
+def test_validate_artifact_outputs_passes_structured_files(tmp_path):
+    (tmp_path / "report.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("name: flow-healer\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+
+    summary = _validate_artifact_outputs(
+        workspace=tmp_path,
+        diff_paths=["report.json", "config.yaml", "pyproject.toml"],
+    )
+
+    assert summary["passed"] is True
+    assert summary["failed_tests"] == 0
+    assert summary["parse_errors"] == []
+
+
+def test_validate_artifact_outputs_fails_invalid_json(tmp_path):
+    (tmp_path / "report.json").write_text('{"ok": }\n', encoding="utf-8")
+
+    summary = _validate_artifact_outputs(workspace=tmp_path, diff_paths=["report.json"])
+
+    assert summary["passed"] is False
+    assert summary["failed_tests"] == 1
+    assert summary["parse_errors"]
+    assert summary["parse_errors"][0]["file"] == "report.json"
+    assert summary["parse_errors"][0]["type"] == "json"
+
+
+def test_validate_artifact_outputs_fails_invalid_yaml(tmp_path):
+    (tmp_path / "config.yaml").write_text("name: [broken\n", encoding="utf-8")
+
+    summary = _validate_artifact_outputs(workspace=tmp_path, diff_paths=["config.yaml"])
+
+    assert summary["passed"] is False
+    assert summary["failed_tests"] == 1
+    assert summary["parse_errors"]
+    assert summary["parse_errors"][0]["file"] == "config.yaml"
+    assert summary["parse_errors"][0]["type"] == "yaml"
+
+
+def test_validate_artifact_outputs_fails_invalid_toml(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project\nname = 'demo'\n", encoding="utf-8")
+
+    summary = _validate_artifact_outputs(workspace=tmp_path, diff_paths=["pyproject.toml"])
+
+    assert summary["passed"] is False
+    assert summary["failed_tests"] == 1
+    assert summary["parse_errors"]
+    assert summary["parse_errors"][0]["file"] == "pyproject.toml"
+    assert summary["parse_errors"][0]["type"] == "toml"
+
+
 def test_run_test_gates_runs_from_resolved_execution_root(monkeypatch, tmp_path):
     sandbox = tmp_path / "e2e-smoke" / "node"
     sandbox.mkdir(parents=True)
