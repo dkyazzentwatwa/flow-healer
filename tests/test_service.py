@@ -182,6 +182,12 @@ def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
     )
     assert node_report["status"] == "ready"
     assert node_report["summary"] == "Preflight passed"
+    assert node_report["readiness_score"] == 100
+    assert node_report["readiness_class"] == "ready"
+    assert node_report["blocking"] is False
+    preflight_summary = rows[0]["preflight"]["summary"]
+    assert preflight_summary["total"] >= 1
+    assert preflight_summary["overall_class"] in {"ready", "degraded", "blocked"}
 
 
 def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:

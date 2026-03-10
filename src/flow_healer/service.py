@@ -17,7 +17,11 @@ from .codex_cli_connector import CodexCliConnector
 from .config import AppConfig, RelaySettings
 from .fallback_connector import FailoverConnector
 from .healer_loop import AutonomousHealerLoop
-from .healer_preflight import list_cached_preflight_reports
+from .healer_preflight import (
+    list_cached_preflight_reports,
+    preflight_readiness_assessment,
+    summarize_preflight_readiness,
+)
 from .healer_reconciler import HealerReconciler
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker
@@ -254,6 +258,28 @@ class FlowHealerService:
                     attempt_row["connector_debug_focus"] = route.connector_debug_focus
                     attempt_row["connector_debug_checks"] = list(route.connector_debug_checks)
                     annotated_attempts.append(attempt_row)
+                preflight_reports = list_cached_preflight_reports(
+                    store=runtime.store,
+                    gate_mode=repo.healer_test_gate_mode,
+                )
+                preflight_report_rows = []
+                for report in preflight_reports:
+                    readiness = preflight_readiness_assessment(report)
+                    preflight_report_rows.append(
+                        {
+                            "language": report.language,
+                            "execution_root": report.execution_root,
+                            "status": report.status,
+                            "failure_class": report.failure_class,
+                            "summary": report.summary,
+                            "checked_at": report.checked_at,
+                            "readiness_score": readiness["score"],
+                            "readiness_class": readiness["class"],
+                            "blocking": readiness["blocking"],
+                            "recommendation": readiness["recommendation"],
+                            "blockers": list(readiness["blockers"]),
+                        }
+                    )
                 rows.append(
                     {
                         "repo": repo.repo_name,
@@ -316,20 +342,8 @@ class FlowHealerService:
                         ).resource_audit(),
                         "preflight": {
                             "gate_mode": repo.healer_test_gate_mode,
-                            "reports": [
-                                {
-                                    "language": report.language,
-                                    "execution_root": report.execution_root,
-                                    "status": report.status,
-                                    "failure_class": report.failure_class,
-                                    "summary": report.summary,
-                                    "checked_at": report.checked_at,
-                                }
-                                for report in list_cached_preflight_reports(
-                                    store=runtime.store,
-                                    gate_mode=repo.healer_test_gate_mode,
-                                )
-                            ],
+                            "summary": summarize_preflight_readiness(preflight_reports),
+                            "reports": preflight_report_rows,
                         },
                         "app_server_metrics": _app_server_metrics(runtime.store),
                         "swarm_metrics": _swarm_metrics(runtime.store),

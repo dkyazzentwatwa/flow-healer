@@ -401,13 +401,100 @@ def _preflight_validation_commands(*, execution_root: str, language: str, framew
 def preflight_report_to_test_summary(report: PreflightReport) -> dict[str, object]:
     summary = dict(report.test_summary)
     summary.setdefault("mode", report.gate_mode)
+    readiness = preflight_readiness_assessment(report)
     summary["preflight_status"] = report.status
     summary["preflight_failure_class"] = report.failure_class
     summary["preflight_summary"] = report.summary
     summary["preflight_output_tail"] = report.output_tail
+    summary["preflight_readiness_score"] = readiness["score"]
+    summary["preflight_readiness_class"] = readiness["class"]
+    summary["preflight_recommendation"] = readiness["recommendation"]
     summary["execution_root"] = report.execution_root
     summary["language_effective"] = report.language
     return summary
+
+
+def preflight_readiness_assessment(report: PreflightReport) -> dict[str, object]:
+    status = str(report.status or "").strip().lower()
+    failure_class = str(report.failure_class or "").strip().lower()
+    blockers: list[str] = []
+    if failure_class:
+        blockers.append(failure_class)
+    elif status == "missing":
+        blockers.append("not_checked")
+
+    if status == "ready":
+        return {
+            "score": 100,
+            "class": "ready",
+            "blocking": False,
+            "recommendation": "ready_for_issue_execution",
+            "blockers": blockers,
+        }
+    if status == "missing":
+        return {
+            "score": 35,
+            "class": "unknown",
+            "blocking": False,
+            "recommendation": "run_preflight_refresh",
+            "blockers": blockers,
+        }
+    if failure_class in {"tool_missing", "docker_unavailable", "unsupported_gate_mode"}:
+        recommendation = "repair_environment"
+    elif failure_class == "sandbox_missing":
+        recommendation = "restore_sandbox_path"
+    else:
+        recommendation = "inspect_preflight_failure"
+    return {
+        "score": 0,
+        "class": "blocked",
+        "blocking": True,
+        "recommendation": recommendation,
+        "blockers": blockers or ["preflight_failed"],
+    }
+
+
+def summarize_preflight_readiness(reports: list[PreflightReport]) -> dict[str, object]:
+    if not reports:
+        return {
+            "total": 0,
+            "ready": 0,
+            "blocked": 0,
+            "unknown": 0,
+            "overall_score": 0,
+            "overall_class": "unknown",
+            "blocking_execution_roots": [],
+        }
+    assessments = [(report, preflight_readiness_assessment(report)) for report in reports]
+    ready = sum(1 for _report, assessment in assessments if assessment["class"] == "ready")
+    blocked = sum(1 for _report, assessment in assessments if bool(assessment["blocking"]))
+    unknown = sum(1 for _report, assessment in assessments if assessment["class"] == "unknown")
+    average_score = int(
+        round(
+            sum(int(assessment["score"]) for _report, assessment in assessments)
+            / max(1, len(assessments))
+        )
+    )
+    if blocked > 0:
+        overall_class = "blocked"
+    elif unknown > 0:
+        overall_class = "degraded"
+    else:
+        overall_class = "ready"
+    blocking_execution_roots = [
+        report.execution_root
+        for report, assessment in assessments
+        if bool(assessment["blocking"])
+    ][:12]
+    return {
+        "total": len(assessments),
+        "ready": ready,
+        "blocked": blocked,
+        "unknown": unknown,
+        "overall_score": average_score,
+        "overall_class": overall_class,
+        "blocking_execution_roots": blocking_execution_roots,
+    }
 
 
 def _best_output_tail(summary: dict[str, object]) -> str:
