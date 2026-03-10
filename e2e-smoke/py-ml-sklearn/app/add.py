@@ -1,2 +1,7 @@
-def add(a: int, b: int) -> int:
-    return int(a) + int(b)
+from typing import TypeVar
+
+AddableT = TypeVar("AddableT")
+
+
+def add(a: AddableT, b: AddableT) -> AddableT:
+    return a + b
