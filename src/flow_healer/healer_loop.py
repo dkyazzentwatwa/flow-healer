@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import signal
+import shutil
 import subprocess
 import threading
 import time
@@ -56,7 +57,6 @@ _INFRA_FAILURE_CLASSES = {
     "github_network_error",
     "github_rate_limited",
     "infra_pause",
-    "lease_expired",
     "preflight_failed",
     "sqlite_busy",
     "subprocess_timeout_hard_kill",
@@ -3778,11 +3778,32 @@ class AutonomousHealerLoop:
         raw = str(self.store.get_state("healer_infra_pause_until") or "").strip()
         if not raw:
             return False
+        reason = str(self.store.get_state("healer_infra_pause_reason") or "").strip()
+        if self._infra_pause_reason_is_resolved(reason):
+            self._reset_infra_failure_streak()
+            return False
         try:
             pause_until = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         except ValueError:
             return False
         return datetime.now(UTC) < pause_until
+
+    def _infra_pause_reason_is_resolved(self, reason: str) -> bool:
+        normalized = str(reason or "").strip().lower()
+        if not normalized:
+            return True
+        if "requires `pnpm`" in normalized:
+            return shutil.which("pnpm") is not None
+        if "requires `yarn`" in normalized:
+            return shutil.which("yarn") is not None
+        if "requires `bun`" in normalized:
+            return shutil.which("bun") is not None
+        if "missing issue worktree" in normalized or "workspace orchestration" in normalized:
+            running_rows = self.store.list_healer_issues(states=["running", "claimed", "verify_pending"], limit=5)
+            return len(running_rows) == 0
+        if "lease lost during processing" in normalized:
+            return True
+        return False
 
     def _recheck_conflict_state(
         self,

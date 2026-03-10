@@ -179,13 +179,13 @@ class HealerReconciler:
             limit=2000,
         )
         active_paths = {
-            str(Path(row.get("workspace_path") or "").resolve())
+            str(Path(row.get("workspace_path") or "").expanduser().absolute())
             for row in active_rows
             if (row.get("workspace_path") or "").strip() and self._workspace_ref_should_be_preserved(row)
         }
         removed = 0
         for workspace in self.workspace_manager.list_workspaces():
-            if str(workspace.resolve()) in active_paths:
+            if str(workspace.expanduser().absolute()) in active_paths:
                 continue
             try:
                 self.workspace_manager.remove_workspace(workspace_path=workspace)

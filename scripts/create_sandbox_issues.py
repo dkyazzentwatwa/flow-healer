@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Print the issue payloads as JSON instead of creating them on GitHub.",
+    )
+    parser.add_argument(
+        "--allow-non-python-js",
+        action="store_true",
+        help="Allow drafts that target non-Python/JS validation stacks.",
     )
     return parser.parse_args()
 
@@ -129,6 +135,27 @@ def label_metadata(label: str) -> tuple[str, str]:
     return ("ededed", "Flow Healer issue label")
 
 
+_DISALLOWED_VALIDATION_RE = re.compile(
+    r"\b(?:\./gradlew\s+test|mvn\s+test|go\s+test|cargo\s+test|bundle\s+exec\s+rspec|swift\s+test)\b",
+    re.IGNORECASE,
+)
+_ALLOWED_ROOT_RE = re.compile(
+    r"(?:e2e-smoke/(?:js|node|py|python)-|e2e-apps/(?:node|python)-|e2e-apps/prosper-chat|e2e-apps/nobi-owl-trader)",
+    re.IGNORECASE,
+)
+
+
+def _is_python_js_only_draft(body: str) -> bool:
+    text = str(body or "")
+    if _DISALLOWED_VALIDATION_RE.search(text):
+        return False
+    paths = [line.strip()[2:].strip() for line in text.splitlines() if line.strip().startswith("- ")]
+    for path in paths:
+        if "/" in path and not _ALLOWED_ROOT_RE.search(path):
+            return False
+    return True
+
+
 def main() -> int:
     args = parse_args()
     if args.count < 1:
@@ -143,6 +170,13 @@ def main() -> int:
         extra_labels=extra_labels,
         family=args.family,
     )
+    if not args.allow_non_python_js:
+        invalid = [draft.title for draft in drafts if not _is_python_js_only_draft(draft.body)]
+        if invalid:
+            raise SystemExit(
+                "Refusing to create mixed-language drafts without --allow-non-python-js. "
+                f"Invalid drafts: {', '.join(invalid)}"
+            )
 
     if args.dry_run:
         payload = [

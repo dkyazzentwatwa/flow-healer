@@ -1,5 +1,6 @@
 import subprocess
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -2932,6 +2933,42 @@ def test_backoff_or_fail_infra_pause_sets_long_pause_and_queue_backoff(tmp_path)
     assert issue["last_failure_class"] == "infra_pause"
     assert issue["backoff_until"] == store.get_state("healer_infra_pause_until")
     assert store.get_state("healer_infra_pause_reason").startswith("infra_pause:")
+
+
+def test_infra_pause_auto_clears_when_toolchain_reason_is_resolved(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    until = (datetime.now(UTC) + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    store.set_states(
+        {
+            "healer_infra_failure_streak": "3",
+            "healer_infra_pause_until": until,
+            "healer_infra_pause_reason": "preflight_failed: Preflight requires `pnpm` for e2e-smoke/js-vue-vite but it is not available in PATH.",
+        }
+    )
+
+    monkeypatch.setattr("flow_healer.healer_loop.shutil.which", lambda tool: "/opt/homebrew/bin/pnpm" if tool == "pnpm" else None)
+
+    assert loop._infra_pause_active() is False
+    assert store.get_state("healer_infra_pause_until") == ""
+    assert store.get_state("healer_infra_pause_reason") == ""
+    assert store.get_state("healer_infra_failure_streak") == "0"
+
+
+def test_infra_pause_stays_active_for_unresolved_reason(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    until = (datetime.now(UTC) + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    store.set_states(
+        {
+            "healer_infra_pause_until": until,
+            "healer_infra_pause_reason": "infra_pause: custom unresolved blocker",
+        }
+    )
+
+    assert loop._infra_pause_active() is True
 
 
 def test_swarm_quarantine_with_sql_bootstrap_context_stays_quarantine(tmp_path):

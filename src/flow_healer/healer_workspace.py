@@ -76,7 +76,7 @@ class HealerWorkspaceManager:
         return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
 
     def prepare_workspace(self, *, workspace_path: Path, branch: str, base_branch: str = "main") -> None:
-        ws = Path(workspace_path).resolve()
+        ws = Path(workspace_path).expanduser().absolute()
         if not self._is_under_root(ws):
             raise ValueError(f"Refusing to prepare workspace outside healer root: {ws}")
         fetch = subprocess.run(
@@ -136,7 +136,7 @@ class HealerWorkspaceManager:
             )
 
     def remove_workspace(self, *, workspace_path: Path) -> None:
-        ws = Path(workspace_path).resolve()
+        ws = Path(workspace_path).expanduser().absolute()
         if not self._is_under_root(ws):
             raise ValueError(f"Refusing to remove workspace outside healer root: {ws}")
         if not ws.exists():
@@ -154,7 +154,12 @@ class HealerWorkspaceManager:
                 stderr = (retry.stderr or stderr).strip()
             logger.warning("git worktree remove failed for %s: %s", ws, stderr)
             self._run_git_worktree_prune()
-            shutil.rmtree(ws, ignore_errors=True)
+            if ws.is_symlink():
+                ws.unlink(missing_ok=True)
+            elif ws.is_dir():
+                shutil.rmtree(ws, ignore_errors=True)
+            else:
+                ws.unlink(missing_ok=True)
 
     def _run_git_worktree_remove(self, ws: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -189,7 +194,7 @@ class HealerWorkspaceManager:
         return sorted([p for p in self.worktrees_root.iterdir() if p.is_dir()])
 
     def is_safe_workspace_path(self, path: Path) -> bool:
-        return self._is_under_root(Path(path).resolve())
+        return self._is_under_root(Path(path).expanduser().absolute())
 
     def _is_under_root(self, path: Path) -> bool:
         try:

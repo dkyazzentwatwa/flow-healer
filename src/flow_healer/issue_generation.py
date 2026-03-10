@@ -330,6 +330,86 @@ def _js_framework_templates() -> tuple[IssueTemplate, ...]:
             ),
             validation_command="cd e2e-smoke/js-nest && npm test -- --passWithNoTests",
         ),
+        IssueTemplate(
+            kind="JS framework regression: Remix server helper behavior",
+            targets=(
+                "e2e-smoke/js-remix/app/utils/add.server.js",
+                "e2e-smoke/js-remix/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-remix && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Astro component helper behavior",
+            targets=(
+                "e2e-smoke/js-astro/src/utils/add.js",
+                "e2e-smoke/js-astro/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-astro && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: SolidStart route helper behavior",
+            targets=(
+                "e2e-smoke/js-solidstart/src/lib/add.js",
+                "e2e-smoke/js-solidstart/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-solidstart && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Qwik utility behavior",
+            targets=(
+                "e2e-smoke/js-qwik/src/utils/add.ts",
+                "e2e-smoke/js-qwik/tests/add.test.ts",
+            ),
+            validation_command="cd e2e-smoke/js-qwik && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Hono handler behavior",
+            targets=(
+                "e2e-smoke/js-hono/src/add.js",
+                "e2e-smoke/js-hono/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-hono && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Koa middleware helper behavior",
+            targets=(
+                "e2e-smoke/js-koa/src/add.js",
+                "e2e-smoke/js-koa/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-koa && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Adonis service helper behavior",
+            targets=(
+                "e2e-smoke/js-adonis/app/services/add.ts",
+                "e2e-smoke/js-adonis/tests/add.spec.ts",
+            ),
+            validation_command="cd e2e-smoke/js-adonis && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: RedwoodSDK helper behavior",
+            targets=(
+                "e2e-smoke/js-redwoodsdk/web/src/lib/add.ts",
+                "e2e-smoke/js-redwoodsdk/web/tests/add.test.ts",
+            ),
+            validation_command="cd e2e-smoke/js-redwoodsdk && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Lit component helper behavior",
+            targets=(
+                "e2e-smoke/js-lit/src/add.js",
+                "e2e-smoke/js-lit/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-lit && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Alpine Vite helper behavior",
+            targets=(
+                "e2e-smoke/js-alpine-vite/src/add.js",
+                "e2e-smoke/js-alpine-vite/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-alpine-vite && npm test -- --passWithNoTests",
+        ),
     )
 
 

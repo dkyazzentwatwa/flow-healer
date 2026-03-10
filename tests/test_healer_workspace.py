@@ -151,3 +151,19 @@ def test_remove_workspace_unlocks_and_retries_when_locked(tmp_path, monkeypatch)
     assert any(row[-4:] == ["worktree", "prune", "--expire", "now"] for row in calls)
     remove_attempts = [row for row in calls if row[-4:] == ["worktree", "remove", "-f", str(workspace.path)]]
     assert len(remove_attempts) == 2
+
+
+def test_remove_workspace_unlinks_symlink_without_touching_target(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    manager = HealerWorkspaceManager(repo_path=repo)
+    manager.worktrees_root.mkdir(parents=True, exist_ok=True)
+
+    target = repo
+    symlink = manager.worktrees_root / "issue-999-bad-link"
+    symlink.symlink_to(target, target_is_directory=True)
+
+    manager.remove_workspace(workspace_path=symlink)
+
+    assert not symlink.exists()
+    assert target.exists()

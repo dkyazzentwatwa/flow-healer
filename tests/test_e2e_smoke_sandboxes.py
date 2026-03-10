@@ -59,6 +59,56 @@ def test_all_supported_language_sandboxes_exist() -> None:
             "src/add.js",
             "tests/add.test.js",
         ],
+        "js-remix": [
+            "package.json",
+            "app/utils/add.server.js",
+            "tests/add.test.js",
+        ],
+        "js-astro": [
+            "package.json",
+            "src/utils/add.js",
+            "tests/add.test.js",
+        ],
+        "js-solidstart": [
+            "package.json",
+            "src/lib/add.js",
+            "tests/add.test.js",
+        ],
+        "js-qwik": [
+            "package.json",
+            "src/utils/add.ts",
+            "tests/add.test.ts",
+        ],
+        "js-hono": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-koa": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-adonis": [
+            "package.json",
+            "app/services/add.ts",
+            "tests/add.spec.ts",
+        ],
+        "js-redwoodsdk": [
+            "package.json",
+            "web/src/lib/add.ts",
+            "web/tests/add.test.ts",
+        ],
+        "js-lit": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-alpine-vite": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
         "py-fastapi": [
             "pyproject.toml",
             "app/add.py",
