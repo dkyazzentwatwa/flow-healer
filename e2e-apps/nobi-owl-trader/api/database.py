@@ -5,6 +5,10 @@ from typing import Optional
 DB_PATH = Path(__file__).parent.parent / "trading_data.db"
 _connection: Optional[sqlite3.Connection] = None
 
+
+class DatabaseInitializationError(RuntimeError):
+    """Raised when the application database cannot be initialized."""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
     id TEXT PRIMARY KEY,
@@ -155,56 +159,77 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict):
             continue
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
+
+def _prepare_db_path(db_path: Optional[str]) -> str:
+    path = db_path if db_path else str(DB_PATH)
+    if path != ":memory:":
+        Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def init_db(db_path: str = None):
     """Initialize database with schema"""
     global _connection
+    close_db()
     path = db_path if db_path else str(DB_PATH)
-    _connection = sqlite3.connect(path, check_same_thread=False)
-    _connection.row_factory = sqlite3.Row
-    _connection.executescript(SCHEMA)
-    _ensure_columns(
-        _connection,
-        "trades",
-        {
-            "fee_currency": "TEXT",
-            "strategy": "TEXT",
-            "notes": "TEXT",
-            "stop_price": "REAL",
-            "target_price": "REAL",
-            "is_trailing": "BOOLEAN DEFAULT 0",
-            "highest_price": "REAL",
-            "lowest_price": "REAL",
-            "paper": "BOOLEAN DEFAULT 0",
-        },
-    )
-    _ensure_columns(
-        _connection,
-        "automation_rules",
-        {
-            "trigger_type": "TEXT DEFAULT 'signal'",
-            "min_score": "REAL",
-            "amount_type": "TEXT DEFAULT 'fixed'",
-            "stop_loss_pct": "REAL",
-            "take_profit_pct": "REAL",
-            "trailing_stop_pct": "REAL",
-            "only_if_in_position": "BOOLEAN DEFAULT 1",
-            "reduce_only": "BOOLEAN DEFAULT 1",
-            "min_profit_pct": "REAL",
-            "break_even_after_pct": "REAL",
-            "max_hold_bars": "INTEGER",
-            "is_active": "BOOLEAN DEFAULT 1",
-            "last_triggered": "INTEGER DEFAULT 0",
-            "cooldown_minutes": "INTEGER DEFAULT 60",
-            "conditions": "TEXT",
-        },
-    )
-    _connection.execute(
-        "UPDATE automation_rules SET only_if_in_position = 1 WHERE only_if_in_position IS NULL"
-    )
-    _connection.execute(
-        "UPDATE automation_rules SET reduce_only = 1 WHERE reduce_only IS NULL"
-    )
-    _connection.commit()
+
+    try:
+        path = _prepare_db_path(db_path)
+        connection = sqlite3.connect(path, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.executescript(SCHEMA)
+        _ensure_columns(
+            connection,
+            "trades",
+            {
+                "fee_currency": "TEXT",
+                "strategy": "TEXT",
+                "notes": "TEXT",
+                "stop_price": "REAL",
+                "target_price": "REAL",
+                "is_trailing": "BOOLEAN DEFAULT 0",
+                "highest_price": "REAL",
+                "lowest_price": "REAL",
+                "paper": "BOOLEAN DEFAULT 0",
+            },
+        )
+        _ensure_columns(
+            connection,
+            "automation_rules",
+            {
+                "trigger_type": "TEXT DEFAULT 'signal'",
+                "min_score": "REAL",
+                "amount_type": "TEXT DEFAULT 'fixed'",
+                "stop_loss_pct": "REAL",
+                "take_profit_pct": "REAL",
+                "trailing_stop_pct": "REAL",
+                "only_if_in_position": "BOOLEAN DEFAULT 1",
+                "reduce_only": "BOOLEAN DEFAULT 1",
+                "min_profit_pct": "REAL",
+                "break_even_after_pct": "REAL",
+                "max_hold_bars": "INTEGER",
+                "is_active": "BOOLEAN DEFAULT 1",
+                "last_triggered": "INTEGER DEFAULT 0",
+                "cooldown_minutes": "INTEGER DEFAULT 60",
+                "conditions": "TEXT",
+            },
+        )
+        connection.execute(
+            "UPDATE automation_rules SET only_if_in_position = 1 WHERE only_if_in_position IS NULL"
+        )
+        connection.execute(
+            "UPDATE automation_rules SET reduce_only = 1 WHERE reduce_only IS NULL"
+        )
+        connection.commit()
+    except (OSError, sqlite3.Error) as exc:
+        if "connection" in locals():
+            connection.close()
+        _connection = None
+        raise DatabaseInitializationError(
+            f"Failed to initialize database at '{path}': {exc}"
+        ) from exc
+
+    _connection = connection
 
 def get_db_connection() -> sqlite3.Connection:
     """Get database connection"""
