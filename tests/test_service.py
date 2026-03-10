@@ -117,7 +117,7 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert recent_attempt["connector_debug_checks"] == []
     preflight = rows[0]["preflight"]
     assert preflight["gate_mode"] == "local_then_docker"
-    assert len(preflight["reports"]) == 3
+    assert len(preflight["reports"]) >= 3
     app_server_metrics = rows[0]["app_server_metrics"]
     assert app_server_metrics["app_server_attempts"] == 0
     assert app_server_metrics["app_server_attempts_with_material_diff"] == 0
@@ -227,7 +227,7 @@ def test_doctor_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert triage["has_stop_conditions"] is False
     assert preflight["has_stop_conditions"] is True
     assert rows[0]["preflight_gate_mode"] == "local_then_docker"
-    assert len(rows[0]["preflight_reports"]) == 3
+    assert len(rows[0]["preflight_reports"]) >= 3
 
 
 def test_build_runtime_uses_configured_connector_backend(tmp_path) -> None:

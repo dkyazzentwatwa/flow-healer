@@ -15,6 +15,8 @@ class HealerTaskSpec:
     input_context_paths: tuple[str, ...] = ()
     language: str = ""
     language_source: str = ""
+    framework: str = ""
+    framework_source: str = ""
     execution_root: str = ""
     validation_commands: tuple[str, ...] = ()
     parse_confidence: float = 1.0
@@ -54,7 +56,11 @@ _URL_RE = re.compile(r"\bhttps?://[^\s)>`]+", re.IGNORECASE)
 
 _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bnpm\s+test\b", re.IGNORECASE), "node"),
+    (re.compile(r"\bpnpm\s+test\b|\bpnpm\s+run\s+test\b", re.IGNORECASE), "node"),
+    (re.compile(r"\byarn\s+test\b|\byarn\s+run\s+test\b", re.IGNORECASE), "node"),
+    (re.compile(r"\bbun\s+test\b|\bbun\s+run\s+test\b", re.IGNORECASE), "node"),
     (re.compile(r"\bpython(?:3(?:\.\d+)?)?\s+-m\s+pytest\b|\bpytest\b", re.IGNORECASE), "python"),
+    (re.compile(r"\bpython(?:3(?:\.\d+)?)?\s+manage\.py\s+test\b", re.IGNORECASE), "python"),
     (re.compile(r"\bbundle\s+exec\s+rspec\b|\brspec\b", re.IGNORECASE), "ruby"),
     (re.compile(r"\bcargo\s+test\b", re.IGNORECASE), "rust"),
     (re.compile(r"\bgo\s+test\b", re.IGNORECASE), "go"),
@@ -65,7 +71,19 @@ _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-smoke/node", "node"),
+    ("e2e-smoke/js-next", "node"),
+    ("e2e-smoke/js-vue-vite", "node"),
+    ("e2e-smoke/js-nuxt", "node"),
+    ("e2e-smoke/js-angular", "node"),
+    ("e2e-smoke/js-sveltekit", "node"),
+    ("e2e-smoke/js-express", "node"),
+    ("e2e-smoke/js-nest", "node"),
     ("e2e-smoke/python", "python"),
+    ("e2e-smoke/py-fastapi", "python"),
+    ("e2e-smoke/py-django", "python"),
+    ("e2e-smoke/py-flask", "python"),
+    ("e2e-smoke/py-data-pandas", "python"),
+    ("e2e-smoke/py-ml-sklearn", "python"),
     ("e2e-smoke/go", "go"),
     ("e2e-smoke/rust", "rust"),
     ("e2e-smoke/swift", "swift"),
@@ -75,6 +93,36 @@ _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-apps/node-next", "node"),
     ("e2e-apps/python-fastapi", "python"),
     ("e2e-apps/prosper-chat", "node"),
+    ("e2e-apps/nobi-owl-trader", "python"),
+)
+
+_FRAMEWORK_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bnext\s+(?:test|lint|build|dev)\b", re.IGNORECASE), "next"),
+    (re.compile(r"\bnuxt\s+(?:test|build|dev)\b", re.IGNORECASE), "nuxt"),
+    (re.compile(r"\bng\s+test\b|\bangular\b", re.IGNORECASE), "angular"),
+    (re.compile(r"\bsvelte-kit\b|\bsveltekit\b", re.IGNORECASE), "sveltekit"),
+    (re.compile(r"\bnest\s+(?:test|build|start)\b", re.IGNORECASE), "nest"),
+    (re.compile(r"\bvitest\b", re.IGNORECASE), "vue_vite"),
+    (re.compile(r"\bmanage\.py\s+test\b", re.IGNORECASE), "django"),
+)
+
+_FRAMEWORK_PATH_HINTS: tuple[tuple[str, str], ...] = (
+    ("e2e-smoke/js-next", "next"),
+    ("e2e-smoke/js-vue-vite", "vue_vite"),
+    ("e2e-smoke/js-nuxt", "nuxt"),
+    ("e2e-smoke/js-angular", "angular"),
+    ("e2e-smoke/js-sveltekit", "sveltekit"),
+    ("e2e-smoke/js-express", "express"),
+    ("e2e-smoke/js-nest", "nest"),
+    ("e2e-smoke/py-fastapi", "fastapi"),
+    ("e2e-smoke/py-django", "django"),
+    ("e2e-smoke/py-flask", "flask"),
+    ("e2e-smoke/py-data-pandas", "pandas"),
+    ("e2e-smoke/py-ml-sklearn", "sklearn"),
+    ("e2e-apps/node-next", "next"),
+    ("e2e-apps/python-fastapi", "fastapi"),
+    ("e2e-apps/prosper-chat", "next"),
+    ("e2e-apps/nobi-owl-trader", "fastapi"),
 )
 
 
@@ -106,6 +154,13 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     )
     resolved_language = inferred_language or str(language or "").strip()
     language_source = "issue" if inferred_language else ("default" if resolved_language else "")
+    inferred_framework = _infer_issue_framework(
+        issue_text=issue_text,
+        output_targets=inferred_targets,
+        execution_root=inferred_execution_root,
+        validation_commands=validation_commands,
+    )
+    framework_source = "issue" if inferred_framework else ""
     parse_confidence = _score_parse_confidence(
         task_kind_hint=task_kind_hint,
         explicit_paths=explicit_paths,
@@ -121,6 +176,8 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         input_context_paths=input_context_paths,
         language=resolved_language,
         language_source=language_source,
+        framework=inferred_framework,
+        framework_source=framework_source,
         execution_root=inferred_execution_root,
         validation_commands=validation_commands,
         parse_confidence=parse_confidence,
@@ -164,6 +221,8 @@ def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
     ]
     if spec.language:
         lines.append(f"- Language: {spec.language}")
+    if spec.framework:
+        lines.append(f"- Framework: {spec.framework}")
     if spec.execution_root:
         lines.append(f"- Execution root: {spec.execution_root}")
     if spec.validation_commands:
@@ -443,6 +502,30 @@ def _infer_issue_language(
     return _language_from_command(issue_text)
 
 
+def _infer_issue_framework(
+    *,
+    issue_text: str,
+    output_targets: tuple[str, ...],
+    execution_root: str,
+    validation_commands: tuple[str, ...],
+) -> str:
+    for command in validation_commands:
+        hinted = _framework_from_command(command)
+        if hinted:
+            return hinted
+
+    hinted = _framework_from_path(execution_root)
+    if hinted:
+        return hinted
+
+    for target in output_targets:
+        hinted = _framework_from_path(target)
+        if hinted:
+            return hinted
+
+    return _framework_from_command(issue_text)
+
+
 def _extract_cd_root(command: str) -> str:
     match = re.search(r"\bcd\s+([^\n&|;]+?)\s*&&", command, re.IGNORECASE)
     if not match:
@@ -475,6 +558,22 @@ def _language_from_path(path: str) -> str:
     for prefix, language in _LANGUAGE_PATH_HINTS:
         if lowered.startswith(prefix):
             return language
+    return ""
+
+
+def _framework_from_command(text: str) -> str:
+    source = str(text or "")
+    for pattern, framework in _FRAMEWORK_COMMAND_HINTS:
+        if pattern.search(source):
+            return framework
+    return ""
+
+
+def _framework_from_path(path: str) -> str:
+    lowered = str(path or "").strip().strip("/").lower()
+    for prefix, framework in _FRAMEWORK_PATH_HINTS:
+        if lowered.startswith(prefix):
+            return framework
     return ""
 
 

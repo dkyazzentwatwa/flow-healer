@@ -1,0 +1,35 @@
+name: Healer Python Framework Job
+description: Create a healer-ready Python framework issue with explicit outputs and validation.
+title: "Python framework task: "
+labels:
+  - healer:ready
+  - agent:codex
+  - difficulty:medium
+body:
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Framework
+      options:
+        - fastapi
+        - django
+        - flask
+    validations:
+      required: true
+  - type: textarea
+    id: required_outputs
+    attributes:
+      label: Required code outputs
+      placeholder: |
+        - e2e-smoke/py-fastapi/app/add.py
+        - e2e-smoke/py-fastapi/tests/test_add.py
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation commands
+      placeholder: |
+        - cd e2e-smoke/py-fastapi && pytest -q
+    validations:
+      required: true

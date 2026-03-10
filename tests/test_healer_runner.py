@@ -530,6 +530,8 @@ def test_run_test_gates_skips_docker_for_language_without_docker_support(monkeyp
             execution_root_source="issue",
             execution_path=sandbox,
             strategy=LanguageStrategy(
+                language="custom",
+                framework="generic",
                 docker_image="",
                 docker_install_cmd="",
                 docker_test_cmd=["custom-test"],
@@ -571,6 +573,8 @@ def test_run_test_gates_fails_docker_only_for_language_without_docker_support(mo
             execution_root_source="issue",
             execution_path=sandbox,
             strategy=LanguageStrategy(
+                language="custom",
+                framework="generic",
                 docker_image="",
                 docker_install_cmd="",
                 docker_test_cmd=["custom-test"],
@@ -929,6 +933,8 @@ def test_run_test_gates_marks_local_skipped_when_toolchain_unavailable(monkeypat
     from flow_healer.language_strategies import LanguageStrategy
 
     no_local_strategy = LanguageStrategy(
+        language="node",
+        framework="generic",
         docker_image="node:20-slim",
         docker_install_cmd="npm install",
         docker_test_cmd=["npm", "test"],
@@ -991,6 +997,8 @@ def test_run_test_gates_fails_local_only_when_gate_is_skipped():
     from flow_healer.language_strategies import LanguageStrategy
 
     no_local_strategy = LanguageStrategy(
+        language="node",
+        framework="generic",
         docker_image="node:20-slim",
         docker_install_cmd="npm install",
         docker_test_cmd=["npm", "test"],

@@ -92,3 +92,17 @@ def test_ensure_supported_language_rejects_swift() -> None:
         assert "supports only python and node" in str(exc)
     else:
         raise AssertionError("expected swift to be rejected")
+
+
+def test_get_strategy_uses_node_framework_defaults() -> None:
+    strategy = get_strategy("node", framework="next")
+    assert strategy.language == "node"
+    assert strategy.framework == "next"
+    assert strategy.local_test_cmd == ["npm", "test", "--", "--passWithNoTests"]
+
+
+def test_get_strategy_uses_python_framework_install_defaults() -> None:
+    strategy = get_strategy("python", framework="django")
+    assert strategy.language == "python"
+    assert strategy.framework == "django"
+    assert "django" in strategy.docker_install_cmd

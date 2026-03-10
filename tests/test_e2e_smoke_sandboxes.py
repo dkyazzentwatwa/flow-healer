@@ -20,6 +20,70 @@ def test_all_supported_language_sandboxes_exist() -> None:
             "src/add.js",
             "test/add.test.js",
         ],
+        "js-next": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-vue-vite": [
+            "package.json",
+            "pnpm-lock.yaml",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-nuxt": [
+            "package.json",
+            "yarn.lock",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-angular": [
+            "package.json",
+            "bun.lockb",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-sveltekit": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-express": [
+            "package.json",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "js-nest": [
+            "package.json",
+            "pnpm-workspace.yaml",
+            "src/add.js",
+            "tests/add.test.js",
+        ],
+        "py-fastapi": [
+            "pyproject.toml",
+            "app/add.py",
+            "tests/test_add.py",
+        ],
+        "py-django": [
+            "pyproject.toml",
+            "app/add.py",
+            "tests/test_add.py",
+        ],
+        "py-flask": [
+            "pyproject.toml",
+            "app/add.py",
+            "tests/test_add.py",
+        ],
+        "py-data-pandas": [
+            "pyproject.toml",
+            "app/add.py",
+            "tests/test_add.py",
+        ],
+        "py-ml-sklearn": [
+            "pyproject.toml",
+            "app/add.py",
+            "tests/test_add.py",
+        ],
         "swift": [
             "Package.swift",
             "Sources/FlowHealerAdd/Add.swift",

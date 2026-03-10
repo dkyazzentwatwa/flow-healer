@@ -1,0 +1,8 @@
+{
+  "name": "flow-healer-fw",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node tests/add.test.js"
+  }
+}

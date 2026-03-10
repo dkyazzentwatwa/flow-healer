@@ -12,6 +12,8 @@ REMOVED_LANGUAGE_SET = frozenset(REMOVED_LANGUAGES)
 
 @dataclass(slots=True, frozen=True)
 class LanguageStrategy:
+    language: str
+    framework: str
     docker_image: str
     docker_install_cmd: str
     docker_test_cmd: list[str] = field(default_factory=list)
@@ -26,6 +28,8 @@ class UnsupportedLanguageError(ValueError):
 
 _STRATEGIES: dict[str, LanguageStrategy] = {
     "python": LanguageStrategy(
+        language="python",
+        framework="generic",
         docker_image="python:3.11-slim",
         docker_install_cmd=(
             "python -m pip install --disable-pip-version-check -q pytest && "
@@ -37,6 +41,8 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
         supports_targeted_paths=True,
     ),
     "node": LanguageStrategy(
+        language="node",
+        framework="generic",
         docker_image="node:20-slim",
         docker_install_cmd="npm install --prefer-offline 2>/dev/null || npm install",
         docker_test_cmd=["npm", "test", "--", "--passWithNoTests"],
@@ -45,6 +51,8 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
     ),
     # Conservative fallback preserves the historical Python execution path.
     "unknown": LanguageStrategy(
+        language="unknown",
+        framework="generic",
         docker_image="python:3.11-slim",
         docker_install_cmd=(
             "python -m pip install --disable-pip-version-check -q pytest && "
@@ -57,6 +65,8 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
     ),
 }
 _EMPTY_STRATEGY = LanguageStrategy(
+    language="",
+    framework="",
     docker_image="",
     docker_install_cmd="",
     docker_test_cmd=[],
@@ -64,6 +74,49 @@ _EMPTY_STRATEGY = LanguageStrategy(
     supports_targeted_paths=False,
     supports_docker=False,
 )
+
+_NODE_FRAMEWORK_INSTALL: dict[str, str] = {
+    "next": "npm install --prefer-offline 2>/dev/null || npm install",
+    "vue_vite": "npm install --prefer-offline 2>/dev/null || npm install",
+    "nuxt": "npm install --prefer-offline 2>/dev/null || npm install",
+    "angular": "npm install --prefer-offline 2>/dev/null || npm install",
+    "sveltekit": "npm install --prefer-offline 2>/dev/null || npm install",
+    "express": "npm install --prefer-offline 2>/dev/null || npm install",
+    "nest": "npm install --prefer-offline 2>/dev/null || npm install",
+}
+
+_NODE_FRAMEWORK_TEST: dict[str, list[str]] = {
+    "next": ["npm", "test", "--", "--passWithNoTests"],
+    "vue_vite": ["npm", "test", "--", "--passWithNoTests"],
+    "nuxt": ["npm", "test", "--", "--passWithNoTests"],
+    "angular": ["npm", "test", "--", "--passWithNoTests"],
+    "sveltekit": ["npm", "test", "--", "--passWithNoTests"],
+    "express": ["npm", "test", "--", "--passWithNoTests"],
+    "nest": ["npm", "test", "--", "--passWithNoTests"],
+}
+
+_PY_FRAMEWORK_INSTALL: dict[str, str] = {
+    "fastapi": (
+        "python -m pip install --disable-pip-version-check -q pytest && "
+        "python -m pip install --disable-pip-version-check -q fastapi uvicorn"
+    ),
+    "django": (
+        "python -m pip install --disable-pip-version-check -q pytest && "
+        "python -m pip install --disable-pip-version-check -q django"
+    ),
+    "flask": (
+        "python -m pip install --disable-pip-version-check -q pytest && "
+        "python -m pip install --disable-pip-version-check -q flask"
+    ),
+    "pandas": (
+        "python -m pip install --disable-pip-version-check -q pytest && "
+        "python -m pip install --disable-pip-version-check -q pandas"
+    ),
+    "sklearn": (
+        "python -m pip install --disable-pip-version-check -q pytest && "
+        "python -m pip install --disable-pip-version-check -q scikit-learn"
+    ),
+}
 
 
 def parse_command(command: str) -> list[str]:
@@ -105,19 +158,32 @@ def ensure_supported_language(language: str, *, source: str = "configuration") -
 def get_strategy(
     language: str,
     *,
+    framework: str = "",
     docker_image: str = "",
     test_command: str = "",
     install_command: str = "",
 ) -> LanguageStrategy:
     normalized = str(language or "").strip()
+    normalized_framework = str(framework or "").strip().lower()
     base = _EMPTY_STRATEGY if not normalized else (_STRATEGIES.get(normalized) or _STRATEGIES["unknown"])
 
     resolved_image = docker_image.strip() or base.docker_image
-    resolved_install = install_command.strip() if install_command.strip() else base.docker_install_cmd
+    resolved_install = install_command.strip() if install_command.strip() else _default_install_for_framework(
+        language=normalized,
+        framework=normalized_framework,
+        fallback=base.docker_install_cmd,
+    )
     custom_test = parse_command(test_command)
+    default_test = _default_test_for_framework(
+        language=normalized,
+        framework=normalized_framework,
+        fallback=list(base.local_test_cmd),
+    )
 
     if custom_test:
         return LanguageStrategy(
+            language=normalized or base.language,
+            framework=normalized_framework or base.framework,
             docker_image=resolved_image,
             docker_install_cmd=resolved_install,
             docker_test_cmd=custom_test,
@@ -127,11 +193,13 @@ def get_strategy(
         )
 
     return LanguageStrategy(
+        language=normalized or base.language,
+        framework=normalized_framework or base.framework,
         docker_image=resolved_image,
         docker_install_cmd=resolved_install,
-        docker_test_cmd=list(base.docker_test_cmd),
-        local_test_cmd=list(base.local_test_cmd),
-        supports_targeted_paths=base.supports_targeted_paths,
+        docker_test_cmd=list(default_test),
+        local_test_cmd=list(default_test),
+        supports_targeted_paths=base.supports_targeted_paths or _supports_targeted_paths(default_test),
         supports_docker=base.supports_docker,
     )
 
@@ -145,3 +213,17 @@ def _supports_targeted_paths(command: list[str]) -> bool:
     if first.startswith("python") and "pytest" in command:
         return True
     return False
+
+
+def _default_install_for_framework(*, language: str, framework: str, fallback: str) -> str:
+    if language == "node" and framework in _NODE_FRAMEWORK_INSTALL:
+        return _NODE_FRAMEWORK_INSTALL[framework]
+    if language == "python" and framework in _PY_FRAMEWORK_INSTALL:
+        return _PY_FRAMEWORK_INSTALL[framework]
+    return fallback
+
+
+def _default_test_for_framework(*, language: str, framework: str, fallback: list[str]) -> list[str]:
+    if language == "node" and framework in _NODE_FRAMEWORK_TEST:
+        return list(_NODE_FRAMEWORK_TEST[framework])
+    return fallback

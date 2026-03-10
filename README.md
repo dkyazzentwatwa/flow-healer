@@ -2,103 +2,167 @@
 
 # Flow Healer
 
-![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Control Plane](https://img.shields.io/badge/interface-CLI%20%2B%20Web-111111?style=for-the-badge&logo=gnubash&logoColor=white)
-![SQLite](https://img.shields.io/badge/state-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
-![Pytest](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)
-![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#getting-started)
+[![Interface](https://img.shields.io/badge/interface-CLI%20%2B%20Dashboard-111111?style=for-the-badge&logo=gnubash&logoColor=white)](#core-workflow)
+[![State](https://img.shields.io/badge/state-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](#architecture)
+[![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](#development)
+[![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](#how-it-fits-into-github)
 
-**An autonomous GitHub repo healer that scans for breakage, picks safe work in isolated worktrees, runs guarded fixes through Codex, and only opens a PR when the result survives verification.**
+**Autonomous GitHub maintenance with guarded fixes, isolated worktrees, language-aware validation, and a built-in operator control plane.**
+
+[Documentation](docs/README.md) · [Installation](docs/installation.md) · [Usage](docs/usage.md) · [Architecture](docs/architecture.md) · [Operations](docs/operations.md)
 
 </div>
 
+## Screenshot
+
+<!-- Add a screenshot of the dashboard or control UI here -->
+<!-- ![Screenshot](screenshot.png) -->
+
 ## Why Flow Healer
 
-Most automation stops at issue detection. Flow Healer keeps going.
+Flow Healer is for repositories that need more than issue triage. It watches GitHub issues, routes work into isolated worktrees, asks Codex to produce a fix, runs validation gates, opens or updates the pull request, and preserves enough local state to retry safely when something goes wrong.
 
-It watches labeled GitHub issues, creates per-issue workspaces, feeds the task to an AI connector, runs Docker-backed test gates, learns from past attempts, and keeps enough local state to recover cleanly across retries. The result is a practical control loop for repository maintenance, not just a bot that files tickets.
+It is designed as a practical operations loop, not just an issue generator. The service combines deterministic scanning, issue-driven healing, PR feedback ingestion, and runtime guardrails so maintainers can keep one or many repos moving without turning every broken issue into manual toil.
 
 ## What It Does
 
 - Monitors one or many repositories from a single config file.
-- Stores durable per-repo state in SQLite under `~/.flow-healer/`.
-- Provides a phone-friendly web dashboard (`flow-healer serve`) for status and control.
-- Supports Apple Mail + Calendar command polling with strict subject DSL.
-- Creates isolated git worktrees so each fix attempt stays contained.
-- Claims and locks work to reduce conflicting edits across issues.
-- Applies retry budgets, backoff, and circuit-breaker logic before reattempting work.
-- Runs deterministic scan passes with optional GitHub issue creation.
-- Verifies candidate changes before opening a pull request.
-- Captures lessons from previous attempts to improve future prompts.
+- Processes only issues that match the repo's required labels, `healer:ready` by default.
+- Creates isolated git worktrees for each attempt so fixes stay contained.
+- Infers execution root and language from issue bodies, validation commands, and sandbox paths.
+- Runs guarded test gates with local and Docker-backed strategies.
+- Opens or updates PRs only after verification passes.
+- Re-queues work when human reviewers leave PR feedback comments.
+- Stores durable runtime state, locks, attempt history, and lessons in SQLite under `~/.flow-healer/`.
+- Exposes a web dashboard and CLI controls for operators.
+- Supports Apple Mail and Calendar command polling with a strict command DSL.
+
+## Core Workflow
+
+```text
+GitHub Issue labeled healer:ready
+                |
+                v
+       Flow Healer claims work
+                |
+                v
+     Isolated git worktree is created
+                |
+                v
+   Issue body is parsed into task targets,
+   execution root, language, and validation
+                |
+                v
+      Codex generates a candidate fix
+                |
+                v
+   Local and/or Docker validation gates run
+                |
+        +-------+-------+
+        |               |
+        v               v
+   verification ok   verification fails
+        |               |
+        v               v
+   open/update PR    record outcome,
+   and track review  learn, retry safely
+```
+
+## How It Fits Into GitHub
+
+Flow Healer's default happy path looks like this:
+
+1. A maintainer opens or labels a GitHub issue with `healer:ready`.
+2. Flow Healer claims the issue and creates an isolated worktree.
+3. The issue body is parsed into required outputs, reference-only context, validation commands, and language hints.
+4. Codex produces a patch inside the worktree.
+5. Flow Healer runs verification using the right execution root and language strategy.
+6. If the candidate survives verification, Flow Healer opens or updates the PR.
+7. If a human leaves PR feedback, Flow Healer ingests that comment and re-queues a refined attempt.
+
+With `pr_auto_approve_clean` and `pr_auto_merge_clean` enabled, the service can also make a best-effort approval and merge pass for clean PRs, subject to GitHub's normal actor and branch-protection rules.
+
+## Supported Languages
+
+Flow Healer currently provides first-class automated execution for Python and Node.js.
+
+| Language | Default strategy | Typical validation |
+| --- | --- | --- |
+| Python | local or Docker | `pytest -q` |
+| Node.js | local or Docker | `npm test -- --passWithNoTests` |
+
+The issue parser still recognizes validation commands and sandbox path hints for additional ecosystems like Swift, Ruby, Rust, Go, and Java. That improves routing and diagnostics, but guarded auto-execution support is limited to Python and Node.js.
+
+## Framework Expansion
+
+The issue parser and preflight layer now support framework-aware routing and smoke coverage for common JS and Python stacks.
+
+- JS smoke sandboxes: `next`, `vue-vite`, `nuxt`, `angular`, `sveltekit`, `express`, `nest`
+- Python smoke sandboxes: `fastapi`, `django`, `flask`, `pandas`, `sklearn`
+- Node preflight toolchain checks: `pnpm`, `yarn`, `bun`
+- Monorepo markers detected during preflight: `pnpm-workspace.yaml`, `nx.json`, `turbo.json`, `package.json#workspaces`
+- New issue families for generation: `js-frameworks`, `python-frameworks`, `python-data-ml`
 
 ## Architecture
 
 ```text
-GitHub Issues / Repo Signals
-            |
-            v
-   Flow Healer CLI + Service
-            |
-   +--------+--------+------------------+
-   |        |        |                  |
-   v        v        v                  v
- Scanner  Tracker  Workspace Mgr   SQLite Store
-   |        |        |                  |
-   +--------+--------+------------------+
-            |
-            v
-      Autonomous Loop
-            |
-   Codex Connector -> Docker Test Gate -> Verifier -> PR
+                           +----------------------+
+                           |  GitHub Issues / PRs |
+                           +----------+-----------+
+                                      |
+                                      v
+                    +-----------------+-----------------+
+                    |        Flow Healer Service        |
+                    |      CLI, runtime, dashboard      |
+                    +-----------------+-----------------+
+                                      |
+         +----------------------------+----------------------------+
+         |                            |                            |
+         v                            v                            v
+  Deterministic Scanner        Healing Loop                 Operator Controls
+  issue generation             dispatcher, locks            CLI + web dashboard
+  repo health signals          retries, verifier           Apple command DSL
+         |                            |                            |
+         +----------------------------+----------------------------+
+                                      |
+                                      v
+                         +------------+-------------+
+                         |   SQLite state store     |
+                         | attempts, locks, memory  |
+                         +------------+-------------+
+                                      |
+                                      v
+                  Codex connector -> test gate -> PR / retry
 ```
 
-## Core Modules
+## Project Layout
 
 ```text
 src/flow_healer/
-├── cli.py                # command entrypoint
-├── service.py            # multi-repo orchestration
-├── healer_loop.py        # issue processing control loop
-├── healer_scan.py        # deterministic repo scanning
-├── healer_tracker.py     # GitHub issue + PR adapter
-├── healer_workspace.py   # isolated git worktrees
-├── healer_memory.py      # lessons from prior attempts
-├── healer_dispatcher.py  # claims and lock acquisition
-├── healer_verifier.py    # post-fix verification
-└── store.py              # SQLite persistence
+├── cli.py                   # CLI entrypoint
+├── service.py               # multi-repo orchestration and status
+├── healer_loop.py           # issue processing control loop
+├── healer_runner.py         # prompt assembly, execution root, validation flow
+├── healer_task_spec.py      # issue-body parsing and task extraction
+├── healer_scan.py           # deterministic scan and issue generation
+├── healer_tracker.py        # GitHub issues, PRs, and feedback integration
+├── healer_workspace.py      # isolated git worktree management
+├── healer_memory.py         # lessons from prior attempts
+├── language_detector.py     # repo-level language detection
+├── language_strategies.py   # per-language validation strategies
+├── web_dashboard.py         # operator dashboard
+└── store.py                 # SQLite persistence
+
+tests/
+├── test_healer_task_spec.py
+├── test_healer_runner.py
+└── e2e/
 ```
 
-## Supported Languages
+## Getting Started
 
-Flow Healer supports 3 core languages:
-
-| Language | Docker Image | Test Command |
-| --- | --- | --- |
-| Python | `python:3.11-slim` | `pytest -q` |
-| Node.js | `node:20-slim` | `npm test -- --passWithNoTests` |
-| Swift | local toolchain | `swift test` |
-
-Issue parsing can still recognize validation commands and sandbox path hints for additional ecosystems such as Ruby, Rust, Go, and Java so unsupported-language issues fail explicitly instead of being silently misclassified. Execution support, test gates, and automatic healing are limited to Python, Node.js, and Swift.
-
-### Docker-First Testing
-
-By default, Flow Healer uses `test_gate_mode: local_then_docker`, which tries local toolchains first and falls back to Docker for Python and Node. Swift is local-first and intentionally does not use Docker.
-
-```yaml
-repos:
-  - name: my-node-project
-    test_gate_mode: docker_only
-    local_gate_policy: skip
-```
-
-The `local_gate_policy` options are:
-- `auto` - skip if unavailable (default)
-- `force` - fail if unavailable
-- `skip` - always skip local testing
-
-## Quickstart
-
-### 1. Install
+### 1. Install locally
 
 ```bash
 git clone <your-repo-url>
@@ -108,15 +172,19 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 ```
 
-### 2. Create config
+### 2. Create the service config
 
-Copy `config.example.yaml` into `~/.flow-healer/config.yaml` and adjust repo details:
+```bash
+mkdir -p ~/.flow-healer
+cp config.example.yaml ~/.flow-healer/config.yaml
+```
+
+Example configuration:
 
 ```yaml
 service:
   github_token_env: GITHUB_TOKEN
-  env_file: ""
-  poll_interval_seconds: 30
+  poll_interval_seconds: 60
   state_root: ~/.flow-healer
   connector_backend: exec
   connector_command: codex
@@ -146,15 +214,13 @@ repos:
     install_command: ""
 ```
 
-Export your GitHub token before running:
+### 3. Export credentials
 
 ```bash
 export GITHUB_TOKEN=your_token_here
 ```
 
-By default, Flow Healer no longer pauses for a `healer:pr-approved` issue label before opening or updating a PR. It also makes a best-effort approval and merge pass for clean PRs with no merge conflicts. Approval still cannot happen from the same GitHub actor that opened the PR, because GitHub blocks self-approval.
-
-Or point Flow Healer at an existing env file:
+If you already keep secrets in an env file, point the service at it:
 
 ```yaml
 service:
@@ -162,44 +228,60 @@ service:
   env_file: /absolute/path/to/.env
 ```
 
-To run through the local app-server instead of `codex exec`, switch the backend:
-
-```yaml
-service:
-  connector_backend: app_server
-  connector_command: codex
-```
-
-### 3. Run health checks and a single pass
+### 4. Run a controlled pass
 
 ```bash
 flow-healer doctor
 flow-healer status
 flow-healer start --once
+```
+
+### 5. Run the always-on service
+
+```bash
 flow-healer serve
 ```
 
-## Documentation
+`flow-healer start` without `--once` launches the same always-on runtime shape as `flow-healer serve`.
 
-Use [docs/README.md](docs/README.md) as the active doc map for setup, usage, operations, and architecture notes. Historical planning and review artifacts are preserved under `docs/archive/`.
+## Issue Format That Works Best
+
+Flow Healer is most reliable when the issue body tells it exactly what code should change and how the result should be validated.
+
+```md
+Required code outputs:
+- e2e-smoke/node/src/add.js
+- e2e-smoke/node/test/add.test.js
+
+Validation:
+- cd e2e-smoke/node && npm test -- --passWithNoTests
+```
+
+This format helps Flow Healer infer:
+
+- the expected output files
+- the execution root
+- the language strategy
+- the right validation gate
+
+If a file is reference material rather than an output target, mark it as input-only context in the issue body.
 
 ## Command Reference
 
 | Command | Purpose |
 | --- | --- |
-| `flow-healer doctor [--repo NAME]` | Validate repo path, git, Docker, Codex, and token setup |
-| `flow-healer status [--repo NAME]` | Show current issue counts, pause state, and recent attempts |
-| `flow-healer start [--repo NAME] [--once]` | Start the always-on runtime (healer loop + web dashboard + pollers) or run a single iteration |
+| `flow-healer doctor [--repo NAME] [--preflight]` | Validate environment, repo config, Docker, Codex, and token setup |
+| `flow-healer status [--repo NAME]` | Show queue state, pause status, and recent attempts |
+| `flow-healer start [--repo NAME] [--once]` | Run one controlled healing pass or start the continuous runtime |
+| `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Start the runtime with dashboard and operator controls |
+| `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic repo scanning with optional no-write mode |
 | `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo |
-| `flow-healer resume [--repo NAME]` | Resume autonomous processing |
-| `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic scan checks with optional no-write mode |
-| `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Run healer loop + web dashboard + Apple Mail/Calendar pollers |
+| `flow-healer resume [--repo NAME]` | Resume autonomous processing for a repo |
+| `flow-healer recycle-helpers [--repo NAME] [--idle-only]` | Ask the live daemon to recycle helper subprocesses safely |
 
-`flow-healer start` now launches the same always-on runtime as `flow-healer serve` so the dashboard stays up with the service. `flow-healer start --once` remains the one-pass maintenance path.
+## Runtime And Operations
 
-## Runtime Ops
-
-For runtime debugging and recovery, the repo ships operator-focused scripts:
+Flow Healer includes operator-facing helpers for diagnosing runtime drift, connector failures, and unhealthy queues.
 
 ```bash
 scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml my-repo
@@ -207,13 +289,7 @@ scripts/verify_runtime.sh ~/.flow-healer/config.yaml my-repo
 FLOW_HEALER_RESTART=1 scripts/remediate_runtime.sh ~/.flow-healer/config.yaml my-repo
 ```
 
-- `diagnose_runtime.sh` captures command resolution, PATH, launchd context, `doctor`, and `status`.
-- `verify_runtime.sh` fails fast if repo path, git state, token, connector health, or circuit-breaker readiness are not healthy.
-- `remediate_runtime.sh` suggests a safer absolute `connector_command` value and can restart the launch agent when explicitly requested.
-
-### Docker Runtime Controls
-
-Flow Healer can now start Docker on demand for SQL validation and Docker test gates, then shut the runtime down again after an idle window.
+Helpful runtime environment controls:
 
 ```bash
 export FLOW_HEALER_DOCKER_RUNTIME=colima
@@ -222,16 +298,11 @@ export FLOW_HEALER_DOCKER_IDLE_SECONDS=900
 export FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE=1
 ```
 
-- `FLOW_HEALER_DOCKER_RUNTIME`: `auto`, `docker_desktop`, `colima`, `orbstack`, or `none`
-- `FLOW_HEALER_DOCKER_IDLE_SHUTDOWN`: `1` to stop the selected runtime when Flow Healer has not used Docker recently
-- `FLOW_HEALER_DOCKER_IDLE_SECONDS`: idle threshold before shutdown
-- `FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE`: pause the Supabase DB container when SQL work finishes
-
-For the rest of the operator workflow, failure recovery, and maintenance guidance, use [docs/usage.md](docs/usage.md) and [docs/operations.md](docs/operations.md).
+These let Flow Healer choose a Docker runtime, shut it down after idle periods, and pause Supabase-related infrastructure after SQL validation work finishes.
 
 ## Apple Control DSL
 
-Mail subjects and Calendar event titles use:
+When Mail or Calendar polling is enabled, subjects and titles use this command format:
 
 ```text
 FH: <command> repo=<repo-name> key=value ...
@@ -248,28 +319,57 @@ FH: scan repo=demo dry_run=true
 FH: doctor repo=demo
 ```
 
+## Documentation Map
+
+- [docs/README.md](docs/README.md): top-level doc index
+- [docs/installation.md](docs/installation.md): setup and configuration
+- [docs/usage.md](docs/usage.md): command flows, lifecycle, and recovery
+- [docs/architecture.md](docs/architecture.md): control loop and module map
+- [docs/operations.md](docs/operations.md): runtime maintenance and incident response
+- [docs/contributing.md](docs/contributing.md): development workflow and review expectations
+- [docs/archive/README.md](docs/archive/README.md): historical planning and review artifacts
+
 ## Development
 
-Run the test suite:
+Run the full test suite:
 
 ```bash
 pytest
 ```
 
-Run a focused test while iterating:
+High-value focused tests:
 
 ```bash
-pytest tests/test_healer_scan.py -v
+pytest tests/test_healer_task_spec.py -v
+pytest tests/test_healer_runner.py -v
+pytest tests/e2e/test_flow_healer_e2e.py -k mixed_repo_sandbox -v
 ```
 
-## Operational Notes
+Smoke-test the service locally:
 
-- The default AI connector backend is `exec`, using the `codex` CLI.
-- Set `connector_backend: app_server` to use local `codex app-server` over stdio instead.
-- Test-gate execution is language-aware, with per-repo overrides for language/image/commands.
-- State is stored per managed repo at `~/.flow-healer/repos/<repo-name>/state.db`.
-- Scans can be dry-run only, or configured to create deduplicated GitHub issues above a severity threshold.
+```bash
+flow-healer doctor
+flow-healer start --once
+flow-healer status
+```
 
-## Why This System Matters
+## Contributing
 
-Flow Healer is built for teams that want autonomous maintenance without surrendering control. It combines AI-assisted remediation with worktree isolation, explicit approval points, deterministic scan inputs, and durable local state, so the system can move fast without behaving like a black box.
+Flow Healer is easiest to work on when changes stay small, verified, and issue-driven.
+
+- Follow the existing Python module boundaries instead of growing grab-bag files.
+- Keep changes PEP 8 compliant and consistent with neighboring code.
+- Add or update tests alongside behavior changes.
+- Use issue bodies with explicit `Required code outputs` and `Validation:` sections when testing mixed-language or sandbox behavior.
+- Keep healer-managed work on `healer/issue-*` branches and human work on normal branches.
+
+## Notes
+
+- Package name: `flow-healer`
+- Python requirement: `>=3.11`
+- CLI entrypoint: `flow_healer.cli:main`
+- Primary runtime state root: `~/.flow-healer/`
+
+## Acknowledgements
+
+Built for maintainers who want AI-assisted repository upkeep with stronger operational guardrails than a simple issue bot.

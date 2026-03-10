@@ -264,6 +264,48 @@ def test_task_spec_prompt_block_includes_language_when_set() -> None:
     assert "- Language: python" in prompt_block
 
 
+def test_compile_task_spec_infers_framework_from_js_smoke_path() -> None:
+    spec = compile_task_spec(
+        issue_title="Vue Vite smoke regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/js-vue-vite/src/add.js\n"
+            "- e2e-smoke/js-vue-vite/tests/add.test.js\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.framework == "vue_vite"
+    assert spec.framework_source == "issue"
+
+
+def test_compile_task_spec_infers_framework_from_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Django regression",
+        issue_body=(
+            "Validation:\n"
+            "- cd e2e-smoke/py-django && python manage.py test\n"
+        ),
+    )
+
+    assert spec.language == "python"
+    assert spec.framework == "django"
+    assert spec.framework_source == "issue"
+
+
+def test_task_spec_prompt_block_includes_framework_when_set() -> None:
+    spec = compile_task_spec(
+        issue_title="Next.js regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/js-next/src/add.js\n"
+        ),
+    )
+
+    prompt_block = task_spec_to_prompt_block(spec)
+    assert "- Framework: next" in prompt_block
+
+
 def test_task_spec_prompt_block_omits_language_when_empty() -> None:
     spec = compile_task_spec(
         issue_title="Write notes",

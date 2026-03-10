@@ -12,17 +12,32 @@ from .healer_task_spec import HealerTaskSpec
 from .language_strategies import get_strategy
 
 if TYPE_CHECKING:
-    from .healer_runner import HealerRunner, ResolvedExecution
+    from .healer_runner import HealerRunner
     from .protocols import ConnectorProtocol
     from .store import SQLiteStore
 
 
 _DEFAULT_PREFLIGHT_TTL_SECONDS = 900
 _CONNECTOR_PROBE_TTL_SECONDS = 300
-_SUPPORTED_SANDBOXES: tuple[tuple[str, str], ...] = (
-    ("python", "e2e-smoke/python"),
-    ("node", "e2e-smoke/node"),
-    ("node", "e2e-apps/prosper-chat"),
+_SUPPORTED_SANDBOXES: tuple[tuple[str, str, str], ...] = (
+    ("python", "generic", "e2e-smoke/python"),
+    ("node", "generic", "e2e-smoke/node"),
+    ("node", "next", "e2e-smoke/js-next"),
+    ("node", "vue_vite", "e2e-smoke/js-vue-vite"),
+    ("node", "nuxt", "e2e-smoke/js-nuxt"),
+    ("node", "angular", "e2e-smoke/js-angular"),
+    ("node", "sveltekit", "e2e-smoke/js-sveltekit"),
+    ("node", "express", "e2e-smoke/js-express"),
+    ("node", "nest", "e2e-smoke/js-nest"),
+    ("python", "fastapi", "e2e-smoke/py-fastapi"),
+    ("python", "django", "e2e-smoke/py-django"),
+    ("python", "flask", "e2e-smoke/py-flask"),
+    ("python", "pandas", "e2e-smoke/py-data-pandas"),
+    ("python", "sklearn", "e2e-smoke/py-ml-sklearn"),
+    ("node", "next", "e2e-apps/node-next"),
+    ("python", "fastapi", "e2e-apps/python-fastapi"),
+    ("node", "next", "e2e-apps/prosper-chat"),
+    ("python", "fastapi", "e2e-apps/nobi-owl-trader"),
 )
 
 
@@ -71,7 +86,7 @@ def preflight_cache_key(*, gate_mode: str, language: str, execution_root: str = 
 
 def list_cached_preflight_reports(*, store: SQLiteStore, gate_mode: str) -> list[PreflightReport]:
     reports: list[PreflightReport] = []
-    for language, execution_root in _SUPPORTED_SANDBOXES:
+    for language, _framework, execution_root in _SUPPORTED_SANDBOXES:
         report = PreflightReport.from_state_value(
             store.get_state(
                 preflight_cache_key(
@@ -113,15 +128,9 @@ class HealerPreflight:
         self.runner = runner
         self.repo_path = Path(repo_path).expanduser().resolve()
         self.ttl_seconds = max(60, int(ttl_seconds))
-        # Cache for connector probe results: connector_class_name → (ok, reason, checked_at)
         self._connector_probe_cache: dict[str, tuple[bool, str, datetime]] = {}
 
     def probe_connector(self, connector: ConnectorProtocol) -> tuple[bool, str]:
-        """Quickly verify the connector is available before invoking it for an issue.
-
-        Result is cached per connector class for _CONNECTOR_PROBE_TTL_SECONDS to avoid
-        repeated overhead. Returns (available, failure_reason).
-        """
         connector_name = type(connector).__name__
         now = datetime.now(UTC)
         cached = self._connector_probe_cache.get(connector_name)
@@ -136,7 +145,6 @@ class HealerPreflight:
             reason = f"connector.ensure_started() raised: {exc}"
             self._connector_probe_cache[connector_name] = (False, reason, now)
             return False, reason
-        # Check health_snapshot if available
         snapshot_fn = getattr(connector, "health_snapshot", None)
         if callable(snapshot_fn):
             try:
@@ -158,10 +166,11 @@ class HealerPreflight:
 
     def refresh_all(self, *, force: bool = False) -> list[PreflightReport]:
         reports: list[PreflightReport] = []
-        for language, execution_root in _SUPPORTED_SANDBOXES:
+        for language, framework, execution_root in _SUPPORTED_SANDBOXES:
             reports.append(
                 self.ensure_language_ready(
                     language=language,
+                    framework=framework,
                     execution_root=execution_root,
                     force=force,
                 )
@@ -172,13 +181,14 @@ class HealerPreflight:
         self,
         *,
         language: str,
+        framework: str = "",
         execution_root: str,
         force: bool = False,
     ) -> PreflightReport:
         cached = self.get_cached_report(language=language, execution_root=execution_root)
         if not force and cached is not None and not self._is_stale(cached):
             return cached
-        report = self._run_preflight(language=language, execution_root=execution_root)
+        report = self._run_preflight(language=language, framework=framework, execution_root=execution_root)
         self.store.set_state(
             preflight_cache_key(
                 gate_mode=self.runner.test_gate_mode,
@@ -207,10 +217,10 @@ class HealerPreflight:
         age = (datetime.now(UTC) - checked).total_seconds()
         return age >= self.ttl_seconds
 
-    def _run_preflight(self, *, language: str, execution_root: str) -> PreflightReport:
+    def _run_preflight(self, *, language: str, framework: str, execution_root: str) -> PreflightReport:
         sandbox_path = self.repo_path / execution_root
         checked_at = _now_store_timestamp()
-        strategy = get_strategy(language)
+        strategy = get_strategy(language, framework=framework)
         if not sandbox_path.is_dir():
             return PreflightReport(
                 language=language,
@@ -251,6 +261,25 @@ class HealerPreflight:
                 test_summary={},
             )
 
+        manager_probe = _probe_node_toolchain(sandbox_path)
+        if manager_probe["required_tool"] and not manager_probe["tool_available"]:
+            return PreflightReport(
+                language=language,
+                execution_root=execution_root,
+                gate_mode=self.runner.test_gate_mode,
+                status="failed",
+                failure_class="tool_missing",
+                summary=(
+                    f"Preflight requires `{manager_probe['required_tool']}` for {execution_root} "
+                    "but it is not available in PATH."
+                ),
+                output_tail="",
+                checked_at=checked_at,
+                test_summary={"toolchain": manager_probe},
+            )
+
+        monorepo_probe = _probe_monorepo_layout(sandbox_path)
+
         task_spec = HealerTaskSpec(
             task_kind="build",
             output_mode="patch",
@@ -259,8 +288,14 @@ class HealerPreflight:
             validation_profile="code_change",
             language=language,
             language_source="preflight",
+            framework=framework,
+            framework_source="preflight",
             execution_root=execution_root,
-            validation_commands=_preflight_validation_commands(execution_root=execution_root, language=language),
+            validation_commands=_preflight_validation_commands(
+                execution_root=execution_root,
+                language=language,
+                framework=framework,
+            ),
         )
         try:
             with tempfile.TemporaryDirectory(prefix="flow-healer-preflight-") as temp_root:
@@ -282,43 +317,39 @@ class HealerPreflight:
                 gate_mode=self.runner.test_gate_mode,
                 status="failed",
                 failure_class="preflight_exception",
-                summary=f"Preflight execution failed: {exc}",
-                output_tail=str(exc),
+                summary=f"Preflight crashed for {language} in {execution_root}: {exc}",
+                output_tail=str(exc)[-2000:],
                 checked_at=checked_at,
-                test_summary={},
+                test_summary={
+                    "toolchain": manager_probe,
+                    "monorepo": monorepo_probe,
+                },
             )
 
-        failed_tests = int(summary.get("failed_tests", 0))
         output_tail = _best_output_tail(summary)
-        if failed_tests > 0:
-            if not _has_environment_gate_failure(summary):
-                return PreflightReport(
-                    language=language,
-                    execution_root=execution_root,
-                    gate_mode=self.runner.test_gate_mode,
-                    status="ready",
-                    failure_class="",
-                    summary=(
-                        f"Preflight toolchain check passed for {language} in {execution_root}; "
-                        f"baseline tests currently fail (mode={self.runner.test_gate_mode}, failed_tests={failed_tests})."
-                    ),
-                    output_tail=output_tail,
-                    checked_at=checked_at,
-                    test_summary=summary,
-                )
+        if _has_environment_gate_failure(summary):
+            failure_class = str(
+                summary.get("local_full_reason")
+                or summary.get("docker_full_reason")
+                or "preflight_failed"
+            )
             return PreflightReport(
                 language=language,
                 execution_root=execution_root,
                 gate_mode=self.runner.test_gate_mode,
                 status="failed",
-                failure_class="validation_failed",
+                failure_class=failure_class,
                 summary=(
                     f"Preflight validation failed for {language} in {execution_root} "
-                    f"(mode={self.runner.test_gate_mode}, failed_tests={failed_tests})."
+                    f"(reason={failure_class})."
                 ),
                 output_tail=output_tail,
                 checked_at=checked_at,
-                test_summary=summary,
+                test_summary={
+                    **summary,
+                    "toolchain": manager_probe,
+                    "monorepo": monorepo_probe,
+                },
             )
 
         return PreflightReport(
@@ -330,22 +361,28 @@ class HealerPreflight:
             summary=f"Preflight passed for {language} in {execution_root}.",
             output_tail=output_tail,
             checked_at=checked_at,
-            test_summary=summary,
+            test_summary={
+                **summary,
+                "toolchain": manager_probe,
+                "monorepo": monorepo_probe,
+            },
         )
 
 
 def execution_root_for_language(language: str) -> str:
     wanted = str(language or "").strip()
-    for candidate_language, execution_root in _SUPPORTED_SANDBOXES:
+    for candidate_language, _framework, execution_root in _SUPPORTED_SANDBOXES:
         if candidate_language == wanted:
             return execution_root
     return ""
 
 
-def _preflight_validation_commands(*, execution_root: str, language: str) -> tuple[str, ...]:
+def _preflight_validation_commands(*, execution_root: str, language: str, framework: str = "") -> tuple[str, ...]:
     normalized_root = str(execution_root or "").strip().strip("/")
     if normalized_root == "e2e-apps/prosper-chat":
         return (f"cd {normalized_root} && ./scripts/healer_validate.sh full",)
+    if language == "python":
+        return (f"cd {normalized_root} && pytest -q",) if normalized_root else ()
     if language == "node":
         return (f"cd {normalized_root} && npm test -- --passWithNoTests",) if normalized_root else ()
     return ()
@@ -408,3 +445,48 @@ def _parse_store_timestamp(raw: str) -> datetime | None:
 
 def _now_store_timestamp() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _probe_node_toolchain(sandbox_path: Path) -> dict[str, object]:
+    required_tool = ""
+    package_json = sandbox_path / "package.json"
+    if (sandbox_path / "pnpm-lock.yaml").exists():
+        required_tool = "pnpm"
+    elif (sandbox_path / "yarn.lock").exists():
+        required_tool = "yarn"
+    elif (sandbox_path / "bun.lockb").exists() or (sandbox_path / "bun.lock").exists():
+        required_tool = "bun"
+    elif package_json.exists():
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            manager = str(data.get("packageManager") or "").strip().lower()
+            if manager.startswith("pnpm@"):
+                required_tool = "pnpm"
+            elif manager.startswith("yarn@"):
+                required_tool = "yarn"
+            elif manager.startswith("bun@"):
+                required_tool = "bun"
+        except Exception:
+            pass
+    return {
+        "required_tool": required_tool,
+        "tool_available": bool(shutil.which(required_tool)) if required_tool else True,
+    }
+
+
+def _probe_monorepo_layout(sandbox_path: Path) -> dict[str, object]:
+    markers = ("pnpm-workspace.yaml", "nx.json", "turbo.json")
+    package_json = sandbox_path / "package.json"
+    workspace_markers = [name for name in markers if (sandbox_path / name).exists()]
+    if package_json.exists():
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            if isinstance(data.get("workspaces"), list):
+                workspace_markers.append("package.json#workspaces")
+        except Exception:
+            pass
+    return {
+        "invalid": False,
+        "reason": "",
+        "workspace_markers": sorted(set(workspace_markers)),
+    }

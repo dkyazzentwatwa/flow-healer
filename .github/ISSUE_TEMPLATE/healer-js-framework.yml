@@ -1,0 +1,39 @@
+name: Healer JS Framework Job
+description: Create a healer-ready JS framework issue with explicit outputs and validation.
+title: "JS framework task: "
+labels:
+  - healer:ready
+  - agent:codex
+  - difficulty:medium
+body:
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Framework
+      options:
+        - next
+        - vue-vite
+        - nuxt
+        - angular
+        - sveltekit
+        - express
+        - nest
+    validations:
+      required: true
+  - type: textarea
+    id: required_outputs
+    attributes:
+      label: Required code outputs
+      placeholder: |
+        - e2e-smoke/js-next/src/add.js
+        - e2e-smoke/js-next/tests/add.test.js
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation commands
+      placeholder: |
+        - cd e2e-smoke/js-next && npm test -- --passWithNoTests
+    validations:
+      required: true

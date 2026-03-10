@@ -1113,6 +1113,7 @@ class HealerRunner:
             effective_language = ""
         strategy = get_strategy(
             effective_language,
+            framework=task_spec.framework,
             docker_image=self._docker_image if config_override_allowed else "",
             test_command=self._test_command if config_override_allowed else "",
             install_command=self._install_command if config_override_allowed else "",

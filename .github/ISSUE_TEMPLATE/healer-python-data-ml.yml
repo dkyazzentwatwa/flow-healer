@@ -1,0 +1,34 @@
+name: Healer Python Data/ML Job
+description: Create a healer-ready Python data/ML issue with explicit outputs and validation.
+title: "Python data/ml task: "
+labels:
+  - healer:ready
+  - agent:codex
+  - difficulty:medium
+body:
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Profile
+      options:
+        - pandas
+        - sklearn
+    validations:
+      required: true
+  - type: textarea
+    id: required_outputs
+    attributes:
+      label: Required code outputs
+      placeholder: |
+        - e2e-smoke/py-data-pandas/app/add.py
+        - e2e-smoke/py-data-pandas/tests/test_add.py
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation commands
+      placeholder: |
+        - cd e2e-smoke/py-data-pandas && pytest -q
+    validations:
+      required: true

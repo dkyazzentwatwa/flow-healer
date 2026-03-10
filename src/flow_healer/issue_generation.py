@@ -33,10 +33,19 @@ class IssueDraft:
 
 DEFAULT_FAMILY = "default"
 PROSPER_CHAT_DB_FAMILY = "prosper-chat-db"
+JS_FRAMEWORK_FAMILY = "js-frameworks"
+PYTHON_FRAMEWORK_FAMILY = "python-frameworks"
+PYTHON_DATA_ML_FAMILY = "python-data-ml"
 
 
 def available_issue_families() -> tuple[str, ...]:
-    return (DEFAULT_FAMILY, PROSPER_CHAT_DB_FAMILY)
+    return (
+        DEFAULT_FAMILY,
+        PROSPER_CHAT_DB_FAMILY,
+        JS_FRAMEWORK_FAMILY,
+        PYTHON_FRAMEWORK_FAMILY,
+        PYTHON_DATA_ML_FAMILY,
+    )
 
 
 def select_validation_command(
@@ -102,6 +111,12 @@ def get_issue_templates(family: str) -> tuple[IssueTemplate, ...]:
         return _default_templates()
     if normalized_family == PROSPER_CHAT_DB_FAMILY:
         return _prosper_chat_db_templates()
+    if normalized_family == JS_FRAMEWORK_FAMILY:
+        return _js_framework_templates()
+    if normalized_family == PYTHON_FRAMEWORK_FAMILY:
+        return _python_framework_templates()
+    if normalized_family == PYTHON_DATA_ML_FAMILY:
+        return _python_data_ml_templates()
     raise ValueError(
         f"unknown issue family '{family}'. Available families: {', '.join(available_issue_families())}"
     )
@@ -253,6 +268,117 @@ def _prosper_chat_db_templates() -> tuple[IssueTemplate, ...]:
             ),
             validation_command=_PROSPER_CHAT_FULL_COMMAND,
             labels=("area:db", "kind:migration", "difficulty:hard"),
+        ),
+    )
+
+
+def _js_framework_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        IssueTemplate(
+            kind="JS framework regression: Next.js service behavior",
+            targets=(
+                "e2e-smoke/js-next/src/add.js",
+                "e2e-smoke/js-next/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-next && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Vue (Vite) composable behavior",
+            targets=(
+                "e2e-smoke/js-vue-vite/src/add.js",
+                "e2e-smoke/js-vue-vite/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-vue-vite && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Nuxt server helper behavior",
+            targets=(
+                "e2e-smoke/js-nuxt/src/add.js",
+                "e2e-smoke/js-nuxt/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-nuxt && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Angular utility behavior",
+            targets=(
+                "e2e-smoke/js-angular/src/add.js",
+                "e2e-smoke/js-angular/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-angular && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: SvelteKit module behavior",
+            targets=(
+                "e2e-smoke/js-sveltekit/src/add.js",
+                "e2e-smoke/js-sveltekit/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-sveltekit && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Express route helper behavior",
+            targets=(
+                "e2e-smoke/js-express/src/add.js",
+                "e2e-smoke/js-express/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-express && npm test -- --passWithNoTests",
+        ),
+        IssueTemplate(
+            kind="JS framework regression: Nest provider behavior",
+            targets=(
+                "e2e-smoke/js-nest/src/add.js",
+                "e2e-smoke/js-nest/tests/add.test.js",
+            ),
+            validation_command="cd e2e-smoke/js-nest && npm test -- --passWithNoTests",
+        ),
+    )
+
+
+def _python_framework_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        IssueTemplate(
+            kind="Python framework regression: FastAPI service behavior",
+            targets=(
+                "e2e-smoke/py-fastapi/app/add.py",
+                "e2e-smoke/py-fastapi/tests/test_add.py",
+            ),
+            validation_command="cd e2e-smoke/py-fastapi && pytest -q",
+        ),
+        IssueTemplate(
+            kind="Python framework regression: Django utility behavior",
+            targets=(
+                "e2e-smoke/py-django/app/add.py",
+                "e2e-smoke/py-django/tests/test_add.py",
+            ),
+            validation_command="cd e2e-smoke/py-django && pytest -q",
+        ),
+        IssueTemplate(
+            kind="Python framework regression: Flask service behavior",
+            targets=(
+                "e2e-smoke/py-flask/app/add.py",
+                "e2e-smoke/py-flask/tests/test_add.py",
+            ),
+            validation_command="cd e2e-smoke/py-flask && pytest -q",
+        ),
+    )
+
+
+def _python_data_ml_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        IssueTemplate(
+            kind="Python data regression: pandas transform behavior",
+            targets=(
+                "e2e-smoke/py-data-pandas/app/add.py",
+                "e2e-smoke/py-data-pandas/tests/test_add.py",
+            ),
+            validation_command="cd e2e-smoke/py-data-pandas && pytest -q",
+        ),
+        IssueTemplate(
+            kind="Python ML regression: sklearn helper behavior",
+            targets=(
+                "e2e-smoke/py-ml-sklearn/app/add.py",
+                "e2e-smoke/py-ml-sklearn/tests/test_add.py",
+            ),
+            validation_command="cd e2e-smoke/py-ml-sklearn && pytest -q",
         ),
     )
 

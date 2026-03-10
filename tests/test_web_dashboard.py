@@ -213,6 +213,26 @@ def test_render_dashboard_includes_activity_console_and_inspector(tmp_path: Path
     assert "/api/activity" not in html
 
 
+def test_render_dashboard_uses_dedicated_log_feed_for_logs_tab(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "logEvents: []" in html
+    assert "if (this.kindFilter === 'log')" in html
+    assert "this.logEvents" in html
+
+
+def test_render_dashboard_includes_mobile_activity_cards(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "lg:hidden" in html
+    assert "Activity Cards" in html
+    assert "Tap any card for full context." in html
+
+
 def test_render_repo_action_cards_include_auth_field_when_token_mode_enabled(tmp_path: Path) -> None:
     config, _service = _make_service(tmp_path)
 

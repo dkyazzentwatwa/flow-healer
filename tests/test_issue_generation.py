@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from flow_healer.issue_generation import (
+    JS_FRAMEWORK_FAMILY,
+    PYTHON_DATA_ML_FAMILY,
+    PYTHON_FRAMEWORK_FAMILY,
     PROSPER_CHAT_DB_FAMILY,
+    available_issue_families,
     build_issue_drafts,
     select_validation_command,
 )
@@ -61,3 +65,36 @@ def test_build_issue_drafts_adds_db_labels_and_validation_for_prosper_chat_famil
     assert "healer:ready" in draft.labels
     assert "area:db" in draft.labels
     assert any(label.startswith("kind:") for label in draft.labels)
+
+
+def test_available_issue_families_include_framework_expansions() -> None:
+    families = available_issue_families()
+    assert JS_FRAMEWORK_FAMILY in families
+    assert PYTHON_FRAMEWORK_FAMILY in families
+    assert PYTHON_DATA_ML_FAMILY in families
+
+
+def test_build_issue_drafts_supports_js_framework_family() -> None:
+    drafts = build_issue_drafts(
+        count=1,
+        prefix="JS framework task",
+        ready_label="healer:ready",
+        family=JS_FRAMEWORK_FAMILY,
+    )
+
+    assert len(drafts) == 1
+    assert "e2e-smoke/js-" in drafts[0].body
+    assert "Validation:\n- cd e2e-smoke/js-" in drafts[0].body
+
+
+def test_build_issue_drafts_supports_python_framework_family() -> None:
+    drafts = build_issue_drafts(
+        count=1,
+        prefix="Python framework task",
+        ready_label="healer:ready",
+        family=PYTHON_FRAMEWORK_FAMILY,
+    )
+
+    assert len(drafts) == 1
+    assert "e2e-smoke/py-" in drafts[0].body
+    assert "Validation:\n- cd e2e-smoke/py-" in drafts[0].body
