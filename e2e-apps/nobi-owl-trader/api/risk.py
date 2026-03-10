@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
+import math
 import time
 from api.database import get_db_connection
 
@@ -118,6 +119,17 @@ class RiskManager:
     def __init__(self, limits: RiskLimits = None):
         self.limits = limits or RiskLimits()
 
+    @staticmethod
+    def _is_valid_number(value: float) -> bool:
+        return isinstance(value, (int, float)) and math.isfinite(value)
+
+    def _invalid_input_result(self, field_name: str) -> Dict[str, Any]:
+        return {
+            "can_trade": False,
+            "reason": f"Invalid {field_name}",
+            "warning": None,
+        }
+
     def check_can_trade(
         self,
         today_pnl: float = 0.0,
@@ -132,6 +144,19 @@ class RiskManager:
         Returns:
             Dict with can_trade (bool), reason (str), warning (str or None)
         """
+        if not self._is_valid_number(today_pnl):
+            return self._invalid_input_result("today P&L")
+        if not self._is_valid_number(position_size) or position_size < 0:
+            return self._invalid_input_result("position size")
+        if not self._is_valid_number(portfolio_value) or portfolio_value <= 0:
+            return self._invalid_input_result("portfolio value")
+        if not self._is_valid_number(total_exposure) or total_exposure < 0:
+            return self._invalid_input_result("total exposure")
+        if peak_equity is not None and (
+            not self._is_valid_number(peak_equity) or peak_equity <= 0
+        ):
+            return self._invalid_input_result("peak equity")
+
         # Check daily loss limit
         if today_pnl <= -self.limits.max_daily_loss:
             return {
@@ -198,7 +223,14 @@ class RiskManager:
         Returns:
             Position size in USD
         """
-        if stop_loss_pct <= 0:
+        if (
+            not self._is_valid_number(portfolio_value)
+            or portfolio_value <= 0
+            or not self._is_valid_number(risk_pct)
+            or risk_pct <= 0
+            or not self._is_valid_number(stop_loss_pct)
+            or stop_loss_pct <= 0
+        ):
             return 0.0
 
         risk_amount = portfolio_value * (risk_pct / 100)
@@ -206,4 +238,4 @@ class RiskManager:
 
         # Don't exceed max position size
         max_position = portfolio_value * (self.limits.max_position_size_pct / 100)
-        return min(position_size, max_position)
+        return max(0.0, min(position_size, max_position))
