@@ -684,6 +684,11 @@ def _swarm_metrics(store: SQLiteStore) -> dict[str, object]:
         strategy: _safe_state_int(store, f"healer_swarm_strategy_{strategy}")
         for strategy in strategies
     }
+    skipped_domains = ("infra", "contract", "unknown")
+    skipped_by_domain = {
+        domain: _safe_state_int(store, f"healer_swarm_skipped_domain_{domain}")
+        for domain in skipped_domains
+    }
     return {
         "runs": _safe_state_int(store, "healer_swarm_runs"),
         "recovered": _safe_state_int(store, "healer_swarm_recovered"),
@@ -691,6 +696,8 @@ def _swarm_metrics(store: SQLiteStore) -> dict[str, object]:
         "backend_exec": _safe_state_int(store, "healer_swarm_runs_backend_exec"),
         "backend_app_server": _safe_state_int(store, "healer_swarm_runs_backend_app_server"),
         "strategy_counts": strategy_counts,
+        "skipped_domain": _safe_state_int(store, "healer_swarm_skipped_domain"),
+        "skipped_by_domain": skipped_by_domain,
     }
 
 

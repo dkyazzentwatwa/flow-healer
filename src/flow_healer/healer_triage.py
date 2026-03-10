@@ -69,6 +69,58 @@ _EXTERNAL_FAILURE_MARKERS = (
     "network",
     "timeout waiting for github",
 )
+_INFRA_DOMAIN_FAILURE_CLASSES = {
+    "connector_runtime_error",
+    "connector_unavailable",
+    "github_api_error",
+    "github_auth_missing",
+    "github_network_error",
+    "github_rate_limited",
+    "infra_pause",
+    "lease_expired",
+    "lock_conflict",
+    "lock_upgrade_conflict",
+    "preflight_failed",
+    "pr_open_failed",
+    "push_failed",
+    "push_non_fast_forward",
+    "workspace_corrupt",
+}
+_CONTRACT_DOMAIN_FAILURE_CLASSES = {
+    "diff_limit_exceeded",
+    "empty_diff",
+    "malformed_diff",
+    "no_code_diff",
+    "no_patch",
+    "patch_apply_failed",
+}
+_INFRA_REASON_MARKERS = (
+    "api rate limit",
+    "cannot connect to the docker daemon",
+    "connectorruntimeerror",
+    "connectorunavailable",
+    "docker daemon",
+    "github",
+    "network",
+    "permission denied",
+    "service unavailable",
+    "timed out",
+    "unable to resolve",
+    "workspace unavailable",
+)
+_CONTRACT_REASON_MARKERS = (
+    "diff fence",
+    "did not return a unified diff",
+    "empty diff",
+    "invalid json",
+    "malformed diff",
+    "missing hunk header",
+    "no workspace change",
+    "patch apply",
+    "payload",
+    "unified diff",
+    "verdict",
+)
 
 
 def classify_failure(issue: dict[str, Any] | None, attempt: dict[str, Any] | None) -> str:
@@ -106,6 +158,26 @@ def classify_failure_family(issue: dict[str, Any] | None, attempt: dict[str, Any
     if diagnosis == "product_bug":
         return "product"
     return "automation_process"
+
+
+def classify_failure_domain(*, failure_class: str, failure_reason: str) -> str:
+    normalized_class = str(failure_class or "").strip()
+    normalized_reason = str(failure_reason or "").strip().lower()
+    if normalized_class in _INFRA_DOMAIN_FAILURE_CLASSES:
+        return "infra"
+    if _is_no_workspace_change_failure_class(normalized_class):
+        return "contract"
+    if normalized_class in _CONTRACT_DOMAIN_FAILURE_CLASSES:
+        return "contract"
+    if any(marker in normalized_reason for marker in _INFRA_REASON_MARKERS):
+        return "infra"
+    if any(marker in normalized_reason for marker in _CONTRACT_REASON_MARKERS):
+        return "contract"
+    if normalized_class in {"tests_failed", "verifier_failed", "generated_artifact_contamination", "scope_violation"}:
+        return "code"
+    if not normalized_class:
+        return "unknown"
+    return "code"
 
 
 def diagnosis_route(diagnosis: str) -> DiagnosisRoute:

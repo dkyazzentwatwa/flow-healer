@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flow_healer.healer_triage import classify_issue_route
+from flow_healer.healer_triage import classify_failure_domain, classify_issue_route
 
 
 def test_classify_issue_route_sends_connector_failures_to_debug_skill() -> None:
@@ -176,3 +176,30 @@ def test_classify_issue_route_treats_semantic_verifier_failure_as_product_bug() 
 
     assert route.diagnosis == "product_bug"
     assert route.failure_family == "product"
+
+
+def test_classify_failure_domain_detects_infra_failures() -> None:
+    domain = classify_failure_domain(
+        failure_class="tests_failed",
+        failure_reason="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+    )
+
+    assert domain == "infra"
+
+
+def test_classify_failure_domain_detects_contract_failures() -> None:
+    domain = classify_failure_domain(
+        failure_class="malformed_diff",
+        failure_reason="Proposer returned a diff fence, but the contents were not a valid unified diff.",
+    )
+
+    assert domain == "contract"
+
+
+def test_classify_failure_domain_treats_plain_test_failures_as_code() -> None:
+    domain = classify_failure_domain(
+        failure_class="tests_failed",
+        failure_reason="AssertionError: expected 200 got 500",
+    )
+
+    assert domain == "code"

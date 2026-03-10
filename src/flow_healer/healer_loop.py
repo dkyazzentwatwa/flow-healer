@@ -33,7 +33,7 @@ from .healer_swarm import HealerSwarm, SwarmRecoveryOutcome, SwarmRecoveryPlan, 
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue, PullRequestDetails, PullRequestResult
 from .healer_task_spec import compile_task_spec
-from .healer_triage import classify_failure_family
+from .healer_triage import classify_failure_domain, classify_failure_family
 from .healer_verifier import HealerVerifier
 from .language_strategies import UnsupportedLanguageError
 from .protocols import ConnectorProtocol
@@ -1006,6 +1006,26 @@ class AutonomousHealerLoop:
         targeted_tests: list[str],
     ) -> SwarmRecoveryOutcome | None:
         if not self._swarm_enabled_for_failure(failure_class):
+            return None
+        failure_domain = classify_failure_domain(
+            failure_class=failure_class,
+            failure_reason=failure_reason,
+        )
+        if failure_domain != "code":
+            self._increment_state_counter("healer_swarm_skipped_domain")
+            self._increment_state_counter(f"healer_swarm_skipped_domain_{failure_domain}")
+            self._emit_swarm_event(
+                event_type="swarm_skipped_domain",
+                level="info",
+                message=f"Swarm skipped for {failure_domain} failure domain.",
+                issue_id=issue.issue_id,
+                attempt_id=attempt_id,
+                payload={
+                    "failure_class": failure_class,
+                    "failure_reason": failure_reason,
+                    "failure_domain": failure_domain,
+                },
+            )
             return None
         telemetry_emitted = False
 
