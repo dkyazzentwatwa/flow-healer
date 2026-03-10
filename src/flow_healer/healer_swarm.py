@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -10,6 +11,7 @@ from uuid import uuid4
 from .healer_runner import HealerRunResult, HealerRunner, _build_proposer_prompt
 from .healer_task_spec import HealerTaskSpec, task_spec_to_prompt_block
 from .protocols import ConnectorProtocol
+from .swarm_markers import SWARM_PROCESS_MARKER
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,6 +90,7 @@ class SubagentBackendAdapter(Protocol):
         issue_id: str,
         max_parallel: int,
         on_result: Callable[[SubagentResult], None] | None = None,
+        overall_timeout_seconds: float | None = None,
     ) -> list[SubagentResult]: ...
 
 
@@ -137,30 +140,142 @@ class ConnectorSubagentBackend:
         issue_id: str,
         max_parallel: int,
         on_result: Callable[[SubagentResult], None] | None = None,
+        overall_timeout_seconds: float | None = None,
     ) -> list[SubagentResult]:
         if not requests:
             return []
+        deadline = _deadline(overall_timeout_seconds)
+        results_by_role: dict[str, SubagentResult] = {}
+
+        def _record(result: SubagentResult) -> None:
+            existing = results_by_role.get(result.role)
+            if existing is None:
+                results_by_role[result.role] = result
+            elif _is_timeout_result(result) and not _is_timeout_result(existing):
+                results_by_role[result.role] = result
+            if on_result is not None:
+                on_result(result)
+
         if self.connector_factory is None or max_parallel <= 1 or len(requests) == 1:
-            results: list[SubagentResult] = []
             for request in requests:
-                result = self.run(request, issue_id=issue_id)
-                if on_result is not None:
-                    on_result(result)
-                results.append(result)
-            return results
-        results: list[SubagentResult] = []
-        with ThreadPoolExecutor(max_workers=min(max_parallel, len(requests))) as executor:
-            futures = {
-                executor.submit(self.run, request, issue_id=issue_id): request.role
-                for request in requests
-            }
-            for future in as_completed(futures):
-                result = future.result()
-                if on_result is not None:
-                    on_result(result)
-                results.append(result)
-        results.sort(key=lambda item: item.role)
-        return results
+                if _deadline_expired(deadline):
+                    _record(
+                        _timed_out_result(
+                            role=request.role,
+                            timeout_seconds=overall_timeout_seconds,
+                        )
+                    )
+                    continue
+                _record(self.run(request, issue_id=issue_id))
+            return sorted(results_by_role.values(), key=lambda item: item.role)
+        executor = ThreadPoolExecutor(max_workers=min(max_parallel, len(requests)))
+        futures: dict[Future[SubagentResult], str] = {
+            executor.submit(self.run, request, issue_id=issue_id): request.role
+            for request in requests
+        }
+        pending: set[Future[SubagentResult]] = set(futures.keys())
+        try:
+            while pending:
+                remaining = _deadline_remaining(deadline)
+                if remaining == 0.0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    role = futures.get(future, "")
+                    try:
+                        _record(future.result())
+                    except Exception as exc:
+                        _record(
+                            SubagentResult(
+                                role=role,
+                                raw="",
+                                parsed={},
+                                success=False,
+                                error=str(exc),
+                            )
+                        )
+            if pending:
+                for future in pending:
+                    role = futures.get(future, "")
+                    _record(
+                        _timed_out_result(
+                            role=role,
+                            timeout_seconds=overall_timeout_seconds,
+                        )
+                    )
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                pending.clear()
+            else:
+                executor.shutdown(wait=True, cancel_futures=False)
+        finally:
+            if pending:
+                for future in pending:
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+        for request in requests:
+            if request.role in results_by_role:
+                continue
+            _record(
+                _timed_out_result(
+                    role=request.role,
+                    timeout_seconds=overall_timeout_seconds,
+                )
+            )
+        return sorted(results_by_role.values(), key=lambda item: item.role)
+
+
+def _deadline(overall_timeout_seconds: float | None) -> float | None:
+    if overall_timeout_seconds is None:
+        return None
+    timeout = float(overall_timeout_seconds)
+    if timeout <= 0:
+        return time.monotonic()
+    return time.monotonic() + timeout
+
+
+def _deadline_remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return 0.0
+    return remaining
+
+
+def _deadline_expired(deadline: float | None) -> bool:
+    if deadline is None:
+        return False
+    return _deadline_remaining(deadline) == 0.0
+
+
+def _min_timeout(primary: float | None, secondary: float | None) -> float | None:
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+    return min(primary, secondary)
+
+
+def _timed_out_result(*, role: str, timeout_seconds: float | None) -> SubagentResult:
+    timeout = int(max(1, round(float(timeout_seconds or 1.0))))
+    return SubagentResult(
+        role=role,
+        raw="",
+        parsed={},
+        success=False,
+        error=f"Timed out waiting for subagent result after {timeout}s.",
+    )
+
+
+def _is_timeout_result(result: SubagentResult) -> bool:
+    return "timed out" in str(result.error or "").strip().lower()
 
 
 def build_connector_subagent_backend(connector: ConnectorProtocol) -> ConnectorSubagentBackend:
@@ -177,10 +292,14 @@ class HealerSwarm:
         *,
         max_parallel_agents: int = 4,
         max_repair_cycles_per_attempt: int = 1,
+        analysis_timeout_seconds: int = 240,
+        recovery_timeout_seconds: int = 420,
     ) -> None:
         self.backend = backend
         self.max_parallel_agents = max(1, int(max_parallel_agents))
         self.max_repair_cycles_per_attempt = max(1, int(max_repair_cycles_per_attempt))
+        self.analysis_timeout_seconds = max(30, int(analysis_timeout_seconds))
+        self.recovery_timeout_seconds = max(60, int(recovery_timeout_seconds))
 
     def recover(
         self,
@@ -205,6 +324,7 @@ class HealerSwarm:
         targeted_tests: list[str],
         telemetry_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> SwarmRecoveryOutcome:
+        recovery_deadline = _deadline(float(self.recovery_timeout_seconds))
         analyzer_requests = _build_analyzer_requests(
             issue_id=issue_id,
             issue_title=issue_title,
@@ -227,20 +347,87 @@ class HealerSwarm:
                 "failure_reason": failure_reason,
                 "roles": [request.role for request in analyzer_requests],
                 "max_parallel_agents": self.max_parallel_agents,
+                "analysis_timeout_seconds": self.analysis_timeout_seconds,
+                "recovery_timeout_seconds": self.recovery_timeout_seconds,
             },
         )
+
+        def _timeout_outcome(*, stage: str, reason: str = "", analyzer_results: tuple[SubagentResult, ...] = ()) -> SwarmRecoveryOutcome:
+            timeout_reason = reason.strip() or f"Swarm recovery timed out during {stage}."
+            fallback_plan = _fallback_recovery_plan(analyzer_results)
+            quarantine_plan = SwarmRecoveryPlan(
+                strategy="quarantine",
+                summary=timeout_reason,
+                root_cause=fallback_plan.root_cause,
+                edit_scope=fallback_plan.edit_scope,
+                targeted_tests=fallback_plan.targeted_tests,
+                validation_focus=fallback_plan.validation_focus,
+            )
+            outcome = SwarmRecoveryOutcome(
+                recovered=False,
+                strategy="quarantine",
+                summary=timeout_reason,
+                analyzer_results=analyzer_results,
+                plan=quarantine_plan,
+                failure_class="swarm_timeout",
+                failure_reason=timeout_reason,
+            )
+            _emit_telemetry(
+                telemetry_callback,
+                "swarm_recovery_timeout",
+                {
+                    "stage": stage,
+                    "summary": timeout_reason,
+                    "recovery_timeout_seconds": self.recovery_timeout_seconds,
+                },
+            )
+            _emit_telemetry(telemetry_callback, "swarm_finished", _outcome_payload(outcome))
+            return outcome
+
+        analysis_timeout = _min_timeout(
+            float(self.analysis_timeout_seconds),
+            _deadline_remaining(recovery_deadline),
+        )
+        if analysis_timeout is not None and analysis_timeout <= 0:
+            return _timeout_outcome(stage="analysis", reason="Swarm recovery timed out before analyzer fanout started.")
+
+        def _analysis_on_result(result: SubagentResult) -> None:
+            _emit_telemetry(
+                telemetry_callback,
+                "swarm_role_completed",
+                _role_payload(result=result, stage="analysis"),
+            )
+            if _is_timeout_result(result):
+                _emit_telemetry(
+                    telemetry_callback,
+                    "swarm_role_timeout",
+                    {
+                        "stage": "analysis",
+                        "role": result.role,
+                        "error": result.error,
+                    },
+                )
+
         analyzer_results = tuple(
             self.backend.run_parallel(
                 analyzer_requests,
                 issue_id=issue_id,
                 max_parallel=self.max_parallel_agents,
-                on_result=lambda result: _emit_telemetry(
-                    telemetry_callback,
-                    "swarm_role_completed",
-                    _role_payload(result=result, stage="analysis"),
-                ),
+                on_result=_analysis_on_result,
+                overall_timeout_seconds=analysis_timeout,
             )
         )
+        if any(_is_timeout_result(result) for result in analyzer_results):
+            return _timeout_outcome(
+                stage="analysis",
+                reason="Swarm analysis exceeded its timeout budget; quarantining recovery for this issue.",
+                analyzer_results=analyzer_results,
+            )
+        if _deadline_expired(recovery_deadline):
+            return _timeout_outcome(stage="analysis", analyzer_results=analyzer_results)
+        manager_timeout = _min_timeout(180.0, _deadline_remaining(recovery_deadline))
+        if manager_timeout is not None and manager_timeout <= 0:
+            return _timeout_outcome(stage="planning", analyzer_results=analyzer_results)
         plan, manager_result = self._build_recovery_plan(
             issue_id=issue_id,
             issue_title=issue_title,
@@ -252,12 +439,24 @@ class HealerSwarm:
             test_summary=test_summary,
             verifier_summary=verifier_summary,
             analyzer_results=analyzer_results,
+            manager_timeout_seconds=max(1, int(round(manager_timeout or 180.0))),
         )
         _emit_telemetry(
             telemetry_callback,
             "swarm_role_completed",
             _role_payload(result=manager_result, stage="planning"),
         )
+        if _is_timeout_result(manager_result):
+            _emit_telemetry(
+                telemetry_callback,
+                "swarm_role_timeout",
+                {
+                    "stage": "planning",
+                    "role": manager_result.role,
+                    "error": manager_result.error,
+                },
+            )
+            return _timeout_outcome(stage="planning", analyzer_results=analyzer_results)
         _emit_telemetry(
             telemetry_callback,
             "swarm_plan_ready",
@@ -284,6 +483,15 @@ class HealerSwarm:
             _emit_telemetry(telemetry_callback, "swarm_finished", _outcome_payload(outcome))
             return outcome
 
+        remaining_before_repair = _deadline_remaining(recovery_deadline)
+        if remaining_before_repair is not None and remaining_before_repair < 30.0:
+            return _timeout_outcome(
+                stage="repair",
+                reason="Swarm recovery timed out before repair execution started.",
+                analyzer_results=analyzer_results,
+            )
+        repair_timeout = max(runner.code_change_turn_timeout_seconds, runner.timeout_seconds)
+        repair_timeout = int(max(30, round(_min_timeout(float(repair_timeout), remaining_before_repair) or repair_timeout)))
         repair_request = SubagentRequest(
             role="repair-executor",
             prompt=_build_repair_prompt(
@@ -299,7 +507,7 @@ class HealerSwarm:
                 plan=plan,
                 workspace=workspace,
             ),
-            timeout_seconds=max(runner.code_change_turn_timeout_seconds, runner.timeout_seconds),
+            timeout_seconds=repair_timeout,
             expect_json=False,
         )
         repair_result = self.backend.run(repair_request, issue_id=issue_id)
@@ -308,6 +516,19 @@ class HealerSwarm:
             "swarm_role_completed",
             _role_payload(result=repair_result, stage="repair"),
         )
+        if _is_timeout_result(repair_result):
+            _emit_telemetry(
+                telemetry_callback,
+                "swarm_role_timeout",
+                {
+                    "stage": "repair",
+                    "role": repair_result.role,
+                    "error": repair_result.error,
+                },
+            )
+            return _timeout_outcome(stage="repair", analyzer_results=analyzer_results)
+        if _deadline_expired(recovery_deadline):
+            return _timeout_outcome(stage="repair", analyzer_results=analyzer_results)
         run_result = runner.evaluate_existing_workspace(
             workspace=workspace,
             issue_id=issue_id,
@@ -353,6 +574,7 @@ class HealerSwarm:
         test_summary: dict[str, Any],
         verifier_summary: dict[str, Any],
         analyzer_results: tuple[SubagentResult, ...],
+        manager_timeout_seconds: int = 180,
     ) -> tuple[SwarmRecoveryPlan, SubagentResult]:
         prompt = _build_manager_prompt(
             issue_id=issue_id,
@@ -370,7 +592,7 @@ class HealerSwarm:
             SubagentRequest(
                 role="recovery-manager",
                 prompt=prompt,
-                timeout_seconds=180,
+                timeout_seconds=max(1, int(manager_timeout_seconds)),
                 expect_json=True,
             ),
             issue_id=issue_id,
@@ -500,6 +722,7 @@ def _build_analyzer_requests(
             role=role,
             prompt=(
                 f"You are the `{role}` subagent for Flow Healer.\n"
+                f"Process marker: {SWARM_PROCESS_MARKER}\n"
                 "Use the repo and failure context below. Do not edit files. Return strict JSON only.\n\n"
                 f"{instructions}\n\n"
                 f"{context}"
@@ -574,6 +797,7 @@ def _build_manager_prompt(
     )
     return (
         "You are the `recovery-manager` for Flow Healer.\n"
+        f"Process marker: {SWARM_PROCESS_MARKER}\n"
         "Choose the safest next action for an autonomous repair attempt.\n"
         "Return strict JSON only with keys "
         "`strategy`, `summary`, `root_cause`, `edit_scope`, `targeted_tests`, and `validation_focus`.\n"
@@ -625,6 +849,7 @@ def _build_repair_prompt(
     return (
         f"{base_prompt}\n\n"
         "### Swarm Failure Recovery\n"
+        f"- Process marker: {SWARM_PROCESS_MARKER}\n"
         f"- Failure class: {failure_class}\n"
         f"- Failure reason: {failure_reason}\n"
         f"- Swarm summary: {plan.summary}\n"

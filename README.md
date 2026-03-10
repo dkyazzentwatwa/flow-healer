@@ -215,6 +215,16 @@ repos:
     install_command: ""
 ```
 
+Optional swarm reliability knobs:
+
+```yaml
+repos:
+  - name: demo
+    swarm_analysis_timeout_seconds: 240
+    swarm_recovery_timeout_seconds: 420
+    swarm_orphan_subagent_ttl_seconds: 900
+```
+
 ### 3. Export credentials
 
 ```bash

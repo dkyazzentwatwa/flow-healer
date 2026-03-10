@@ -395,6 +395,38 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
       </div>
     </section>
 
+    <section class='mt-6 lg:hidden'>
+      <div class='mb-3 flex items-center justify-between'>
+        <h2 class='text-sm font-semibold uppercase tracking-[0.24em] text-slate-300'>Activity Cards</h2>
+        <p class='text-xs text-slate-400'>Tap any card for full context.</p>
+      </div>
+      <div class='grid grid-cols-1 gap-3'>
+        <template x-for='item in filteredActivities' :key='`mobile-${{item.id}}`'>
+          <button
+            type='button'
+            @click='openInspector(item.id)'
+            class='w-full rounded-3xl border border-white/10 bg-slate-900/70 p-4 text-left transition hover:bg-white/5'
+          >
+            <div class='flex items-start justify-between gap-3'>
+              <div>
+                <div class='text-xs text-slate-400' x-text='item.timestamp || "Unknown"'></div>
+                <div class='mt-2 text-sm font-medium text-white line-clamp-2' x-text='item.summary'></div>
+              </div>
+              <span class='rounded-full border px-2 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='signalBadgeClass(item.signal)' x-text='item.signal || "info"'></span>
+            </div>
+            <div class='mt-3 flex flex-wrap gap-2 text-xs'>
+              <span class='rounded-full border px-2 py-1' :class='kindBadgeClass(item.kind)' x-text='item.kind'></span>
+              <template x-if='item.repo'><span class='rounded-full border border-white/10 bg-white/5 px-2 py-1 text-slate-300' x-text='item.repo'></span></template>
+              <template x-if='item.issue_id'><span class='rounded-full border border-white/10 bg-white/5 px-2 py-1 text-slate-300' x-text='`Issue #${{item.issue_id}}`'></span></template>
+            </div>
+          </button>
+        </template>
+      </div>
+      <div x-show='!filteredActivities.length' class='mt-3 rounded-3xl border border-dashed border-white/10 bg-white/[0.03] p-4 text-center text-sm text-slate-400'>
+        No activity matched these filters.
+      </div>
+    </section>
+
     <template x-if='selectedActivity'>
       <div class='fixed inset-0 z-40'>
         <div class='absolute inset-0 bg-slate-950/70 backdrop-blur-sm' @click='closeInspector()'></div>

@@ -83,6 +83,14 @@ repos:
     circuit_breaker_cooldown_seconds: 900
     learning_enabled: true
     enable_review: true
+    swarm_enabled: false
+    swarm_mode: failure_repair
+    swarm_max_parallel_agents: 4
+    swarm_max_repair_cycles_per_attempt: 1
+    # Swarm timeouts and orphan subagent cleanup controls.
+    swarm_analysis_timeout_seconds: 240
+    swarm_recovery_timeout_seconds: 420
+    swarm_orphan_subagent_ttl_seconds: 900
     verifier_policy: required
     test_gate_mode: local_then_docker
     # local gate policy:

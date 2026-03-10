@@ -111,6 +111,9 @@ class RelaySettings:
     healer_swarm_mode: str = "failure_repair"
     healer_swarm_max_parallel_agents: int = 4
     healer_swarm_max_repair_cycles_per_attempt: int = 1
+    healer_swarm_analysis_timeout_seconds: int = 240
+    healer_swarm_recovery_timeout_seconds: int = 420
+    healer_swarm_orphan_subagent_ttl_seconds: int = 900
     healer_swarm_trigger_failure_classes: list[str] = field(
         default_factory=lambda: [
             "tests_failed",
@@ -258,6 +261,15 @@ class AppConfig:
                     healer_swarm_max_parallel_agents=int(item.get("swarm_max_parallel_agents") or 4),
                     healer_swarm_max_repair_cycles_per_attempt=int(
                         item.get("swarm_max_repair_cycles_per_attempt") or 1
+                    ),
+                    healer_swarm_analysis_timeout_seconds=int(
+                        item.get("swarm_analysis_timeout_seconds") or 240
+                    ),
+                    healer_swarm_recovery_timeout_seconds=int(
+                        item.get("swarm_recovery_timeout_seconds") or 420
+                    ),
+                    healer_swarm_orphan_subagent_ttl_seconds=int(
+                        item.get("swarm_orphan_subagent_ttl_seconds") or 900
                     ),
                     healer_swarm_trigger_failure_classes=_list_of_str(
                         item.get("swarm_trigger_failure_classes"),

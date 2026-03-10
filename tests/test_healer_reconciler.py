@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from flow_healer import healer_reconciler as reconciler_module
 from flow_healer.healer_reconciler import HealerReconciler
 from flow_healer.healer_workspace import HealerWorkspaceManager
 from flow_healer.store import SQLiteStore
+from flow_healer.swarm_markers import SWARM_PROCESS_MARKER
 
 
 def test_reconcile_cleans_inactive_issue_workspaces(tmp_path) -> None:
@@ -342,3 +344,62 @@ def test_reconcile_cleans_queued_workspace_with_expired_lease(tmp_path) -> None:
     assert not queued_workspace.exists()
     assert issue is not None
     assert issue["workspace_path"] == ""
+
+
+def test_reconcile_reaps_orphan_swarm_subagent_process_groups(tmp_path, monkeypatch) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        swarm_orphan_subagent_ttl_seconds=900,
+    )
+
+    monkeypatch.setattr(
+        reconciler_module,
+        "_list_process_snapshots",
+        lambda: [
+            reconciler_module._ProcessSnapshot(
+                pid=101,
+                ppid=1,
+                pgid=101,
+                elapsed_seconds=1200,
+                command=f"node /opt/homebrew/bin/codex exec ... {SWARM_PROCESS_MARKER} ... subagent for Flow Healer",
+            ),
+            reconciler_module._ProcessSnapshot(
+                pid=111,
+                ppid=1,
+                pgid=111,
+                elapsed_seconds=1300,
+                command="node /opt/homebrew/bin/codex exec ... subagent for Flow Healer",
+            ),
+            reconciler_module._ProcessSnapshot(
+                pid=202,
+                ppid=1,
+                pgid=202,
+                elapsed_seconds=300,
+                command=f"node /opt/homebrew/bin/codex exec ... {SWARM_PROCESS_MARKER} ... subagent for Flow Healer",
+            ),
+            reconciler_module._ProcessSnapshot(
+                pid=303,
+                ppid=777,
+                pgid=303,
+                elapsed_seconds=1500,
+                command=f"node /opt/homebrew/bin/codex exec ... {SWARM_PROCESS_MARKER} ... subagent for Flow Healer",
+            ),
+        ],
+    )
+    killed_groups: list[int] = []
+    monkeypatch.setattr(
+        reconciler_module,
+        "_terminate_process_group",
+        lambda pgid: killed_groups.append(pgid) or True,
+    )
+
+    summary = reconciler.reconcile()
+
+    assert summary["reaped_orphan_subagents"] == 1
+    assert killed_groups == [101]

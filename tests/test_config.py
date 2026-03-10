@@ -470,6 +470,9 @@ def test_app_config_loads_swarm_settings(tmp_path: Path) -> None:
             "    swarm_mode: failure_repair\n"
             "    swarm_max_parallel_agents: 6\n"
             "    swarm_max_repair_cycles_per_attempt: 2\n"
+            "    swarm_analysis_timeout_seconds: 150\n"
+            "    swarm_recovery_timeout_seconds: 330\n"
+            "    swarm_orphan_subagent_ttl_seconds: 1200\n"
             "    swarm_backend_strategy: match_selected_backend\n"
             "    swarm_trigger_failure_classes:\n"
             "      - tests_failed\n"
@@ -485,5 +488,8 @@ def test_app_config_loads_swarm_settings(tmp_path: Path) -> None:
     assert repo.healer_swarm_mode == "failure_repair"
     assert repo.healer_swarm_max_parallel_agents == 6
     assert repo.healer_swarm_max_repair_cycles_per_attempt == 2
+    assert repo.healer_swarm_analysis_timeout_seconds == 150
+    assert repo.healer_swarm_recovery_timeout_seconds == 330
+    assert repo.healer_swarm_orphan_subagent_ttl_seconds == 1200
     assert repo.healer_swarm_backend_strategy == "match_selected_backend"
     assert repo.healer_swarm_trigger_failure_classes == ["tests_failed", "verifier_failed"]

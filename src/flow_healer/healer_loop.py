@@ -269,6 +269,14 @@ class AutonomousHealerLoop:
                     1,
                     int(getattr(settings, "healer_swarm_max_repair_cycles_per_attempt", 1)),
                 ),
+                analysis_timeout_seconds=max(
+                    30,
+                    int(getattr(settings, "healer_swarm_analysis_timeout_seconds", 240)),
+                ),
+                recovery_timeout_seconds=max(
+                    60,
+                    int(getattr(settings, "healer_swarm_recovery_timeout_seconds", 420)),
+                ),
             )
             self.preflight_by_backend[backend] = HealerPreflight(
                 store=store,
@@ -293,6 +301,10 @@ class AutonomousHealerLoop:
             store=store,
             workspace_manager=self.workspace_manager,
             current_worker_id=self.worker_id,
+            swarm_orphan_subagent_ttl_seconds=max(
+                60,
+                int(getattr(settings, "healer_swarm_orphan_subagent_ttl_seconds", 900)),
+            ),
         )
         self.memory = HealerMemoryService(
             store=store,
@@ -340,6 +352,14 @@ class AutonomousHealerLoop:
                 max_repair_cycles_per_attempt=max(
                     1,
                     int(getattr(self.settings, "healer_swarm_max_repair_cycles_per_attempt", 1)),
+                ),
+                analysis_timeout_seconds=max(
+                    30,
+                    int(getattr(self.settings, "healer_swarm_analysis_timeout_seconds", 240)),
+                ),
+                recovery_timeout_seconds=max(
+                    60,
+                    int(getattr(self.settings, "healer_swarm_recovery_timeout_seconds", 420)),
                 ),
             )
             self.swarms_by_backend[backend] = swarm
@@ -944,6 +964,15 @@ class AutonomousHealerLoop:
                 attempt_id=attempt_id,
                 force_emit=True,
             )
+        elif event_type == "swarm_role_timeout":
+            role = str(normalized_payload.get("role") or "unknown")
+            stage = str(normalized_payload.get("stage") or "analysis")
+            level = "warning"
+            message = f"Swarm {stage} role {role} timed out."
+        elif event_type == "swarm_recovery_timeout":
+            stage = str(normalized_payload.get("stage") or "analysis")
+            level = "warning"
+            message = f"Swarm recovery timed out during {stage}."
         else:
             message = f"Swarm event: {event_type}"
         self._emit_swarm_event(

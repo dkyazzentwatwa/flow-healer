@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
+import subprocess
 import shutil
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import UTC, datetime
 
 from .healer_workspace import HealerWorkspaceManager
 from .store import SQLiteStore
+from .swarm_markers import SWARM_PROCESS_MARKER
 
 logger = logging.getLogger("apple_flow.healer_reconciler")
 
@@ -36,16 +42,19 @@ class HealerReconciler:
         store: SQLiteStore,
         workspace_manager: HealerWorkspaceManager,
         current_worker_id: str = "",
+        swarm_orphan_subagent_ttl_seconds: int = 900,
     ) -> None:
         self.store = store
         self.workspace_manager = workspace_manager
         self.current_worker_id = str(current_worker_id or "").strip()
+        self.swarm_orphan_subagent_ttl_seconds = max(60, int(swarm_orphan_subagent_ttl_seconds))
 
     def reconcile(self) -> dict[str, int]:
         recovered_leases = self.store.requeue_expired_healer_issue_leases()
         recovered_stale_active_issues = self._recover_stale_active_issues()
         interrupted_inactive_attempts = self.store.interrupt_inactive_healer_attempts()
         interrupted_superseded_attempts = self.store.interrupt_superseded_healer_attempts()
+        reaped_orphan_subagents = self._reap_orphan_swarm_subagents()
         cleaned_inactive_workspaces = self._cleanup_inactive_issue_workspaces()
         expired_locks = self.store.cleanup_expired_healer_locks()
         removed_orphans = self._sweep_orphan_workspaces()
@@ -53,6 +62,7 @@ class HealerReconciler:
             "recovered_stale_active_issues": recovered_stale_active_issues,
             "interrupted_inactive_attempts": interrupted_inactive_attempts,
             "interrupted_superseded_attempts": interrupted_superseded_attempts,
+            "reaped_orphan_subagents": reaped_orphan_subagents,
             "cleaned_inactive_workspaces": cleaned_inactive_workspaces,
             "recovered_leases": recovered_leases,
             "expired_locks": expired_locks,
@@ -170,6 +180,37 @@ class HealerReconciler:
             )
         return recovered
 
+    def _reap_orphan_swarm_subagents(self) -> int:
+        snapshots = _list_process_snapshots()
+        if not snapshots:
+            return 0
+        reaped = 0
+        reaped_groups: set[int] = set()
+        for snapshot in snapshots:
+            if snapshot.ppid != 1:
+                continue
+            if snapshot.elapsed_seconds < self.swarm_orphan_subagent_ttl_seconds:
+                continue
+            command = snapshot.command.lower()
+            if "codex exec" not in command:
+                continue
+            if SWARM_PROCESS_MARKER.lower() not in command:
+                continue
+            target_group = snapshot.pgid if snapshot.pgid > 0 else snapshot.pid
+            if target_group <= 0 or target_group in reaped_groups:
+                continue
+            if not _terminate_process_group(target_group):
+                continue
+            reaped += 1
+            reaped_groups.add(target_group)
+            logger.warning(
+                "Reaped orphan swarm subagent process group pgid=%s pid=%s elapsed=%ss",
+                target_group,
+                snapshot.pid,
+                snapshot.elapsed_seconds,
+            )
+        return reaped
+
     def _sweep_orphan_workspaces(self) -> int:
         if not self.workspace_manager.worktrees_root.exists():
             # Avoid a large issue-table scan on idle ticks when no healer worktrees exist.
@@ -224,3 +265,80 @@ def _is_expired_timestamp(raw: str) -> bool:
         except ValueError:
             continue
     return False
+
+
+@dataclass(slots=True, frozen=True)
+class _ProcessSnapshot:
+    pid: int
+    ppid: int
+    pgid: int
+    elapsed_seconds: int
+    command: str
+
+
+def _list_process_snapshots() -> list[_ProcessSnapshot]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,etimes=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    snapshots: list[_ProcessSnapshot] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.strip().split(maxsplit=4)
+        if len(parts) != 5:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            pgid = int(parts[2])
+            elapsed_seconds = int(parts[3])
+        except ValueError:
+            continue
+        snapshots.append(
+            _ProcessSnapshot(
+                pid=pid,
+                ppid=ppid,
+                pgid=pgid,
+                elapsed_seconds=elapsed_seconds,
+                command=parts[4],
+            )
+        )
+    return snapshots
+
+
+def _terminate_process_group(pgid: int) -> bool:
+    if pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    time.sleep(0.1)
+    if _process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+    return True
+
+
+def _process_group_exists(pgid: int) -> bool:
+    if pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
