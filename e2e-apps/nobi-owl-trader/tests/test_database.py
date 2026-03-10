@@ -1,5 +1,6 @@
 import pytest
-from api.database import init_db, get_db_connection
+
+from api.database import close_db, get_db_connection, init_db
 
 def test_database_initialization():
     """Test that database creates all required tables"""
@@ -18,4 +19,16 @@ def test_database_initialization():
     assert "portfolio_snapshots" in table_names
     assert "balances" in table_names
 
-    conn.close()
+    close_db()
+
+
+def test_database_initialization_reports_path_on_open_failure(tmp_path):
+    """Test that database startup failures include the target path."""
+    blocked_parent = tmp_path / "occupied"
+    blocked_parent.write_text("not a directory")
+    invalid_path = blocked_parent / "trading_data.db"
+
+    with pytest.raises(RuntimeError, match=str(invalid_path)):
+        init_db(str(invalid_path))
+
+    close_db()
