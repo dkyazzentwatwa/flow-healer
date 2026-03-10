@@ -3458,6 +3458,7 @@ class AutonomousHealerLoop:
             return
         self._last_blocked_label_repair_at = now
         self._reconcile_blocked_issue_labels()
+        self._reconcile_outcome_issue_labels()
 
     def _reconcile_blocked_issue_labels(self) -> None:
         if not bool(getattr(self.tracker, "enabled", False)):
@@ -3470,6 +3471,59 @@ class AutonomousHealerLoop:
             if not issue_id:
                 continue
             self._sync_blocked_issue_label(issue_id=issue_id, state=str(row.get("state") or ""))
+
+    def _reconcile_outcome_issue_labels(self) -> None:
+        if not bool(getattr(self.tracker, "enabled", False)):
+            return
+        for row in self.store.list_healer_issues(
+            states=[
+                "queued",
+                "claimed",
+                "running",
+                "verify_pending",
+                "blocked",
+                "failed",
+                "needs_clarification",
+                "pr_open",
+                "pr_pending_approval",
+            ],
+            limit=500,
+        ):
+            issue_id = str(row.get("issue_id") or "").strip()
+            if not issue_id:
+                continue
+            desired = self._desired_outcome_label_for_issue(issue_id=issue_id, issue_row=row)
+            self._sync_outcome_issue_label(issue_id=issue_id, label=desired)
+
+    def _desired_outcome_label_for_issue(self, *, issue_id: str, issue_row: dict[str, object]) -> str:
+        state = str(issue_row.get("state") or "").strip().lower()
+        last_failure_class = str(issue_row.get("last_failure_class") or "").strip()
+        has_backoff = bool(str(issue_row.get("backoff_until") or "").strip())
+        if state == "needs_clarification":
+            return _OUTCOME_LABEL_NEEDS_CLARIFICATION
+        if state in {"failed", "blocked"}:
+            if last_failure_class in _INFRA_FAILURE_CLASSES or last_failure_class == "infra_pause":
+                return _OUTCOME_LABEL_BLOCKED_ENVIRONMENT
+            return _OUTCOME_LABEL_RETRY_EXHAUSTED
+        if state == "queued" and has_backoff and (
+            last_failure_class in _INFRA_FAILURE_CLASSES or last_failure_class == "infra_pause"
+        ):
+            return _OUTCOME_LABEL_BLOCKED_ENVIRONMENT
+        if state not in {"pr_open", "pr_pending_approval"}:
+            return ""
+        latest_attempts = self.store.list_healer_attempts(issue_id=issue_id, limit=1)
+        if not latest_attempts:
+            return _OUTCOME_LABEL_DONE_CODE
+        latest = latest_attempts[0]
+        profile = str(latest.get("validation_profile") or "").strip().lower()
+        if profile == "artifact_only":
+            return _OUTCOME_LABEL_DONE_ARTIFACT
+        summary = latest.get("test_summary") or {}
+        if isinstance(summary, dict):
+            mode = str(summary.get("mode") or "").strip().lower()
+            if mode == "skipped_artifact_only":
+                return _OUTCOME_LABEL_DONE_ARTIFACT
+        return _OUTCOME_LABEL_DONE_CODE
 
     @staticmethod
     def _normalize_labels(labels: object | None) -> set[str]:

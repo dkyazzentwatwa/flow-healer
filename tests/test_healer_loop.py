@@ -322,6 +322,76 @@ def test_sync_outcome_issue_label_sets_target_and_clears_other_labels(tmp_path):
     }
 
 
+def test_reconcile_outcome_issue_labels_backfills_artifact_done_label(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="4991",
+        repo="owner/repo",
+        title="Issue 4991",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="4991", state="pr_open")
+    store.create_healer_attempt(
+        attempt_id="ha_4991_1",
+        issue_id="4991",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+        validation_profile="artifact_only",
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_4991_1",
+        state="pr_open",
+        actual_diff_set=["docs/summary.md"],
+        test_summary={"mode": "skipped_artifact_only"},
+        verifier_summary={},
+        failure_class="",
+        failure_reason="",
+    )
+
+    loop = _make_loop(store)
+
+    loop._reconcile_outcome_issue_labels()
+
+    assert any(
+        call.kwargs.get("label") == "healer:done-artifact"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
+
+
+def test_reconcile_outcome_issue_labels_backfills_retry_exhausted_label(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="4992",
+        repo="owner/repo",
+        title="Issue 4992",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="4992",
+        state="failed",
+        last_failure_class="verifier_failed",
+        last_failure_reason="Verifier failed repeatedly.",
+    )
+    loop = _make_loop(store)
+
+    loop._reconcile_outcome_issue_labels()
+
+    assert any(
+        call.kwargs.get("label") == "healer:retry-exhausted"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
+
+
 def test_process_claimed_issue_low_confidence_sets_needs_clarification_label(tmp_path, monkeypatch):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
