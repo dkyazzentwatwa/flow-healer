@@ -68,6 +68,12 @@ repos:
     healer_mode: guarded_pr
     issue_required_labels:
       - healer:ready
+    # issue contract parsing:
+    # - lenient (default): infer outputs/validation and only gate on low confidence
+    # - strict: require explicit Required code outputs + Validation command
+    issue_contract_mode: lenient
+    # parser confidence threshold for clarification gating (0.0 - 1.0)
+    parse_confidence_threshold: 0.3
     pr_actions_require_approval: false
     pr_required_label: healer:pr-approved
     pr_auto_approve_clean: false

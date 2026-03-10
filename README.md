@@ -277,12 +277,23 @@ This format helps Flow Healer infer:
 
 If a file is reference material rather than an output target, mark it as input-only context in the issue body.
 
+If you want stricter contract enforcement, enable strict parsing in repo config:
+
+```yaml
+repos:
+  - name: demo
+    issue_contract_mode: strict
+    parse_confidence_threshold: 0.3
+```
+
+In strict mode, Flow Healer moves issues to `needs_clarification` unless both `Required code outputs` and `Validation` are explicit.
+
 ## Command Reference
 
 | Command | Purpose |
 | --- | --- |
 | `flow-healer doctor [--repo NAME] [--preflight]` | Validate environment, repo config, Docker, Codex, and token setup |
-| `flow-healer status [--repo NAME]` | Show queue state, pause status, and recent attempts |
+| `flow-healer status [--repo NAME]` | Show queue state, pause status, recent attempts, swarm/failure-domain counters, and reliability canary metrics |
 | `flow-healer start [--repo NAME] [--once]` | Run one controlled healing pass or start the continuous runtime |
 | `flow-healer serve [--repo NAME] [--host HOST] [--port PORT]` | Start the runtime with dashboard and operator controls |
 | `flow-healer scan [--repo NAME] [--dry-run]` | Run deterministic repo scanning with optional no-write mode |
