@@ -1443,6 +1443,127 @@ def test_process_claimed_issue_swarm_recovers_verifier_failure(tmp_path):
     loop._commit_and_push.assert_called_once()
 
 
+def test_maybe_recover_with_swarm_skips_infra_failure_domain(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_swarm_enabled=True)
+    workspace = tmp_path / "workspaces" / "issue-504461"
+    workspace.mkdir(parents=True)
+    issue = HealerIssue(
+        issue_id="504461",
+        repo="owner/repo",
+        title="Issue 504461",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+        html_url="https://github.com/owner/repo/issues/504461",
+    )
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=("src/flow_healer/service.py",),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+    )
+
+    outcome = loop._maybe_recover_with_swarm(
+        selected_backend="exec",
+        selected_swarm=loop.swarm,
+        selected_runner=loop.runner,
+        issue=issue,
+        attempt_id="hat_504461",
+        attempt_no=1,
+        task_spec=task_spec,
+        learned_context="",
+        feedback_context="",
+        failure_class="tests_failed",
+        failure_reason="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+        proposer_output="",
+        test_summary={"failed_tests": 1},
+        verifier_summary={},
+        workspace_status={},
+        workspace=workspace,
+        targeted_tests=[],
+    )
+
+    assert outcome is None
+    loop.swarm.recover.assert_not_called()
+    assert store.get_state("healer_swarm_skipped_domain") == "1"
+    assert store.get_state("healer_swarm_skipped_domain_infra") == "1"
+    events = store.list_healer_events(issue_id="504461", limit=5)
+    assert events
+    assert events[0]["event_type"] == "swarm_skipped_domain"
+    assert events[0]["payload"]["failure_domain"] == "infra"
+
+
+def test_maybe_recover_with_swarm_runs_for_code_failure_domain(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_swarm_enabled=True)
+    workspace = tmp_path / "workspaces" / "issue-504462"
+    workspace.mkdir(parents=True)
+    issue = HealerIssue(
+        issue_id="504462",
+        repo="owner/repo",
+        title="Issue 504462",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+        html_url="https://github.com/owner/repo/issues/504462",
+    )
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=("src/flow_healer/service.py",),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+    )
+    loop.swarm.recover.return_value = SwarmRecoveryOutcome(
+        recovered=False,
+        strategy="repair",
+        summary="Could not recover",
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="repair",
+            summary="Could not recover",
+            root_cause="assertion mismatch",
+            edit_scope=("src/flow_healer/service.py",),
+            targeted_tests=(),
+            validation_focus=("service",),
+        ),
+        failure_class="tests_failed",
+        failure_reason="AssertionError",
+    )
+
+    outcome = loop._maybe_recover_with_swarm(
+        selected_backend="exec",
+        selected_swarm=loop.swarm,
+        selected_runner=loop.runner,
+        issue=issue,
+        attempt_id="hat_504462",
+        attempt_no=1,
+        task_spec=task_spec,
+        learned_context="",
+        feedback_context="",
+        failure_class="tests_failed",
+        failure_reason="AssertionError: expected 200 got 500",
+        proposer_output="",
+        test_summary={"failed_tests": 1},
+        verifier_summary={},
+        workspace_status={},
+        workspace=workspace,
+        targeted_tests=[],
+    )
+
+    assert outcome is not None
+    loop.swarm.recover.assert_called_once()
+    assert store.get_state("healer_swarm_runs") == "1"
+    assert store.get_state("healer_swarm_unrecovered") == "1"
+    assert store.get_state("healer_swarm_skipped_domain") in {None, ""}
+
+
 def test_process_claimed_issue_swarm_infra_pause_requeues_with_infra_failure_class(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

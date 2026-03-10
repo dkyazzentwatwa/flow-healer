@@ -138,11 +138,45 @@ def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
     assert swarm_metrics["backend_exec"] == 0
     assert swarm_metrics["backend_app_server"] == 0
     assert swarm_metrics["strategy_counts"]["repair"] == 0
+    assert swarm_metrics["skipped_domain"] == 0
+    assert swarm_metrics["skipped_by_domain"]["infra"] == 0
+    assert swarm_metrics["skipped_by_domain"]["contract"] == 0
+    assert swarm_metrics["skipped_by_domain"]["unknown"] == 0
     resource_audit = rows[0]["resource_audit"]
     assert resource_audit["worktrees"]["count"] == 0
     assert resource_audit["leases"]["total"] == 0
     assert resource_audit["locks"]["active"] == 0
     assert resource_audit["docker"]["prune_enabled"] is False
+
+
+def test_status_rows_report_swarm_domain_skip_counters(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_state("healer_swarm_skipped_domain", "4")
+    runtime.store.set_state("healer_swarm_skipped_domain_infra", "2")
+    runtime.store.set_state("healer_swarm_skipped_domain_contract", "1")
+    runtime.store.set_state("healer_swarm_skipped_domain_unknown", "1")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    swarm_metrics = rows[0]["swarm_metrics"]
+    assert swarm_metrics["skipped_domain"] == 4
+    assert swarm_metrics["skipped_by_domain"] == {"infra": 2, "contract": 1, "unknown": 1}
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
