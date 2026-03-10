@@ -3,11 +3,13 @@ import Stripe from "https://esm.sh/stripe@18.5.0";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.2";
 import {
   ensureBillingOrigin,
+} from "../_shared/billing.ts";
+import {
   normalizeExistingSubscription,
   normalizeStripeSubscription,
   type BillingPlan,
   type ExistingSubscription,
-} from "../_shared/billing.ts";
+} from "../_shared/usage-billing.ts";
 
 const PRODUCT_TO_PLAN: Record<string, string> = {
   "prod_U4PqagQZIyzGV0": "pro",
