@@ -89,3 +89,38 @@ def test_automation_rule_serialization_preserves_boolean_defaults(db):
     assert isinstance(retrieved.is_active, bool)
     assert retrieved.to_dict()["cooldown_minutes"] == 60
     assert retrieved.to_dict()["only_if_in_position"] is True
+
+
+def test_serializable_models_parse_string_boolean_values_stably():
+    trade = Trade(
+        id="test-bool-strings",
+        timestamp=int(datetime.now().timestamp()),
+        symbol="SOL/USDT",
+        side="sell",
+        amount=2.0,
+        price=150.0,
+        paper="false",
+        is_trailing="1",
+    )
+    rule = AutomationRule(
+        id="rule-bool-strings",
+        name="Exit Rule",
+        symbol="SOL/USDT",
+        timeframe="15m",
+        side="sell",
+        signal_type="MACD",
+        amount=10.0,
+        only_if_in_position="0",
+        reduce_only="true",
+        is_active="false",
+    )
+
+    assert trade.paper is False
+    assert trade.is_trailing is True
+    assert trade.to_dict()["paper"] is False
+    assert trade.to_dict()["is_trailing"] is True
+    assert rule.only_if_in_position is False
+    assert rule.reduce_only is True
+    assert rule.is_active is False
+    assert rule.to_dict()["only_if_in_position"] is False
+    assert rule.to_dict()["is_active"] is False
