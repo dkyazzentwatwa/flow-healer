@@ -2,14 +2,13 @@ import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import Stripe from "https://esm.sh/stripe@18.5.0";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.2";
 import {
+  getBillingSupabaseKey,
   ensureBillingOrigin,
-} from "../_shared/billing.ts";
-import {
   normalizeExistingSubscription,
   normalizeStripeSubscription,
   type BillingPlan,
   type ExistingSubscription,
-} from "../_shared/usage-billing.ts";
+} from "../_shared/billing.ts";
 
 const PRODUCT_TO_PLAN: Record<string, string> = {
   "prod_U4PqagQZIyzGV0": "pro",
@@ -36,7 +35,7 @@ serve(async (req) => {
 
     const supabaseAdmin = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+      getBillingSupabaseKey(),
       { auth: { persistSession: false } },
     );
 

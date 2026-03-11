@@ -50,6 +50,10 @@ function normalizeExistingPlan(existingSubscription?: ExistingSubscription | nul
 }
 
 function normalizeExistingStatus(existingSubscription?: ExistingSubscription | null): BillingStatus {
+  if (existingSubscription?.status === "canceled") {
+    return "cancelled";
+  }
+
   return isBillingStatus(existingSubscription?.status) ? existingSubscription.status : "active";
 }
 
