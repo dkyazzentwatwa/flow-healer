@@ -459,6 +459,33 @@ def test_clarification_reasons_strict_mode_requires_validation_and_outputs(tmp_p
     assert reasons == ["missing_required_outputs", "missing_validation"]
 
 
+def test_clarification_reasons_include_ambiguous_execution_root(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        healer_issue_contract_mode="lenient",
+        healer_parse_confidence_threshold=0.3,
+    )
+    spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=(
+            "e2e-smoke/node/src/app.js",
+            "e2e-smoke/python/app/main.py",
+        ),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+        parse_confidence=0.6,
+        validation_commands=(),
+        execution_root="",
+    )
+
+    reasons = loop._clarification_reasons_for_task_spec(task_spec=spec)
+
+    assert reasons == ["ambiguous_execution_root"]
+
+
 def test_clarification_reasons_lenient_mode_only_uses_confidence_threshold(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -480,6 +507,82 @@ def test_clarification_reasons_lenient_mode_only_uses_confidence_threshold(tmp_p
     reasons = loop._clarification_reasons_for_task_spec(task_spec=spec)
 
     assert reasons == ["low_confidence"]
+
+
+def test_build_needs_clarification_comment_includes_contract_skeleton_for_root_and_validation_gaps(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=(
+            "e2e-smoke/node/src/app.js",
+            "e2e-smoke/node/test/app.test.js",
+        ),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+        parse_confidence=0.6,
+        validation_commands=(),
+        execution_root="",
+    )
+
+    comment = loop._build_needs_clarification_comment(
+        reasons=["missing_validation", "ambiguous_execution_root"],
+        task_spec=spec,
+    )
+
+    assert "Suggested issue-contract skeleton" in comment
+    assert "Execution root:" in comment
+    assert "- e2e-smoke/node" in comment
+    assert "Required code outputs:" in comment
+    assert "- e2e-smoke/node/src/app.js" in comment
+    assert "Validation:" in comment
+
+
+def test_process_claimed_issue_posts_stronger_contract_remediation_comment(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="434",
+        repo="owner/repo",
+        title="Fix smoke fixture",
+        body="Fix the smoke test under e2e-smoke/node.",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_issue_contract_mode="strict")
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "434",
+        "state": "open",
+        "labels": ["healer:ready"],
+    }
+    posted: list[str] = []
+    loop._post_issue_status = lambda issue_id, body: posted.append(body)
+    monkeypatch.setattr(
+        "flow_healer.healer_loop.compile_task_spec",
+        lambda issue_title, issue_body: HealerTaskSpec(
+            task_kind="fix",
+            output_mode="code_patch",
+            output_targets=("e2e-smoke/node/src/app.js",),
+            tool_policy="restricted_patch",
+            validation_profile="code_change",
+            parse_confidence=0.8,
+            validation_commands=(),
+            execution_root="",
+        ),
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    assert posted
+    assert "Suggested issue-contract skeleton" in posted[0]
+    assert "Validation:" in posted[0]
+    assert "Execution root:" in posted[0]
 
 
 def test_collect_targeted_tests_prefers_explicit_paths(tmp_path):

@@ -20,15 +20,26 @@ body:
     id: required_outputs
     attributes:
       label: Required code outputs
+      description: List the exact files Flow Healer may edit for this task.
       placeholder: |
         - e2e-smoke/py-fastapi/app/add.py
         - e2e-smoke/py-fastapi/tests/test_add.py
     validations:
       required: true
   - type: textarea
+    id: execution_root
+    attributes:
+      label: Execution root
+      description: Optional when the outputs and validation already point to one workspace; fill this in when the repo has multiple candidate roots.
+      placeholder: |
+        - e2e-smoke/py-fastapi
+    validations:
+      required: false
+  - type: textarea
     id: validation
     attributes:
       label: Validation commands
+      description: Include the exact command Flow Healer should use to prove the fix.
       placeholder: |
         - cd e2e-smoke/py-fastapi && pytest -q
     validations:

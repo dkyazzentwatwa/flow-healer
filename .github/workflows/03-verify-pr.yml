@@ -30,21 +30,46 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      - name: Lightweight validation
+      - name: Full validation
+        id: full_validation
         run: |
           pytest -q
 
       - name: Run reliability canary benchmark pack
+        id: reliability_canary
         run: |
           python scripts/run_reliability_canary.py --output reliability-canary-report.json
 
       - name: Enforce reliability canary gate
+        id: reliability_gate
         run: |
           python scripts/evaluate_reliability_canary_gate.py \
             --report reliability-canary-report.json \
             --policy .github/reliability-canary-policy.json \
             --mode enforce \
             --summary-output reliability-canary-summary.md
+
+      - name: Write phased validation summary
+        if: always()
+        env:
+          FULL_VALIDATION_OUTCOME: ${{ steps.full_validation.outcome }}
+          RELIABILITY_CANARY_OUTCOME: ${{ steps.reliability_canary.outcome }}
+          RELIABILITY_GATE_OUTCOME: ${{ steps.reliability_gate.outcome }}
+        run: |
+          full_pass="failed"
+          promotion_state="merge_blocked"
+          if [[ "${FULL_VALIDATION_OUTCOME}" == "success" && "${RELIABILITY_CANARY_OUTCOME}" == "success" && "${RELIABILITY_GATE_OUTCOME}" == "success" ]]; then
+            full_pass="passed"
+            promotion_state="promotion_ready"
+          fi
+          cat > phased-validation-summary.md <<EOF
+          # Flow Healer phased validation
+          
+          - validation_lane: full_only
+          - fast_pass: not_run
+          - full_pass: ${full_pass}
+          - promotion_state: ${promotion_state}
+          EOF
 
       - name: Upload reliability canary artifacts
         uses: actions/upload-artifact@v4
@@ -53,3 +78,4 @@ jobs:
           path: |
             reliability-canary-report.json
             reliability-canary-summary.md
+            phased-validation-summary.md

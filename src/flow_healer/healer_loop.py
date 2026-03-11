@@ -32,7 +32,7 @@ from .healer_runner import HealerRunner, _stage_workspace_changes
 from .healer_swarm import HealerSwarm, SwarmRecoveryOutcome, SwarmRecoveryPlan, build_connector_subagent_backend
 from .healer_scan import FlowHealerScanner
 from .healer_tracker import GitHubHealerTracker, HealerIssue, PullRequestDetails, PullRequestResult
-from .healer_task_spec import compile_task_spec
+from .healer_task_spec import HealerTaskSpec, compile_task_spec, lint_issue_contract
 from .healer_triage import classify_failure_domain, classify_failure_family
 from .healer_verifier import HealerVerifier
 from .language_strategies import UnsupportedLanguageError
@@ -2446,7 +2446,10 @@ class AutonomousHealerLoop:
                 )
                 self._post_issue_status(
                     issue_id=issue.issue_id,
-                    body=self._build_needs_clarification_comment(clarification_reasons),
+                    body=self._build_needs_clarification_comment(
+                        clarification_reasons,
+                        task_spec=task_spec,
+                    ),
                 )
                 self.store.set_state(clarification_key, "true")
             self.store.set_healer_issue_state(
@@ -4327,25 +4330,27 @@ class AutonomousHealerLoop:
         return max(0.0, min(1.0, threshold))
 
     def _clarification_reasons_for_task_spec(self, *, task_spec: HealerTaskSpec) -> list[str]:
-        reasons: list[str] = []
-        threshold = self._parse_confidence_threshold()
-        if float(task_spec.parse_confidence) < threshold:
-            reasons.append("low_confidence")
-        if self._issue_contract_mode() == "strict":
-            if not task_spec.output_targets:
-                reasons.append("missing_required_outputs")
-            if not task_spec.validation_commands:
-                reasons.append("missing_validation")
-        return reasons
+        lint = lint_issue_contract(
+            issue_title="",
+            issue_body="",
+            task_spec=task_spec,
+            contract_mode=self._issue_contract_mode(),
+            parse_confidence_threshold=self._parse_confidence_threshold(),
+        )
+        return list(lint.reason_codes)
 
     @staticmethod
-    def _build_needs_clarification_comment(reasons: list[str] | None = None) -> str:
+    def _build_needs_clarification_comment(
+        reasons: list[str] | None = None,
+        task_spec: HealerTaskSpec | None = None,
+    ) -> str:
         reason_lines: list[str] = []
         normalized_reasons = [str(item or "").strip() for item in (reasons or []) if str(item or "").strip()]
         reason_map = {
             "low_confidence": "Parser confidence is below the configured threshold for autonomous edits.",
             "missing_required_outputs": "Strict issue-contract mode requires `Required code outputs:`.",
             "missing_validation": "Strict issue-contract mode requires a `Validation:` command.",
+            "ambiguous_execution_root": "The issue maps to multiple execution roots, so the runtime scope is ambiguous.",
         }
         for reason in normalized_reasons:
             rendered = reason_map.get(reason, reason.replace("_", " "))
@@ -4353,16 +4358,53 @@ class AutonomousHealerLoop:
         reason_block = ""
         if reason_lines:
             reason_block = "Detected issue-contract gaps:\n" + "\n".join(reason_lines) + "\n\n"
+        suggested_root = ""
+        output_targets: tuple[str, ...] = ()
+        validation_placeholder = "Validation: pytest tests/test_auth.py -v"
+        if task_spec is not None:
+            output_targets = tuple(str(path or "").strip() for path in task_spec.output_targets if str(path or "").strip())
+            lint = lint_issue_contract(
+                issue_title="",
+                issue_body="",
+                task_spec=task_spec,
+                contract_mode="strict",
+                parse_confidence_threshold=0.0,
+            )
+            suggested_root = lint.suggested_execution_root
+            if task_spec.validation_commands:
+                validation_placeholder = f"Validation: {task_spec.validation_commands[0]}"
+            elif suggested_root:
+                validation_placeholder = f"Validation: cd {suggested_root} && <run-your-checks>"
+        suggested_contract_lines = [
+            "Suggested issue-contract skeleton:",
+            "```",
+            "Required code outputs:",
+        ]
+        if output_targets:
+            suggested_contract_lines.extend(f"- {path}" for path in output_targets)
+        else:
+            suggested_contract_lines.extend(["- src/auth/login.py", "- tests/test_auth.py"])
+        if suggested_root:
+            suggested_contract_lines.extend(["", "Execution root:", f"- {suggested_root}"])
+        suggested_contract_lines.extend(["", validation_placeholder, "```"])
+        suggested_contract = "\n".join(suggested_contract_lines)
         return (
             "## Flow Healer — Needs Clarification\n\n"
             "This issue doesn't have enough structured information for me to reliably generate a fix.\n"
             f"{reason_block}"
-            "Please add one or more of the following to the issue body:\n\n"
+            "Please update the issue body with a tighter execution contract so the next run can stay scoped and verifiable.\n\n"
+            f"{suggested_contract}\n\n"
+            "If you need to fill it in manually, include these sections:\n\n"
             "**Required code outputs** (the files I should edit):\n"
             "```\n"
             "Required code outputs:\n"
             "- src/auth/login.py\n"
             "- tests/test_auth.py\n"
+            "```\n\n"
+            "**Execution root** (the directory commands should run from when multiple roots are possible):\n"
+            "```\n"
+            "Execution root:\n"
+            "- e2e-smoke/node\n"
             "```\n\n"
             "**Validation command** (how to verify the fix):\n"
             "```\n"

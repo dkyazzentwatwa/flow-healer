@@ -214,6 +214,7 @@ class FlowHealerService:
     ) -> list[dict[str, object]]:
         cache_key = (repo_name or "").strip() or "*"
         ttl_seconds = self._status_cache_ttl_seconds(repo_name)
+        token_present = bool(os.getenv(self.config.service.github_token_env, "").strip())
         if not force_refresh and ttl_seconds > 0:
             with self._status_cache_lock:
                 cached = self._status_cache.get(cache_key)
@@ -223,6 +224,7 @@ class FlowHealerService:
         for repo in self.config.select_repos(repo_name):
             runtime = self.build_runtime(repo)
             try:
+                repo_path = Path(repo.healer_repo_path).expanduser().resolve()
                 connector_health = self._connector_health_payload(runtime, probe_connector=probe_connector)
                 connector_health_by_backend = self._connector_health_payload_by_backend(
                     runtime,
@@ -243,6 +245,11 @@ class FlowHealerService:
                     attempt_row = dict(attempt)
                     issue = issues_by_id.get(str(attempt.get("issue_id") or ""))
                     route = classify_issue_route(issue, attempt)
+                    test_summary = attempt.get("test_summary") or {}
+                    if isinstance(test_summary, dict):
+                        attempt_row["validation_lane"] = str(test_summary.get("validation_lane") or "")
+                        attempt_row["promotion_state"] = str(test_summary.get("promotion_state") or "")
+                        attempt_row["phase_states"] = dict(test_summary.get("phase_states") or {})
                     attempt_row["diagnosis"] = route.diagnosis
                     attempt_row["failure_family"] = route.failure_family
                     attempt_row["recommended_skill"] = route.recommended_skill
@@ -263,6 +270,9 @@ class FlowHealerService:
                     store=runtime.store,
                     gate_mode=repo.healer_test_gate_mode,
                 )
+                git_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"])
+                branch_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--verify", repo.healer_default_branch])
+                preflight_summary = summarize_preflight_readiness(preflight_reports)
                 preflight_report_rows = []
                 for report in preflight_reports:
                     readiness = preflight_readiness_assessment(report)
@@ -281,6 +291,50 @@ class FlowHealerService:
                             "blockers": list(readiness["blockers"]),
                         }
                     )
+                failure_domain_metrics = _failure_domain_metrics(runtime.store)
+                retry_playbook_metrics = _retry_playbook_metrics(runtime.store)
+                reliability_canary = _reliability_canary_metrics(runtime.store)
+                policy = _build_policy_payload(
+                    store=runtime.store,
+                    paused=runtime.store.get_state("healer_paused") == "true",
+                    circuit_breaker_open=breaker.open,
+                    trust_state="",
+                    trust_recommended_operator_action="",
+                    failure_domain_metrics=failure_domain_metrics,
+                    retry_playbook_metrics=retry_playbook_metrics,
+                    reliability_canary=reliability_canary,
+                )
+                trust = _build_trust_payload(
+                    store=runtime.store,
+                    paused=runtime.store.get_state("healer_paused") == "true",
+                    circuit_breaker_open=breaker.open,
+                    circuit_breaker_cooldown_remaining_seconds=breaker.cooldown_remaining_seconds,
+                    preflight_summary=preflight_summary,
+                    state_counts=counts,
+                    connector_available=bool(connector_health.get("available")),
+                    tracker_available=runtime.store.get_state("healer_tracker_available") != "false",
+                    dominant_failure_domain=_dominant_failure_domain(
+                        retry_playbook_metrics=retry_playbook_metrics,
+                        failure_domain_metrics=failure_domain_metrics,
+                    ),
+                    repo_path_exists=repo_path.exists(),
+                    git_repo_ok=git_ok,
+                    default_branch_ok=branch_ok,
+                    github_token_present=token_present,
+                    policy=policy,
+                )
+                policy = _build_policy_payload(
+                    store=runtime.store,
+                    paused=runtime.store.get_state("healer_paused") == "true",
+                    circuit_breaker_open=breaker.open,
+                    trust_state=str(trust.get("state") or ""),
+                    trust_recommended_operator_action=str(trust.get("recommended_operator_action") or ""),
+                    failure_domain_metrics=failure_domain_metrics,
+                    retry_playbook_metrics=retry_playbook_metrics,
+                    reliability_canary=reliability_canary,
+                )
+                trust["policy_outcome"] = str(policy.get("outcome") or "")
+                trust["policy_recommendation"] = str(policy.get("recommendation") or "")
                 rows.append(
                     {
                         "repo": repo.repo_name,
@@ -343,15 +397,18 @@ class FlowHealerService:
                         ).resource_audit(),
                         "preflight": {
                             "gate_mode": repo.healer_test_gate_mode,
-                            "summary": summarize_preflight_readiness(preflight_reports),
+                            "summary": preflight_summary,
                             "reports": preflight_report_rows,
                         },
+                        "trust": trust,
+                        "policy": policy,
+                        "issue_explanations": _build_issue_explanations(issues=issues, trust=trust),
                         "app_server_metrics": _app_server_metrics(runtime.store),
                         "codex_native_multi_agent_metrics": _codex_native_multi_agent_metrics(runtime.store),
                         "swarm_metrics": _swarm_metrics(runtime.store),
-                        "failure_domain_metrics": _failure_domain_metrics(runtime.store),
-                        "retry_playbook_metrics": _retry_playbook_metrics(runtime.store),
-                        "reliability_canary": _reliability_canary_metrics(runtime.store),
+                        "failure_domain_metrics": failure_domain_metrics,
+                        "retry_playbook_metrics": retry_playbook_metrics,
+                        "reliability_canary": reliability_canary,
                         "reliability_daily_rollups": _reliability_daily_rollups(runtime.store),
                         "reliability_trends": _reliability_trend_metrics(runtime.store),
                         "issue_outcomes": _issue_outcome_metrics(issues),
@@ -531,8 +588,58 @@ class FlowHealerService:
                 connector_health_by_backend = runtime.loop._connector_health_by_backend()
                 runtime.loop._record_connector_health(connector_health)
                 breaker = runtime.loop._circuit_breaker_status()
+                issues = runtime.store.list_healer_issues(limit=500)
+                counts: dict[str, int] = {}
+                for issue in issues:
+                    state = str(issue.get("state") or "unknown")
+                    counts[state] = counts.get(state, 0) + 1
+                preflight_summary = summarize_preflight_readiness(reports)
+                failure_domain_metrics = _failure_domain_metrics(runtime.store)
+                retry_playbook_metrics = _retry_playbook_metrics(runtime.store)
+                reliability_canary = _reliability_canary_metrics(runtime.store)
+                policy = _build_policy_payload(
+                    store=runtime.store,
+                    paused=runtime.store.get_state("healer_paused") == "true",
+                    circuit_breaker_open=breaker.open,
+                    trust_state="",
+                    trust_recommended_operator_action="",
+                    failure_domain_metrics=failure_domain_metrics,
+                    retry_playbook_metrics=retry_playbook_metrics,
+                    reliability_canary=reliability_canary,
+                )
                 git_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"])
                 branch_ok = _check_command(["git", "-C", str(repo_path), "rev-parse", "--verify", repo.healer_default_branch])
+                trust = _build_trust_payload(
+                    store=runtime.store,
+                    paused=runtime.store.get_state("healer_paused") == "true",
+                    circuit_breaker_open=breaker.open,
+                    circuit_breaker_cooldown_remaining_seconds=breaker.cooldown_remaining_seconds,
+                    preflight_summary=preflight_summary,
+                    state_counts=counts,
+                    connector_available=bool(connector_health.get("available")),
+                    tracker_available=runtime.store.get_state("healer_tracker_available") != "false",
+                    dominant_failure_domain=_dominant_failure_domain(
+                        retry_playbook_metrics=retry_playbook_metrics,
+                        failure_domain_metrics=failure_domain_metrics,
+                    ),
+                    repo_path_exists=repo_path.exists(),
+                    git_repo_ok=git_ok,
+                    default_branch_ok=branch_ok,
+                    github_token_present=token_present,
+                    policy=policy,
+                )
+                policy = _build_policy_payload(
+                    store=runtime.store,
+                    paused=runtime.store.get_state("healer_paused") == "true",
+                    circuit_breaker_open=breaker.open,
+                    trust_state=str(trust.get("state") or ""),
+                    trust_recommended_operator_action=str(trust.get("recommended_operator_action") or ""),
+                    failure_domain_metrics=failure_domain_metrics,
+                    retry_playbook_metrics=retry_playbook_metrics,
+                    reliability_canary=reliability_canary,
+                )
+                trust["policy_outcome"] = str(policy.get("outcome") or "")
+                trust["policy_recommendation"] = str(policy.get("recommendation") or "")
                 rows.append(
                     {
                         "repo": repo.repo_name,
@@ -574,6 +681,8 @@ class FlowHealerService:
                         "tracker_last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
                         "worker": _worker_runtime_state(runtime.store),
                         "preflight_gate_mode": repo.healer_test_gate_mode,
+                        "trust": trust,
+                        "policy": policy,
                         "preflight_reports": [
                             {
                                 "language": report.language,
@@ -899,6 +1008,387 @@ def _worker_runtime_state(store: SQLiteStore) -> dict[str, object]:
         "recovered_leases": _safe_state_int(store, "healer_reconcile_recovered_leases"),
         "interrupted_inactive_attempts": _safe_state_int(store, "healer_reconcile_interrupted_inactive_attempts"),
         "interrupted_superseded_attempts": _safe_state_int(store, "healer_reconcile_interrupted_superseded_attempts"),
+    }
+
+
+def _build_trust_payload(
+    *,
+    store: SQLiteStore,
+    paused: bool,
+    circuit_breaker_open: bool,
+    circuit_breaker_cooldown_remaining_seconds: int,
+    preflight_summary: dict[str, object],
+    state_counts: dict[str, int],
+    connector_available: bool,
+    tracker_available: bool,
+    dominant_failure_domain: str,
+    repo_path_exists: bool = True,
+    git_repo_ok: bool = True,
+    default_branch_ok: bool = True,
+    github_token_present: bool = True,
+    policy: dict[str, object] | None = None,
+) -> dict[str, object]:
+    infra_pause = _infra_pause_snapshot(store)
+    needs_clarification_count = max(0, int(state_counts.get("needs_clarification", 0)))
+    failed_issue_count = max(0, int(state_counts.get("failed", 0)))
+    actionable_preflight_degradation = _preflight_summary_is_actionably_degraded(preflight_summary)
+    preflight_class = str(preflight_summary.get("overall_class") or "").strip().lower()
+    blocking_roots = list(preflight_summary.get("blocking_execution_roots") or [])
+
+    state = "ready"
+    score = 100
+    summary = "Repo is ready for autonomous issue execution."
+    why_runnable = "Repo is ready for autonomous issue execution."
+    why_blocked = ""
+    recommended_operator_action = "continue_autonomous_healing"
+
+    if paused:
+        state = "paused"
+        score = 40
+        summary = "Autonomous healing is paused for this repo."
+        why_runnable = ""
+        why_blocked = "Autonomous healing is paused for this repo."
+        recommended_operator_action = "resume_repo"
+    elif circuit_breaker_open:
+        state = "quarantined"
+        score = 0
+        summary = "Circuit breaker is open and the repo is quarantined from new healing attempts."
+        why_runnable = ""
+        why_blocked = (
+            "Circuit breaker is open; pause new healing attempts until recent failures are understood."
+        )
+        recommended_operator_action = "inspect_circuit_breaker"
+    elif (
+        not repo_path_exists
+        or not git_repo_ok
+        or not default_branch_ok
+        or not github_token_present
+        or infra_pause["active"]
+        or not connector_available
+        or not tracker_available
+        or preflight_class == "blocked"
+    ):
+        state = "needs_environment_fix"
+        score = 20
+        why_runnable = ""
+        if not repo_path_exists:
+            why_blocked = "The configured repo path does not exist, so doctor cannot verify execution readiness."
+        elif not git_repo_ok:
+            why_blocked = "The configured repo path is not a valid git checkout, so autonomous healing cannot run safely."
+        elif not default_branch_ok:
+            why_blocked = "The configured default branch is unavailable in the target repo checkout."
+        elif not github_token_present:
+            why_blocked = "The configured GitHub token is missing, so issue and PR operations cannot start safely."
+        elif not connector_available:
+            why_blocked = "The configured connector is unavailable, so autonomous healing cannot start safely."
+        elif not tracker_available:
+            why_blocked = "GitHub tracker access is unavailable, so issue and PR state cannot be trusted."
+        elif infra_pause["active"]:
+            why_blocked = str(infra_pause["reason"] or "Infrastructure pause is active for this repo.")
+        elif blocking_roots:
+            roots_text = ", ".join(str(root) for root in blocking_roots[:3])
+            why_blocked = f"Preflight is blocked for execution roots: {roots_text}."
+        else:
+            why_blocked = "Preflight is blocked and the local environment needs repair."
+        summary = why_blocked
+        recommended_operator_action = "repair_environment"
+    elif needs_clarification_count > 0:
+        state = "needs_contract_fix"
+        score = 45
+        summary = f"{needs_clarification_count} issue(s) need clarification before safe execution."
+        why_runnable = ""
+        why_blocked = summary
+        recommended_operator_action = "tighten_issue_contract"
+    elif actionable_preflight_degradation or failed_issue_count > 0 or dominant_failure_domain:
+        state = "degraded"
+        score = 70
+        summary = "Repo is runnable, but recent readiness or reliability signals need attention."
+        why_runnable = "Healing can continue, but recent readiness or reliability signals need operator attention."
+        why_blocked = ""
+        recommended_operator_action = "review_reliability_signals"
+
+    return {
+        "state": state,
+        "score": int(score),
+        "summary": summary,
+        "why_runnable": why_runnable,
+        "why_blocked": why_blocked,
+        "recommended_operator_action": recommended_operator_action,
+        "dominant_failure_domain": dominant_failure_domain,
+        "policy_outcome": str((policy or {}).get("outcome") or ""),
+        "policy_recommendation": str((policy or {}).get("recommendation") or ""),
+        "evidence": {
+            "paused": paused,
+            "circuit_breaker_open": circuit_breaker_open,
+            "circuit_breaker_cooldown_remaining_seconds": int(circuit_breaker_cooldown_remaining_seconds),
+            "preflight_overall_class": preflight_class,
+            "preflight_blocking_execution_roots": blocking_roots,
+            "repo_path_exists": repo_path_exists,
+            "git_repo_ok": git_repo_ok,
+            "default_branch_ok": default_branch_ok,
+            "github_token_present": github_token_present,
+            "connector_available": connector_available,
+            "tracker_available": tracker_available,
+            "infra_pause_active": bool(infra_pause["active"]),
+            "infra_pause_reason": str(infra_pause["reason"]),
+            "needs_clarification_count": needs_clarification_count,
+            "failed_issue_count": failed_issue_count,
+            "dominant_failure_domain": dominant_failure_domain,
+        },
+    }
+
+
+def _build_policy_payload(
+    *,
+    store: SQLiteStore,
+    paused: bool,
+    circuit_breaker_open: bool,
+    trust_state: str,
+    trust_recommended_operator_action: str,
+    failure_domain_metrics: dict[str, int],
+    retry_playbook_metrics: dict[str, object],
+    reliability_canary: dict[str, object],
+) -> dict[str, object]:
+    infra_pause = _infra_pause_snapshot(store)
+    dominant_domain = str(retry_playbook_metrics.get("dominant_domain") or "").strip().lower()
+    domain_total = max(
+        int(failure_domain_metrics.get("total") or 0),
+        int(retry_playbook_metrics.get("total") or 0),
+        1,
+    )
+    infra_count = max(
+        int(failure_domain_metrics.get("infra") or 0),
+        int((retry_playbook_metrics.get("domain_counts") or {}).get("infra") or 0),
+    )
+    contract_count = max(
+        int(failure_domain_metrics.get("contract") or 0),
+        int((retry_playbook_metrics.get("domain_counts") or {}).get("contract") or 0),
+    )
+    no_op_rate = _safe_float(reliability_canary.get("no_op_rate"))
+    wrong_root_rate = _safe_float(reliability_canary.get("wrong_root_execution_rate"))
+
+    outcome = "retry"
+    recommendation = trust_recommended_operator_action or "continue_autonomous_healing"
+    reason_code = "healthy_retry_window"
+    summary = "Retry budget and runtime signals still support autonomous healing."
+
+    if paused:
+        outcome = "pause"
+        recommendation = "resume_repo"
+        reason_code = "repo_paused"
+        summary = "Repo is manually paused, so autonomous retries should stay paused."
+    elif circuit_breaker_open:
+        outcome = "quarantine"
+        recommendation = "inspect_circuit_breaker"
+        reason_code = "circuit_breaker_open"
+        summary = "Recent failures opened the circuit breaker, so the repo is quarantined."
+    elif infra_pause["active"]:
+        outcome = "pause"
+        recommendation = "repair_environment"
+        reason_code = "infra_pause_active"
+        summary = str(infra_pause.get("reason") or "Infrastructure pause is active for this repo.")
+    elif str(trust_state or "").strip().lower() == "needs_environment_fix":
+        outcome = "pause"
+        recommendation = "repair_environment"
+        reason_code = "environment_blocked"
+        summary = "Environment blockers should be fixed before any additional retries."
+    elif str(trust_state or "").strip().lower() == "needs_contract_fix":
+        outcome = "require_human_fix"
+        recommendation = "tighten_issue_contract"
+        reason_code = "needs_contract_fix"
+        summary = "Issue contracts need human clarification before autonomous retries continue."
+    elif wrong_root_rate >= 0.5:
+        outcome = "require_human_fix"
+        recommendation = "strengthen_execution_root_hints"
+        reason_code = "wrong_root_rate_high"
+        summary = "Wrong-root execution is too frequent; strengthen execution-root hints before retrying."
+    elif no_op_rate >= 0.5:
+        outcome = "require_human_fix"
+        recommendation = "tighten_issue_contract"
+        reason_code = "no_op_rate_high"
+        summary = "No-op attempts dominate recent runs; tighten the requested patch scope before retrying."
+    elif contract_count >= 3 and (contract_count / float(domain_total)) >= 0.6:
+        outcome = "require_human_fix"
+        recommendation = "tighten_issue_contract"
+        reason_code = "contract_failures_dominate"
+        summary = "Contract failures dominate recent attempts, so a human should tighten the issue contract."
+    elif infra_count >= 3 and ((infra_count / float(domain_total)) >= 0.6 or dominant_domain == "infra"):
+        outcome = "throttle"
+        recommendation = "stabilize_runtime"
+        reason_code = "infra_failures_dominate"
+        summary = "Infrastructure failures dominate recent attempts; throttle healing until runtime stability improves."
+
+    return {
+        "outcome": outcome,
+        "recommendation": recommendation,
+        "reason_code": reason_code,
+        "summary": summary,
+        "evidence": {
+            "infra_pause_active": bool(infra_pause["active"]),
+            "dominant_domain": dominant_domain,
+            "infra_count": infra_count,
+            "contract_count": contract_count,
+            "domain_total": domain_total,
+            "no_op_rate": round(no_op_rate, 4),
+            "wrong_root_execution_rate": round(wrong_root_rate, 4),
+        },
+    }
+
+
+def _build_issue_explanations(
+    *,
+    issues: list[dict[str, object]],
+    trust: dict[str, object],
+) -> list[dict[str, object]]:
+    explanations = [_issue_explanation_for_row(issue=issue, trust=trust) for issue in issues]
+    explanations.sort(
+        key=lambda item: (
+            0 if bool(item.get("blocking")) else 1,
+            str(item.get("state") or ""),
+            str(item.get("issue_id") or ""),
+        )
+    )
+    return explanations[:25]
+
+
+def _issue_explanation_for_row(
+    *,
+    issue: dict[str, object],
+    trust: dict[str, object],
+) -> dict[str, object]:
+    issue_id = str(issue.get("issue_id") or "").strip()
+    state = str(issue.get("state") or "unknown").strip().lower()
+    last_failure_class = str(issue.get("last_failure_class") or "").strip()
+    last_failure_reason = str(issue.get("last_failure_reason") or "").strip()
+    backoff_until = str(issue.get("backoff_until") or "").strip()
+    trust_state = str(trust.get("state") or "").strip().lower()
+    trust_action = str(trust.get("recommended_operator_action") or "").strip() or "observe_issue"
+    trust_summary = str(trust.get("summary") or "").strip()
+
+    reason_code = state or "unknown_state"
+    summary = trust_summary or "Issue state needs inspection."
+    recommended_action = trust_action
+    blocking = False
+
+    if state == "needs_clarification":
+        reason_code = "needs_clarification"
+        summary = (
+            last_failure_reason
+            or "Issue needs more structured detail before Flow Healer can safely make changes."
+        )
+        recommended_action = "tighten_issue_contract"
+        blocking = True
+    elif state in {"claimed", "running", "verify_pending"}:
+        reason_code = "actively_processing"
+        summary = "Issue is currently being processed by Flow Healer."
+        recommended_action = "wait_for_attempt"
+    elif state == "queued":
+        if trust_state == "paused":
+            reason_code = "repo_paused"
+            summary = "Issue is queued, but the repo is paused."
+            recommended_action = trust_action
+            blocking = True
+        elif trust_state == "quarantined":
+            reason_code = "circuit_breaker_open"
+            summary = "Issue is queued, but the circuit breaker is open for this repo."
+            recommended_action = trust_action
+            blocking = True
+        elif trust_state == "needs_environment_fix":
+            reason_code = "environment_blocked"
+            summary = "Issue is queued, but repo environment blockers must be repaired first."
+            recommended_action = trust_action
+            blocking = True
+        else:
+            reason_code = "eligible"
+            summary = "Issue is queued and eligible for autonomous healing."
+            recommended_action = "continue_autonomous_healing"
+    elif state in {"failed", "blocked"}:
+        if backoff_until:
+            reason_code = "backoff_active"
+            summary = (
+                last_failure_reason
+                or f"Issue is waiting for its retry window until {backoff_until}."
+            )
+            recommended_action = "inspect_recent_failure"
+            blocking = True
+        else:
+            reason_code = "last_attempt_failed"
+            summary = last_failure_reason or "The last healing attempt failed and needs operator review."
+            recommended_action = "inspect_recent_failure"
+    elif state == "pr_pending_approval":
+        reason_code = "awaiting_pr_approval"
+        summary = "Issue has a patch ready and is waiting for pull-request approval."
+        recommended_action = "review_patch"
+    elif state == "pr_open":
+        reason_code = "pr_open"
+        summary = "Issue has an open pull request and is waiting for review or merge."
+        recommended_action = "review_pull_request"
+    elif state == "resolved":
+        reason_code = "resolved"
+        summary = "Issue has already been resolved."
+        recommended_action = "observe_issue"
+
+    return {
+        "issue_id": issue_id,
+        "state": state or "unknown",
+        "reason_code": reason_code,
+        "summary": summary,
+        "recommended_action": recommended_action,
+        "blocking": blocking,
+        "evidence": {
+            "trust_state": trust_state,
+            "last_failure_class": last_failure_class,
+            "last_failure_reason": last_failure_reason,
+            "backoff_until": backoff_until,
+        },
+    }
+
+
+def _dominant_failure_domain(
+    *,
+    retry_playbook_metrics: dict[str, object],
+    failure_domain_metrics: dict[str, int],
+) -> str:
+    retry_domain = str(retry_playbook_metrics.get("dominant_domain") or "").strip()
+    if retry_domain:
+        return retry_domain
+    candidates = [
+        (domain, count)
+        for domain, count in failure_domain_metrics.items()
+        if domain != "total" and int(count) > 0
+    ]
+    if not candidates:
+        return ""
+    domain, _count = max(candidates, key=lambda item: (item[1], item[0]))
+    return domain
+
+
+def _preflight_summary_is_actionably_degraded(summary: dict[str, object]) -> bool:
+    overall_class = str(summary.get("overall_class") or "").strip().lower()
+    if overall_class != "degraded":
+        return False
+    total = max(0, int(summary.get("total") or 0))
+    ready = max(0, int(summary.get("ready") or 0))
+    blocked = max(0, int(summary.get("blocked") or 0))
+    unknown = max(0, int(summary.get("unknown") or 0))
+    return not (total > 0 and ready == 0 and blocked == 0 and unknown == total)
+
+
+def _infra_pause_snapshot(store: SQLiteStore) -> dict[str, object]:
+    pause_until_raw = str(store.get_state("healer_infra_pause_until") or "").strip()
+    reason = str(store.get_state("healer_infra_pause_reason") or "").strip()
+    active = False
+    if pause_until_raw:
+        try:
+            pause_until = datetime.strptime(pause_until_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        except ValueError:
+            active = False
+        else:
+            active = datetime.now(UTC) < pause_until
+    return {
+        "active": active,
+        "until": pause_until_raw,
+        "reason": reason,
     }
 
 

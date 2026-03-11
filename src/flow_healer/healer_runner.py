@@ -1729,7 +1729,7 @@ def _run_test_gates(
         summary["docker_full_output_tail"] = "(docker full gate skipped: invalid explicit validation command)"
         summary["docker_full_status"] = "skipped"
         summary["docker_full_reason"] = "validation_command_invalid"
-        return summary
+        return _finalize_validation_summary(summary, targeted_requested=bool(targeted_tests))
     explicit_validation_commands = _expand_issue_scoped_validation_commands(
         commands=normalized_validation_result.normalized_commands,
         task_spec=task_spec,
@@ -1754,7 +1754,7 @@ def _run_test_gates(
         summary["docker_full_output_tail"] = "(docker full gate skipped: language unresolved)"
         summary["docker_full_status"] = "skipped"
         summary["docker_full_reason"] = "language_unresolved"
-        return summary
+        return _finalize_validation_summary(summary, targeted_requested=bool(targeted_tests))
 
     if targeted_tests:
         targeted_cmd = _compose_targeted_command(strategy, targeted_tests)
@@ -1831,7 +1831,7 @@ def _run_test_gates(
             summary["docker_full_reason"] = docker_full["gate_reason"]
         if full_status == "failed":
             summary["failed_tests"] += 1
-        return summary
+        return _finalize_validation_summary(summary, targeted_requested=bool(targeted_tests))
 
     full_cmd = list(strategy.docker_test_cmd)
     for runner_name, runner in runners:
@@ -1866,6 +1866,31 @@ def _run_test_gates(
             summary[f"{runner_name}_full_reason"] = full["gate_reason"]
         if full_status == "failed":
             summary["failed_tests"] += 1
+    return _finalize_validation_summary(summary, targeted_requested=bool(targeted_tests))
+
+
+def _finalize_validation_summary(summary: dict[str, Any], *, targeted_requested: bool) -> dict[str, Any]:
+    targeted_statuses = [
+        str(summary[key]).strip().lower()
+        for key in ("local_targeted_status", "docker_targeted_status")
+        if key in summary
+    ]
+    full_statuses = [
+        str(summary[key]).strip().lower()
+        for key in ("local_full_status", "docker_full_status")
+        if key in summary
+    ]
+    fast_pass = bool(targeted_requested and targeted_statuses and all(status != "failed" for status in targeted_statuses))
+    full_pass = bool(full_statuses and all(status != "failed" for status in full_statuses))
+    promotion_ready = bool(full_pass and (not targeted_requested or fast_pass))
+    summary["validation_lane"] = "fast_then_full" if targeted_requested else "full_only"
+    summary["promotion_state"] = "promotion_ready" if promotion_ready else "merge_blocked"
+    summary["phase_states"] = {
+        "fast_pass": fast_pass,
+        "full_pass": full_pass,
+        "promotion_ready": promotion_ready,
+        "merge_blocked": not promotion_ready,
+    }
     return summary
 
 

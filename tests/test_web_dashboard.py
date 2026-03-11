@@ -188,6 +188,35 @@ def test_overview_payload_reuses_single_status_snapshot(tmp_path: Path) -> None:
     assert payload["rows"][0]["repo"] == "demo"
 
 
+def test_overview_payload_preserves_repo_trust_rows(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        return [
+            {
+                "repo": "demo",
+                "recent_attempts": [],
+                "trust": {
+                    "state": "quarantined",
+                    "score": 12,
+                    "summary": "Circuit breaker is open after repeated failures.",
+                    "why_runnable": "",
+                    "why_blocked": "Healing is suspended until the repo stabilizes.",
+                    "recommended_operator_action": "inspect_circuit_breaker",
+                    "dominant_failure_domain": "infra",
+                    "evidence": {"circuit_breaker_open": True},
+                },
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    payload = _overview_payload(config, service)
+
+    assert payload["rows"][0]["trust"]["state"] == "quarantined"
+    assert payload["rows"][0]["trust"]["recommended_operator_action"] == "inspect_circuit_breaker"
+
+
 def test_parse_log_activity_row_extracts_issue_and_attempt_metadata() -> None:
     row = _parse_log_activity_row(
         "[flow-healer.log] 2026-03-09 09:47:23 INFO apple_flow.healer_loop: Issue #576 attempt hat_d7008df1de failed in repo flow-healer on healer/issue-576-demo PR #580",
@@ -329,6 +358,98 @@ def test_render_dashboard_activity_rows_counter_binds_to_activity(tmp_path: Path
     html = _render_dashboard(config, service, notice="")
 
     assert "x-text='activity.length'" in html
+
+
+def test_render_dashboard_includes_repo_trust_surface(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        return [
+            {
+                "repo": "demo",
+                "path": "/tmp/demo",
+                "issues_total": 3,
+                "paused": False,
+                "recent_attempts": [],
+                "trust": {
+                    "state": "needs_environment_fix",
+                    "score": 24,
+                    "summary": "Connector and preflight signals show the repo is blocked on environment repair.",
+                    "why_runnable": "",
+                    "why_blocked": "The connector is unavailable in the current runtime.",
+                    "recommended_operator_action": "repair_environment",
+                    "dominant_failure_domain": "infra",
+                    "policy_outcome": "pause",
+                    "policy_recommendation": "repair_environment",
+                    "evidence": {"connector_available": False, "preflight_class": "blocked"},
+                },
+                "policy": {
+                    "outcome": "pause",
+                    "recommendation": "repair_environment",
+                    "reason_code": "environment_blocked",
+                    "summary": "Environment blockers should be fixed before any additional retries.",
+                    "evidence": {},
+                },
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Repo Trust" in html
+    assert "Operator recommendation" in html
+    assert "Policy outcome" in html
+    assert "trustBadgeClass(" in html
+    assert "row.trust.summary" in html
+    assert "row.trust.recommended_operator_action" in html
+    assert "row.trust.why_blocked" in html
+    assert "row.policy.summary" in html
+
+
+def test_render_dashboard_includes_issue_why_list(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        return [
+            {
+                "repo": "demo",
+                "path": "/tmp/demo",
+                "issues_total": 2,
+                "paused": False,
+                "recent_attempts": [],
+                "issue_explanations": [
+                    {
+                        "issue_id": "101",
+                        "state": "queued",
+                        "reason_code": "eligible",
+                        "summary": "Issue is queued and eligible for autonomous healing.",
+                        "recommended_action": "continue_autonomous_healing",
+                        "blocking": False,
+                        "evidence": {},
+                    }
+                ],
+                "trust": {
+                    "state": "ready",
+                    "score": 100,
+                    "summary": "Repo is ready for autonomous issue execution.",
+                    "why_runnable": "Repo is ready for autonomous issue execution.",
+                    "why_blocked": "",
+                    "recommended_operator_action": "continue_autonomous_healing",
+                    "dominant_failure_domain": "",
+                    "evidence": {},
+                },
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Issue Why / Why Not" in html
+    assert "row.issue_explanations" in html
+    assert "formatIssueReasonCode(" in html
+    assert "reasonBadgeClass(" in html
 
 
 def test_render_dashboard_includes_reliability_and_domain_metric_cards(tmp_path: Path) -> None:

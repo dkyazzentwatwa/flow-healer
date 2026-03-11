@@ -8,7 +8,7 @@
 [![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](#development)
 [![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](#how-it-fits-into-github)
 
-**Autonomous GitHub maintenance with guarded fixes, isolated worktrees, language-aware validation, and a built-in operator control plane.**
+**Trusted issue-to-PR automation with guarded fixes, isolated worktrees, validation gates, and an operator-first control plane.**
 
 [Documentation](docs/README.md) · [Installation](docs/installation.md) · [Usage](docs/usage.md) · [Architecture](docs/architecture.md) · [Operations](docs/operations.md)
 
@@ -21,9 +21,9 @@
 
 ## Why Flow Healer
 
-Flow Healer is for repositories that need more than issue triage. It watches GitHub issues, routes work into isolated worktrees, asks the configured connector (Codex by default) to produce a fix, runs validation gates, opens or updates the pull request, and preserves enough local state to retry safely when something goes wrong.
+Flow Healer is for repositories that want AI automation without surrendering control. It watches GitHub issues, routes work into isolated worktrees, asks the configured connector (Codex by default) to produce a fix, runs validation gates, opens or updates the pull request, and preserves enough local state to recover safely when something goes wrong.
 
-It is designed as a practical operations loop, not just an issue generator. The service combines deterministic scanning, issue-driven healing, PR feedback ingestion, and runtime guardrails so maintainers can keep one or many repos moving without turning every broken issue into manual toil.
+It is designed as a practical repo-operations loop, not just an issue generator. The service combines deterministic scanning, issue-driven healing, PR feedback ingestion, readiness checks, and runtime guardrails so maintainers can automate routine repair work while still understanding why the system did or did not run.
 
 ## What It Does
 
@@ -32,11 +32,18 @@ It is designed as a practical operations loop, not just an issue generator. The 
 - Creates isolated git worktrees for each attempt so fixes stay contained.
 - Infers execution root and language from issue bodies, validation commands, and sandbox paths.
 - Runs guarded test gates with local and Docker-backed strategies.
+- Tracks readiness, retry behavior, and failure domains in durable local state.
 - Opens or updates PRs only after verification passes.
 - Re-queues work when human reviewers leave PR feedback comments.
-- Stores durable runtime state, locks, attempt history, and lessons in SQLite under `~/.flow-healer/`.
 - Exposes a web dashboard and CLI controls for operators.
 - Supports Apple Mail and Calendar command polling with a strict command DSL.
+
+## Why Maintainers Trust It
+
+- **Guarded execution:** isolated worktrees, verification gates, and branch-safe PR flow keep fix attempts contained.
+- **Operator visibility:** `doctor`, `status`, and the dashboard surface readiness, connector health, retry behavior, and failure trends.
+- **Deterministic recovery:** durable SQLite state, retry playbooks, and circuit-breaker behavior make failure handling inspectable instead of opaque.
+- **Low-noise automation:** labels, approval options, and repo-level controls keep the loop policy-governed instead of free-running.
 
 ## Core Workflow
 
