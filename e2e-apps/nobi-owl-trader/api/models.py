@@ -8,9 +8,19 @@ from api.database import get_db_connection
 class SerializableModel:
     _bool_fields: ClassVar[tuple[str, ...]] = ()
 
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "f", "no", "n", "off", ""}:
+                return False
+        return bool(value)
+
     def __post_init__(self):
         for field_name in self._bool_fields:
-            setattr(self, field_name, bool(getattr(self, field_name)))
+            setattr(self, field_name, self._coerce_bool(getattr(self, field_name)))
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
