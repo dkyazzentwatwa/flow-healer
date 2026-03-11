@@ -1,7 +1,9 @@
-from typing import TypeVar
+from typing import Any
 
-AddableT = TypeVar("AddableT")
+import numpy as np
 
 
-def add(a: AddableT, b: AddableT) -> AddableT:
+def add(a: Any, b: Any) -> Any:
+    if isinstance(a, (np.ndarray, list, tuple)):
+        return np.add(a, b)
     return a + b
