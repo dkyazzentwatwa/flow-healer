@@ -1,4 +1,4 @@
-import { buildCorsHeaders, isOriginAllowed } from "./cors.ts";
+import { buildCorsHeaders, isOriginAllowed, resolveAllowedOrigin } from "./cors.ts";
 
 const BILLING_PLANS = ["free", "pro", "agency"] as const;
 const BILLING_STATUSES = ["active", "cancelled", "past_due"] as const;
@@ -133,9 +133,9 @@ export function getAppBaseUrl(req: Request): string {
   const configured = normalizeAppBaseUrl(Deno.env.get("APP_BASE_URL")?.trim());
   if (configured) return configured;
 
-  const origin = req.headers.get("origin")?.trim();
-  if (origin && isOriginAllowed(req)) {
-    const normalizedOrigin = normalizeAppBaseUrl(origin);
+  const allowedOrigin = resolveAllowedOrigin(req);
+  if (allowedOrigin) {
+    const normalizedOrigin = normalizeAppBaseUrl(allowedOrigin);
     if (normalizedOrigin) return normalizedOrigin;
   }
 
