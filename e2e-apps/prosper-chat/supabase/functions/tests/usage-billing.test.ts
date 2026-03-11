@@ -23,6 +23,21 @@ Deno.test("normalizeExistingSubscription preserves known values and defaults inv
   });
 
   assertEquals(normalizeExistingSubscription({
+    plan: "pro",
+    status: "canceled",
+    stripe_subscription_id: "sub_cancelled",
+    current_period_end: "2026-05-01T00:00:00.000Z",
+  }), {
+    subscribed: false,
+    plan: "pro",
+    status: "cancelled",
+    stripe_subscription_id: "sub_cancelled",
+    current_period_start: undefined,
+    current_period_end: "2026-05-01T00:00:00.000Z",
+    subscription_end: "2026-05-01T00:00:00.000Z",
+  });
+
+  assertEquals(normalizeExistingSubscription({
     plan: "enterprise",
     status: "trialing",
   }), {
