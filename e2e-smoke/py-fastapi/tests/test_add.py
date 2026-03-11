@@ -23,3 +23,9 @@ def test_add_accepts_whitespace_padded_integer_strings() -> None:
 def test_add_rejects_blank_string_operands(a: str, b: str) -> None:
     with pytest.raises(TypeError, match="blank string operands are not allowed"):
         add(a, b)
+
+
+@pytest.mark.parametrize("a, b", [(True, 3), (2, False), (True, False)])
+def test_add_rejects_boolean_operands(a: int | bool, b: int | bool) -> None:
+    with pytest.raises(TypeError, match="boolean operands are not allowed"):
+        add(a, b)
