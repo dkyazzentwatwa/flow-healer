@@ -18,6 +18,67 @@ class DomainService:
     def list_services(self) -> list[ServiceRecord]:
         return deepcopy(self._repository.list_services())
 
+    def create_service(
+        self,
+        service_id: str,
+        name: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> ServiceRecord:
+        record = ServiceRecord(
+            service_id=self._require_text(service_id, "service_id_required"),
+            name=self._require_text(name, "name_required"),
+            tags=self._normalize_tags(tags),
+            metadata=deepcopy({} if metadata is None else metadata),
+        )
+        return self._repository.add(record)
+
+    def add_service(
+        self,
+        service_id: str,
+        name: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> ServiceRecord:
+        return self.create_service(service_id, name, tags=tags, metadata=metadata)
+
+    def register_service(
+        self,
+        service_id: str,
+        name: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> ServiceRecord:
+        return self.create_service(service_id, name, tags=tags, metadata=metadata)
+
+    @staticmethod
+    def _normalize_tags(tags: list[str] | None) -> list[str]:
+        if tags is None:
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in tags:
+            tag = DomainService._require_text(value, "tag_required")
+            if tag in seen:
+                continue
+            seen.add(tag)
+            normalized.append(tag)
+        return normalized
+
+    @staticmethod
+    def _require_text(value: str, error_code: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(error_code)
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(error_code)
+        return normalized
+
 
 @dataclass(slots=True)
 class TodoItem:
