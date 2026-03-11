@@ -80,6 +80,50 @@ def test_domain_service_list_services_returns_detached_records() -> None:
     assert repository_services[0].name == "billing"
 
 
+def test_domain_service_create_service_normalizes_and_persists_detached_record() -> None:
+    repository = ServiceRepository()
+    service = DomainService(repository)
+    metadata = {"enabled": False, "retries": 0, "notes": ""}
+
+    created = service.create_service(
+        "  svc-1  ",
+        "  billing  ",
+        tags=[" core ", "core", " jobs "],
+        metadata=metadata,
+    )
+    created.name = "mutated"
+    created.tags.append("mutated")
+    created.metadata["enabled"] = True
+    metadata["retries"] = 5
+
+    stored_services = service.list_services()
+
+    assert stored_services == [
+        ServiceRecord(
+            service_id="svc-1",
+            name="billing",
+            tags=["core", "jobs"],
+            metadata={"enabled": False, "retries": 0, "notes": ""},
+        )
+    ]
+
+
+def test_domain_service_create_service_rejects_invalid_fields() -> None:
+    service = DomainService(ServiceRepository())
+
+    with pytest.raises(ValueError, match="service_id_required"):
+        service.create_service("   ", "billing")
+
+    with pytest.raises(ValueError, match="name_required"):
+        service.create_service("svc-1", "   ")
+
+    with pytest.raises(ValueError, match="tag_required"):
+        service.create_service("svc-1", "billing", tags=["core", "   "])
+
+    with pytest.raises(ValueError, match="service_id_required"):  # type: ignore[arg-type]
+        service.create_service(None, "billing")
+
+
 def test_create_todo_trims_title_and_assigns_incrementing_ids() -> None:
     service = TodoService(repository=InMemoryTodoRepository())
 
