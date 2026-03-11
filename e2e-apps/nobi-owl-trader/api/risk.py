@@ -121,6 +121,8 @@ class RiskManager:
 
     @staticmethod
     def _is_valid_number(value: float) -> bool:
+        if isinstance(value, bool):
+            return False
         return isinstance(value, (int, float)) and math.isfinite(value)
 
     def _invalid_input_result(self, field_name: str) -> Dict[str, Any]:

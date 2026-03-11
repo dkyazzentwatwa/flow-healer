@@ -102,7 +102,15 @@ def test_drawdown_limit_blocks_at_exact_threshold(db):
     ("kwargs", "reason_fragment"),
     [
         (
+            {"today_pnl": True, "position_size": 0.0, "portfolio_value": 10000.0, "total_exposure": 0.0},
+            "today p&l",
+        ),
+        (
             {"today_pnl": 0.0, "position_size": -1.0, "portfolio_value": 10000.0, "total_exposure": 0.0},
+            "position size",
+        ),
+        (
+            {"today_pnl": 0.0, "position_size": True, "portfolio_value": 10000.0, "total_exposure": 0.0},
             "position size",
         ),
         (
@@ -110,7 +118,15 @@ def test_drawdown_limit_blocks_at_exact_threshold(db):
             "portfolio value",
         ),
         (
+            {"today_pnl": 0.0, "position_size": 0.0, "portfolio_value": True, "total_exposure": 0.0},
+            "portfolio value",
+        ),
+        (
             {"today_pnl": 0.0, "position_size": 0.0, "portfolio_value": 10000.0, "total_exposure": -5.0},
+            "total exposure",
+        ),
+        (
+            {"today_pnl": 0.0, "position_size": 0.0, "portfolio_value": 10000.0, "total_exposure": True},
             "total exposure",
         ),
         (
@@ -120,6 +136,16 @@ def test_drawdown_limit_blocks_at_exact_threshold(db):
                 "portfolio_value": 10000.0,
                 "total_exposure": 0.0,
                 "peak_equity": -100.0,
+            },
+            "peak equity",
+        ),
+        (
+            {
+                "today_pnl": 0.0,
+                "position_size": 0.0,
+                "portfolio_value": 10000.0,
+                "total_exposure": 0.0,
+                "peak_equity": True,
             },
             "peak equity",
         ),
@@ -133,6 +159,29 @@ def test_check_can_trade_rejects_invalid_inputs(db, kwargs, reason_fragment):
 
     assert result["can_trade"] is False
     assert reason_fragment in result["reason"].lower()
+
+
+@pytest.mark.parametrize(
+    ("portfolio_value", "risk_pct", "stop_loss_pct"),
+    [
+        (True, 2.0, 5.0),
+        (10000.0, True, 5.0),
+        (10000.0, 2.0, True),
+    ],
+)
+def test_calculate_position_size_returns_zero_for_boolean_inputs(
+    db, portfolio_value, risk_pct, stop_loss_pct
+):
+    """Test boolean values are rejected instead of being treated as numbers."""
+    risk_mgr = RiskManager(make_limits())
+
+    position_size = risk_mgr.calculate_position_size(
+        portfolio_value=portfolio_value,
+        risk_pct=risk_pct,
+        stop_loss_pct=stop_loss_pct,
+    )
+
+    assert position_size == 0.0
 
 
 def test_calculate_position_size(db):
