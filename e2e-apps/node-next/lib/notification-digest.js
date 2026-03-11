@@ -1,42 +1,3 @@
-<<<<<<< HEAD
-function normalizeMaxItems(maxItems, totalItems) {
-  if (!Number.isFinite(maxItems) || maxItems <= 0) {
-    return totalItems;
-  }
-
-  return Math.min(Math.floor(maxItems), totalItems);
-}
-
-function cloneNotification(notification, sent) {
-  return {
-    ...notification,
-    sent,
-  };
-}
-
-export function flushRecipientDigest(notifications, recipient, options = {}) {
-  const queuedEntries = notifications
-    .map((notification, index) => ({ notification, index }))
-    .filter(
-      ({ notification }) =>
-        notification?.recipient === recipient && notification?.sent !== true,
-    );
-
-  const maxItems = normalizeMaxItems(options.maxItems, queuedEntries.length);
-  const selectedEntries = queuedEntries.slice(0, maxItems);
-  const selectedIndexes = new Set(selectedEntries.map(({ index }) => index));
-
-  return {
-    digest: {
-      recipient,
-      notifications: selectedEntries.map(({ notification }) => notification),
-    },
-    notifications: notifications.map((notification, index) =>
-      selectedIndexes.has(index)
-        ? cloneNotification(notification, true)
-        : cloneNotification(notification, notification?.sent === true),
-    ),
-=======
 const QUEUED_STATUS = "queued";
 const SENT_STATUS = "sent";
 
@@ -48,71 +9,103 @@ function normalizeId(value) {
   return String(value ?? "").trim();
 }
 
-function makeRecipientScopedId(recipient, id) {
-  return `${normalizeRecipient(recipient)}\u0000${normalizeId(id)}`;
+function normalizeMaxItems(maxItems, totalItems) {
+  if (!Number.isFinite(maxItems) || maxItems <= 0) {
+    return totalItems;
+  }
+
+  return Math.min(Math.floor(maxItems), totalItems);
 }
 
 function isQueued(notification) {
-  return String(notification?.status ?? QUEUED_STATUS).toLowerCase() === QUEUED_STATUS;
+  if (notification && "status" in notification) {
+    return String(notification.status ?? "").toLowerCase() === QUEUED_STATUS;
+  }
+
+  return notification?.sent !== true;
+}
+
+function toDigestEntry(notification) {
+  return {
+    id: normalizeId(notification?.id),
+    recipient: normalizeRecipient(notification?.recipient),
+    subject: String(notification?.subject ?? notification?.title ?? ""),
+    body: String(notification?.body ?? notification?.message ?? ""),
+    createdAt: String(notification?.createdAt ?? ""),
+  };
+}
+
+function toNotificationSnapshot(notification) {
+  if (notification && "status" in notification) {
+    return {
+      ...notification,
+      sent: String(notification.status ?? "").toLowerCase() === SENT_STATUS,
+    };
+  }
+
+  return {
+    ...notification,
+    sent: notification?.sent === true,
+  };
 }
 
 export function buildRecipientDigest(notifications) {
   const digestByRecipient = new Map();
+
   for (const notification of notifications ?? []) {
     if (!isQueued(notification)) {
       continue;
     }
-    const recipient = normalizeRecipient(notification?.recipient);
-    const id = normalizeId(notification?.id);
-    if (!recipient || !id) {
+
+    const entry = toDigestEntry(notification);
+    if (!entry.recipient || !entry.id) {
       continue;
     }
-    const entry = {
-      id,
-      recipient,
-      subject: String(notification?.subject ?? ""),
-      body: String(notification?.body ?? ""),
-      createdAt: String(notification?.createdAt ?? ""),
-    };
-    const bucket = digestByRecipient.get(recipient) ?? [];
+
+    const bucket = digestByRecipient.get(entry.recipient) ?? [];
     bucket.push(entry);
-    digestByRecipient.set(recipient, bucket);
+    digestByRecipient.set(entry.recipient, bucket);
   }
+
   return Array.from(digestByRecipient.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
+    .sort((left, right) => left[0].localeCompare(right[0]))
     .map(([recipient, entries]) => ({ recipient, entries }));
 }
 
 export function flushRecipientDigest(notifications, recipient, options = {}) {
   const recipientKey = normalizeRecipient(recipient);
+  const queuedEntries = (notifications ?? [])
+    .map((notification, index) => ({ notification, index }))
+    .filter(
+      ({ notification }) =>
+        normalizeRecipient(notification?.recipient) === recipientKey && isQueued(notification),
+    );
+
+  const maxItems = normalizeMaxItems(options.maxItems, queuedEntries.length);
+  const selectedEntries = queuedEntries.slice(0, maxItems);
+  const selectedIndexes = new Set(selectedEntries.map(({ index }) => index));
   const sentAt = String(options.sentAt ?? new Date().toISOString());
-  const digest = buildRecipientDigest(notifications).find((item) => item.recipient === recipientKey);
-  if (!recipientKey || !digest) {
-    return { recipient: recipientKey, sent: 0, sentIds: [] };
-  }
 
-  const sentKeys = new Set(
-    digest.entries.map((entry) => makeRecipientScopedId(entry.recipient, entry.id)),
-  );
-
-  let sentCount = 0;
-  for (const notification of notifications ?? []) {
-    if (!isQueued(notification)) {
+  for (const { notification, index } of queuedEntries) {
+    if (!selectedIndexes.has(index)) {
       continue;
     }
-    const key = makeRecipientScopedId(notification?.recipient, notification?.id);
-    if (!sentKeys.has(key)) {
-      continue;
+
+    notification.sent = true;
+    if ("status" in notification) {
+      notification.status = SENT_STATUS;
+      notification.sentAt = sentAt;
     }
-    notification.status = SENT_STATUS;
-    notification.sentAt = sentAt;
-    sentCount += 1;
   }
 
   return {
+    digest: {
+      recipient: recipientKey,
+      notifications: selectedEntries.map(({ notification }) => notification),
+    },
+    notifications: (notifications ?? []).map(toNotificationSnapshot),
     recipient: recipientKey,
-    sent: sentCount,
-    sentIds: digest.entries.map((entry) => entry.id),
->>>>>>> 9bc5021 (fix: harden runtime connectors and normalize prosper chat frontend validation)
+    sent: selectedEntries.length,
+    sentIds: selectedEntries.map(({ notification }) => normalizeId(notification?.id)),
   };
 }
