@@ -66,6 +66,75 @@ function nextDate(date: string): string {
   return value.toISOString().slice(0, 10);
 }
 
+function listBookableSlots({
+  date,
+  timeZone,
+  businessHours,
+  bufferMinutes,
+  durationMinutes,
+  appointments,
+  now = new Date(),
+}: {
+  date: string;
+  timeZone: string;
+  businessHours: Record<string, { open: string; close: string } | null> | null;
+  bufferMinutes: number;
+  durationMinutes: number;
+  appointments: Array<{ start_time: string; end_time: string }>;
+  now?: Date;
+}): { slots: string[]; closedMessage?: string } {
+  const requestWeekday = getZonedDateParts(zonedDateTimeToUtc(date, "12:00", timeZone), timeZone).weekday;
+  const dayKey = DAY_MAP[requestWeekday];
+  const dayHours = dayKey ? businessHours?.[dayKey] : null;
+
+  if (!dayHours) {
+    return { slots: [], closedMessage: "Business is closed on this day" };
+  }
+
+  const [openH, openM] = dayHours.open.split(":").map(Number);
+  const [closeH, closeM] = dayHours.close.split(":").map(Number);
+  const openMin = openH * 60 + openM;
+  const closeMin = closeH * 60 + closeM;
+
+  const booked = appointments.map((apt) => {
+    const localStart = getZonedDateParts(new Date(apt.start_time), timeZone);
+    const localEnd = getZonedDateParts(new Date(apt.end_time), timeZone);
+    return {
+      startMin: localStart.hour * 60 + localStart.minute,
+      endMin: localEnd.hour * 60 + localEnd.minute,
+    };
+  });
+
+  const interval = Math.min(30, durationMinutes);
+  const slots: string[] = [];
+
+  for (let slotStart = openMin; slotStart + durationMinutes <= closeMin; slotStart += interval) {
+    const slotEnd = slotStart + durationMinutes + bufferMinutes;
+
+    const hasConflict = booked.some((entry) => {
+      const entryEnd = entry.endMin + bufferMinutes;
+      return slotStart < entryEnd && slotEnd > entry.startMin;
+    });
+
+    if (!hasConflict) {
+      const hour = Math.floor(slotStart / 60);
+      const minute = slotStart % 60;
+      slots.push(`${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`);
+    }
+  }
+
+  const todayInTz = formatDate(now, timeZone);
+  const nowInTz = getZonedDateParts(now, timeZone);
+  const filteredSlots = date === todayInTz
+    ? slots.filter((slot) => {
+        const [hour, minute] = slot.split(":").map(Number);
+        return hour * 60 + minute > nowInTz.hour * 60 + nowInTz.minute;
+      })
+    : slots;
+
+  return { slots: filteredSlots };
+}
+
 serve(async (req) => {
   const corsHeaders = buildCorsHeaders(req, "*");
   if (req.method === "OPTIONS") {
@@ -123,21 +192,6 @@ serve(async (req) => {
     const duration = service.duration_minutes;
     const hours = business.business_hours as Record<string, { open: string; close: string } | null> | null;
 
-    const requestWeekday = getZonedDateParts(zonedDateTimeToUtc(date, "12:00", tz), tz).weekday;
-    const dayKey = DAY_MAP[requestWeekday];
-    const dayHours = dayKey ? hours?.[dayKey] : null;
-
-    if (!dayHours) {
-      return new Response(JSON.stringify({ slots: [], message: "Business is closed on this day" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const [openH, openM] = dayHours.open.split(":").map(Number);
-    const [closeH, closeM] = dayHours.close.split(":").map(Number);
-    const openMin = openH * 60 + openM;
-    const closeMin = closeH * 60 + closeM;
-
     const dayStartUtc = zonedDateTimeToUtc(date, "00:00", tz);
     const dayEndUtc = zonedDateTimeToUtc(nextDate(date), "00:00", tz);
 
@@ -149,41 +203,20 @@ serve(async (req) => {
       .lt("start_time", dayEndUtc.toISOString())
       .gt("end_time", dayStartUtc.toISOString());
 
-    const booked = (existing || []).map((apt) => {
-      const localStart = getZonedDateParts(new Date(apt.start_time), tz);
-      const localEnd = getZonedDateParts(new Date(apt.end_time), tz);
-      return {
-        startMin: localStart.hour * 60 + localStart.minute,
-        endMin: localEnd.hour * 60 + localEnd.minute,
-      };
+    const { slots: filteredSlots, closedMessage } = listBookableSlots({
+      date,
+      timeZone: tz,
+      businessHours: hours,
+      bufferMinutes: buffer,
+      durationMinutes: duration,
+      appointments: existing || [],
     });
 
-    const interval = Math.min(30, duration);
-    const slots: string[] = [];
-
-    for (let slotStart = openMin; slotStart + duration <= closeMin; slotStart += interval) {
-      const slotEnd = slotStart + duration + buffer;
-
-      const hasConflict = booked.some((entry) => {
-        const entryEnd = entry.endMin + buffer;
-        return slotStart < entryEnd && slotEnd > entry.startMin;
+    if (closedMessage) {
+      return new Response(JSON.stringify({ slots: [], message: closedMessage }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-
-      if (!hasConflict) {
-        const h = Math.floor(slotStart / 60);
-        const m = slotStart % 60;
-        slots.push(`${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`);
-      }
     }
-
-    const todayInTz = formatDate(new Date(), tz);
-    const nowInTz = getZonedDateParts(new Date(), tz);
-    const filteredSlots = date === todayInTz
-      ? slots.filter((slot) => {
-          const [h, m] = slot.split(":").map(Number);
-          return h * 60 + m > nowInTz.hour * 60 + nowInTz.minute;
-        })
-      : slots;
 
     return new Response(
       JSON.stringify({ slots: filteredSlots, service_name: service.name, duration_minutes: duration }),
