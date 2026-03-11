@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { industryTemplates } from "@/data/industryTemplates";
+import type { Tables } from "@/integrations/supabase/types";
 
 const FaqsPage = () => {
   const { activeBusiness: business } = useActiveBusiness();
@@ -24,7 +25,7 @@ const FaqsPage = () => {
   const [answer, setAnswer] = useState("");
 
   // Edit modal state
-  const [editFaq, setEditFaq] = useState<any>(null);
+  const [editFaq, setEditFaq] = useState<Tables<"faqs"> | null>(null);
   const [editQuestion, setEditQuestion] = useState("");
   const [editAnswer, setEditAnswer] = useState("");
   const [editActive, setEditActive] = useState(true);
@@ -36,7 +37,7 @@ const FaqsPage = () => {
     setCollapsedSections(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const openEdit = (faq: any) => {
+  const openEdit = (faq: Tables<"faqs">) => {
     setEditFaq(faq);
     setEditQuestion(faq.question);
     setEditAnswer(faq.answer);
@@ -112,6 +113,7 @@ const FaqsPage = () => {
 
   const updateMutation = useMutation({
     mutationFn: async () => {
+      if (!editFaq) return;
       const { error } = await supabase.from("faqs").update({
         question: editQuestion,
         answer: editAnswer,
@@ -140,7 +142,7 @@ const FaqsPage = () => {
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
-  const renderFaqCard = (faq: any) => (
+  const renderFaqCard = (faq: Tables<"faqs">) => (
     <div
       key={faq.id}
       onClick={() => openEdit(faq)}

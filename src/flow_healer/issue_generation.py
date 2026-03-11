@@ -24,6 +24,7 @@ class IssueTemplate:
     kind: str
     targets: tuple[str, ...]
     validation_command: str
+    body: str = ""
     labels: tuple[str, ...] = ()
 
 
@@ -41,6 +42,7 @@ PYTHON_FRAMEWORK_FAMILY = "python-frameworks"
 PYTHON_DATA_ML_FAMILY = "python-data-ml"
 MEGA_FINAL_WAVE_1_FAMILY = "mega-final-wave-1"
 MEGA_FINAL_WAVE_2_FAMILY = "mega-final-wave-2"
+PROD_EVAL_HYBRID_HEAVY_FAMILY = "prod-eval-hybrid-heavy"
 
 
 def available_issue_families() -> tuple[str, ...]:
@@ -52,6 +54,7 @@ def available_issue_families() -> tuple[str, ...]:
         PYTHON_DATA_ML_FAMILY,
         MEGA_FINAL_WAVE_1_FAMILY,
         MEGA_FINAL_WAVE_2_FAMILY,
+        PROD_EVAL_HYBRID_HEAVY_FAMILY,
     )
 
 
@@ -97,7 +100,7 @@ def build_issue_drafts(
             targets=template.targets,
             default_command=template.validation_command,
         )
-        body = render_issue_body(template.targets, validation)
+        body = template.body or render_issue_body(template.targets, validation)
         labels = tuple(_dedupe_labels([*shared_labels, *template.labels]))
         drafts.append(IssueDraft(title=title, body=body, labels=labels))
     return drafts
@@ -128,6 +131,8 @@ def get_issue_templates(family: str) -> tuple[IssueTemplate, ...]:
         return _mega_final_wave_1_templates()
     if normalized_family == MEGA_FINAL_WAVE_2_FAMILY:
         return _mega_final_wave_2_templates()
+    if normalized_family == PROD_EVAL_HYBRID_HEAVY_FAMILY:
+        return _prod_eval_hybrid_heavy_templates()
     raise ValueError(
         f"unknown issue family '{family}'. Available families: {', '.join(available_issue_families())}"
     )
@@ -1031,14 +1036,34 @@ def _template(
     validation_command: str,
     difficulty: str,
     source: str,
+    body: str = "",
     extra_labels: Sequence[str] = (),
 ) -> IssueTemplate:
     return IssueTemplate(
         kind=kind,
         targets=targets,
         validation_command=validation_command,
+        body=body,
         labels=tuple(_dedupe_labels((f"difficulty:{difficulty}", f"source:{source}", *extra_labels))),
     )
+
+
+def _hybrid_body(*, summary: str, observed: Sequence[str], expected: Sequence[str], targets: Sequence[str], validation: str) -> str:
+    lines = [summary.strip(), "", "Observed:"]
+    lines.extend(f"- {item}" for item in observed)
+    lines.extend(["", "Expected:"])
+    lines.extend(f"- {item}" for item in expected)
+    lines.extend(["", "Required code outputs:"])
+    lines.extend(f"- {target}" for target in targets)
+    lines.extend(["", "Validation:", f"- {validation}"])
+    return "\n".join(lines) + "\n"
+
+
+def _messy_body(*, intro_lines: Sequence[str], targets: Sequence[str], validation: str) -> str:
+    lines = [*intro_lines, "", "Required code outputs:"]
+    lines.extend(f"- {target}" for target in targets)
+    lines.extend(["", "Validation:", f"- {validation}"])
+    return "\n".join(lines) + "\n"
 
 
 def _is_sql_only_prosper_chat_target_set(targets: Sequence[str]) -> bool:
@@ -1057,6 +1082,238 @@ def _is_prosper_chat_sql_target(target: str) -> bool:
 def _is_prosper_chat_backend_target(target: str) -> bool:
     normalized = _normalize_path(target)
     return normalized.startswith(_PROSPER_CHAT_BACKEND_PREFIX)
+
+
+def _prod_eval_hybrid_heavy_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        _template(
+            kind="Control: Nobi API entry routes contract",
+            targets=("e2e-apps/nobi-owl-trader/api/main.py", "e2e-apps/nobi-owl-trader/tests/test_routes_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("eval:control",),
+        ),
+        _template(
+            kind="Control: Node Next todo route and service contract",
+            targets=(
+                "e2e-apps/node-next/app/api/todos/route.js",
+                "e2e-apps/node-next/lib/todo-service.js",
+                "e2e-apps/node-next/tests/todo-service.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-apps",
+            extra_labels=("eval:control",),
+        ),
+        _template(
+            kind="Hybrid: Portfolio endpoint returns incomplete holdings summary",
+            targets=("e2e-apps/nobi-owl-trader/api/routes/portfolio.py", "e2e-apps/nobi-owl-trader/tests/test_routes_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            body=_hybrid_body(
+                summary=(
+                    "The portfolio endpoint started returning an incomplete holdings summary after the latest route cleanup. "
+                    "This looks isolated to the portfolio route behavior, not the model layer."
+                ),
+                observed=(
+                    "The portfolio response omits part of the expected holdings summary for active accounts.",
+                    "The regression shows up through the route contract rather than lower-level model persistence tests.",
+                ),
+                expected=(
+                    "The route should keep returning the complete portfolio summary expected by the existing API tests.",
+                    "The fix should stay scoped to the portfolio route behavior and its route-level test coverage.",
+                ),
+                targets=("e2e-apps/nobi-owl-trader/api/routes/portfolio.py", "e2e-apps/nobi-owl-trader/tests/test_routes_portfolio.py"),
+                validation="cd e2e-apps/nobi-owl-trader && pytest -q",
+            ),
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("eval:hybrid",),
+        ),
+        _template(
+            kind="Hybrid: Create todo API accepts invalid payload without a 400",
+            targets=(
+                "e2e-apps/node-next/app/api/todos/route.js",
+                "e2e-apps/node-next/tests/todo-service.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            body=_hybrid_body(
+                summary=(
+                    "We have a regression where the create-todo API is too permissive on malformed payloads. "
+                    "The bug report from the app side is that obviously invalid submissions are not getting rejected cleanly."
+                ),
+                observed=(
+                    "Requests with invalid todo payloads are being accepted instead of failing fast.",
+                    "The route behavior is the important surface here, and the fix should not spill into unrelated notification or export paths.",
+                ),
+                expected=(
+                    "Invalid payloads should produce the route behavior covered by the existing todo tests.",
+                    "Keep the scope tight to the todo route contract and its targeted test coverage.",
+                ),
+                targets=(
+                    "e2e-apps/node-next/app/api/todos/route.js",
+                    "e2e-apps/node-next/tests/todo-service.test.js",
+                ),
+                validation="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            ),
+            difficulty="medium",
+            source="e2e-apps",
+            extra_labels=("eval:hybrid",),
+        ),
+        _template(
+            kind="Hybrid: Django add helper regressed on numeric strings",
+            targets=("e2e-smoke/py-django/app/add.py", "e2e-smoke/py-django/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-django && python -m pytest -q",
+            body=_hybrid_body(
+                summary=(
+                    "The Django smoke helper appears to have regressed on numeric string handling. "
+                    "The complaint is that values which used to combine cleanly now behave inconsistently at the app boundary."
+                ),
+                observed=(
+                    "Numeric string inputs are not staying compatible with the established add-helper behavior.",
+                    "The regression should be fixable inside the Django smoke sandbox without changing import-path behavior.",
+                ),
+                expected=(
+                    "Restore the existing add-helper behavior for stringable numeric inputs.",
+                    "Keep the test focused on the sandbox’s normal package-loading path.",
+                ),
+                targets=("e2e-smoke/py-django/app/add.py", "e2e-smoke/py-django/tests/test_add.py"),
+                validation="cd e2e-smoke/py-django && python -m pytest -q",
+            ),
+            difficulty="medium",
+            source="e2e-smoke",
+            extra_labels=("eval:hybrid",),
+        ),
+        _template(
+            kind="Hybrid: FastAPI health response lost service metadata",
+            targets=("e2e-apps/python-fastapi/app/api.py", "e2e-apps/python-fastapi/tests/test_api_contract.py"),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            body=_hybrid_body(
+                summary=(
+                    "A recent API cleanup appears to have dropped part of the service metadata from the FastAPI response contract. "
+                    "This should be treated as an API contract regression rather than a repository-layer change."
+                ),
+                observed=(
+                    "The response shape no longer matches the expected contract covered by the FastAPI API tests.",
+                    "The failure is on the API-facing surface, not the importer or token service paths.",
+                ),
+                expected=(
+                    "Restore the metadata expected by the existing API contract tests.",
+                    "Keep the change limited to the API contract surface and its direct test.",
+                ),
+                targets=("e2e-apps/python-fastapi/app/api.py", "e2e-apps/python-fastapi/tests/test_api_contract.py"),
+                validation="cd e2e-apps/python-fastapi && pytest -q",
+            ),
+            difficulty="medium",
+            source="e2e-apps",
+            extra_labels=("eval:hybrid",),
+        ),
+        _template(
+            kind="Hybrid: Prosper transcript normalization should preserve speaker labels",
+            targets=("e2e-apps/prosper-chat/src/lib/transcript.ts", "e2e-apps/prosper-chat/src/test/transcript.test.ts"),
+            validation_command=_PROSPER_CHAT_FULL_COMMAND,
+            body=_hybrid_body(
+                summary=(
+                    "Transcript cleanup is over-normalizing some content and dropping speaker-label semantics we still need. "
+                    "This should remain a transcript-only repair, not a broader frontend rewrite."
+                ),
+                observed=(
+                    "Speaker labels are getting flattened or rewritten more aggressively than intended.",
+                    "The issue is scoped to transcript normalization behavior and its targeted test lane.",
+                ),
+                expected=(
+                    "Preserve the current speaker-label semantics unless the transcript fixture clearly requires a change.",
+                    "Keep the fix confined to the named transcript files.",
+                ),
+                targets=("e2e-apps/prosper-chat/src/lib/transcript.ts", "e2e-apps/prosper-chat/src/test/transcript.test.ts"),
+                validation=_PROSPER_CHAT_FULL_COMMAND,
+            ),
+            difficulty="medium",
+            source="e2e-apps",
+            extra_labels=("eval:hybrid",),
+        ),
+        _template(
+            kind="Hybrid: Notification digest should not cross-send colliding ids",
+            targets=("e2e-apps/node-next/lib/notification-digest.js", "e2e-apps/node-next/tests/notification-digest.test.js"),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            body=_hybrid_body(
+                summary=(
+                    "We saw a digest edge case where colliding notification ids across recipients can bleed into the wrong recipient send flow. "
+                    "This one is meant to exercise realistic human wording around a scoped Node utility regression."
+                ),
+                observed=(
+                    "Digest flushing can mark or include notifications for the wrong recipient when ids collide.",
+                    "The regression belongs in the notification digest helper and its direct test coverage.",
+                ),
+                expected=(
+                    "Flush behavior should stay recipient-scoped even when ids collide.",
+                    "Keep the change local to the digest helper and targeted test file.",
+                ),
+                targets=("e2e-apps/node-next/lib/notification-digest.js", "e2e-apps/node-next/tests/notification-digest.test.js"),
+                validation="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            ),
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("eval:hybrid",),
+        ),
+        _template(
+            kind="Messy: pandas helper fix should stay pandas-specific",
+            targets=("e2e-smoke/py-data-pandas/app/add.py", "e2e-smoke/py-data-pandas/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-data-pandas && pytest -q",
+            body=_messy_body(
+                intro_lines=(
+                    "The pandas smoke helper still feels off after the last repair.",
+                    "This should stay pandas-specific and should not broaden generic add semantics for unrelated object types.",
+                    "Use the existing pandas test as the source of truth and keep the patch narrow.",
+                ),
+                targets=("e2e-smoke/py-data-pandas/app/add.py", "e2e-smoke/py-data-pandas/tests/test_add.py"),
+                validation="cd e2e-smoke/py-data-pandas && pytest -q",
+            ),
+            difficulty="medium",
+            source="e2e-smoke",
+            extra_labels=("eval:messy",),
+        ),
+        _template(
+            kind="Messy: Nobi portfolio engine weirdness after the latest cleanup",
+            targets=("e2e-apps/nobi-owl-trader/api/portfolio.py", "e2e-apps/nobi-owl-trader/tests/test_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            body=_messy_body(
+                intro_lines=(
+                    "This one is intentionally a little messier.",
+                    "After the latest cleanup the Nobi portfolio behavior feels off again and the engine-level coverage is the part we care about here.",
+                    "Please keep the fix tight and avoid wandering into unrelated model or backtest behavior.",
+                ),
+                targets=("e2e-apps/nobi-owl-trader/api/portfolio.py", "e2e-apps/nobi-owl-trader/tests/test_portfolio.py"),
+                validation="cd e2e-apps/nobi-owl-trader && pytest -q",
+            ),
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("eval:messy",),
+        ),
+        _template(
+            kind="Messy: Todo route is acting broken when title is empty",
+            targets=(
+                "e2e-apps/node-next/app/api/todos/route.js",
+                "e2e-apps/node-next/tests/todo-service.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            body=_messy_body(
+                intro_lines=(
+                    "Something is still off in the Node Next todo route when the title is empty.",
+                    "Treat this as the same create-todo surface, not a reason to touch notification-digest or export behavior.",
+                    "The existing todo tests should stay the source of truth here.",
+                ),
+                targets=(
+                    "e2e-apps/node-next/app/api/todos/route.js",
+                    "e2e-apps/node-next/tests/todo-service.test.js",
+                ),
+                validation="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            ),
+            difficulty="medium",
+            source="e2e-apps",
+            extra_labels=("eval:messy",),
+        ),
+    )
 
 
 def _normalize_path(path: str) -> str:

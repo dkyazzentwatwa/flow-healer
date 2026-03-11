@@ -71,6 +71,19 @@ def test_validate_drafts_or_die_accepts_mega_final_wave() -> None:
     module.validate_drafts_or_die(drafts)
 
 
+def test_validate_drafts_or_die_accepts_prod_eval_hybrid_heavy_wave() -> None:
+    module = _load_module()
+    drafts = module.build_issue_drafts(
+        count=10,
+        prefix="Prod eval hybrid-heavy",
+        ready_label="healer:ready",
+        extra_labels=("campaign:prod-eval",),
+        family="prod-eval-hybrid-heavy",
+    )
+
+    module.validate_drafts_or_die(drafts)
+
+
 def test_validate_drafts_or_die_rejects_missing_target() -> None:
     module = _load_module()
     draft = module.build_issue_drafts(

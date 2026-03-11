@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
-import type { Database } from "@/integrations/supabase/types";
+import type { Database, Tables } from "@/integrations/supabase/types";
 
 type LeadStatus = Database["public"]["Enums"]["lead_status"];
 
@@ -28,11 +28,11 @@ const LeadsPage = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [selected, setSelected] = useState<any>(null);
+  const [selected, setSelected] = useState<Tables<"leads"> | null>(null);
   const [editStatus, setEditStatus] = useState<LeadStatus>("new");
   const [editNotes, setEditNotes] = useState("");
 
-  const openDetail = (lead: any) => {
+  const openDetail = (lead: Tables<"leads">) => {
     setSelected(lead);
     setEditStatus(lead.status);
     setEditNotes(lead.notes || "");
@@ -53,6 +53,7 @@ const LeadsPage = () => {
 
   const updateMutation = useMutation({
     mutationFn: async () => {
+      if (!selected) return;
       const { error } = await supabase.from("leads").update({
         status: editStatus,
         notes: editNotes || null,

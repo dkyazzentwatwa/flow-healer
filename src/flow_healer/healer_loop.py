@@ -1253,7 +1253,13 @@ class AutonomousHealerLoop:
         )
         strategy = str(swarm_outcome.strategy or "").strip().lower()
         if strategy == "infra_pause":
-            return "infra_pause", reason
+            if self._swarm_outcome_looks_infra(
+                summary=str(swarm_outcome.summary or ""),
+                reason=reason,
+                root_cause=str(swarm_outcome.plan.root_cause or ""),
+            ):
+                return "infra_pause", reason
+            return "swarm_quarantine", reason
         if strategy == "quarantine":
             if self._swarm_outcome_looks_infra(
                 summary=str(swarm_outcome.summary or ""),

@@ -7,7 +7,7 @@ import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .docker_runtime import ensure_docker_runtime_running, record_docker_activity
 
@@ -368,7 +368,7 @@ def _resolve_project_relative_path(*, project_root: Path, relative_path: str) ->
 def _ad_hoc_sql_checks(*, project_dir: Path, selected_paths: tuple[str, ...]) -> list[SqlCheck]:
     checks: list[SqlCheck] = []
     for selected_path in selected_paths:
-        check_path = _resolve_project_relative_path(project_root=project_dir, relative_path=selected_path)
+        check_path = _resolve_selected_check_path(project_root=project_dir, selected_path=selected_path)
         if not check_path.is_file():
             raise ValueError(f"Requested SQL assertion path does not exist: {selected_path}")
         checks.append(
@@ -378,6 +378,21 @@ def _ad_hoc_sql_checks(*, project_dir: Path, selected_paths: tuple[str, ...]) ->
             )
         )
     return checks
+
+
+def _resolve_selected_check_path(*, project_root: Path, selected_path: str) -> Path:
+    normalized = _normalize_manifest_relative_path(selected_path)
+    direct = _resolve_project_relative_path(project_root=project_root, relative_path=normalized)
+    if direct.is_file():
+        return direct
+
+    parts = PurePosixPath(normalized).parts
+    for index in range(1, len(parts)):
+        suffix = PurePosixPath(*parts[index:]).as_posix()
+        candidate = _resolve_project_relative_path(project_root=project_root, relative_path=suffix)
+        if candidate.is_file():
+            return candidate
+    return direct
 
 
 def _bool_from_env(name: str) -> bool:

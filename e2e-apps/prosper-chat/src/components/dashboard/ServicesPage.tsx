@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { industryTemplates } from "@/data/industryTemplates";
+import type { Tables } from "@/integrations/supabase/types";
 
 const ServicesPage = () => {
   const { activeBusiness: business } = useActiveBusiness();
@@ -26,7 +27,7 @@ const ServicesPage = () => {
   const [description, setDescription] = useState("");
 
   // Edit modal state
-  const [editService, setEditService] = useState<any>(null);
+  const [editService, setEditService] = useState<Tables<"services"> | null>(null);
   const [editName, setEditName] = useState("");
   const [editDuration, setEditDuration] = useState("");
   const [editPrice, setEditPrice] = useState("");
@@ -40,7 +41,7 @@ const ServicesPage = () => {
     setCollapsedSections(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const openEdit = (s: any) => {
+  const openEdit = (s: Tables<"services">) => {
     setEditService(s);
     setEditName(s.name);
     setEditDuration(String(s.duration_minutes));
@@ -123,6 +124,7 @@ const ServicesPage = () => {
 
   const updateMutation = useMutation({
     mutationFn: async () => {
+      if (!editService) return;
       const { error } = await supabase.from("services").update({
         name: editName,
         duration_minutes: parseInt(editDuration),
@@ -161,7 +163,7 @@ const ServicesPage = () => {
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
-  const renderServiceCard = (s: any) => (
+  const renderServiceCard = (s: Tables<"services">) => (
     <div
       key={s.id}
       onClick={() => openEdit(s)}

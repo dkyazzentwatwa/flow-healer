@@ -7,6 +7,7 @@ from flow_healer.issue_generation import (
     JS_FRAMEWORK_FAMILY,
     MEGA_FINAL_WAVE_1_FAMILY,
     MEGA_FINAL_WAVE_2_FAMILY,
+    PROD_EVAL_HYBRID_HEAVY_FAMILY,
     PYTHON_DATA_ML_FAMILY,
     PYTHON_FRAMEWORK_FAMILY,
     PROSPER_CHAT_DB_FAMILY,
@@ -81,6 +82,7 @@ def test_available_issue_families_include_framework_expansions() -> None:
     assert PYTHON_DATA_ML_FAMILY in families
     assert MEGA_FINAL_WAVE_1_FAMILY in families
     assert MEGA_FINAL_WAVE_2_FAMILY in families
+    assert PROD_EVAL_HYBRID_HEAVY_FAMILY in families
 
 
 def test_build_issue_drafts_supports_js_framework_family() -> None:
@@ -146,6 +148,34 @@ def test_build_issue_drafts_supports_mega_final_wave_families() -> None:
     assert all("Validation:\n- cd " in draft.body for draft in [*wave_1, *wave_2])
 
 
+def test_build_issue_drafts_supports_prod_eval_hybrid_heavy_family() -> None:
+    drafts = build_issue_drafts(
+        count=10,
+        prefix="Prod eval hybrid-heavy",
+        ready_label="healer:ready",
+        extra_labels=("campaign:prod-eval",),
+        family=PROD_EVAL_HYBRID_HEAVY_FAMILY,
+    )
+
+    assert len(drafts) == 10
+    assert all("healer:ready" in draft.labels for draft in drafts)
+    assert all("campaign:prod-eval" in draft.labels for draft in drafts)
+    assert sum("eval:control" in draft.labels for draft in drafts) == 2
+    assert sum("eval:hybrid" in draft.labels for draft in drafts) == 6
+    assert sum("eval:messy" in draft.labels for draft in drafts) == 2
+
+    hybrid = next(draft for draft in drafts if "eval:hybrid" in draft.labels)
+    assert "Observed:" in hybrid.body
+    assert "Expected:" in hybrid.body
+    assert "Required code outputs:" in hybrid.body
+    assert "Validation:\n- cd " in hybrid.body
+
+    messy = next(draft for draft in drafts if "eval:messy" in draft.labels)
+    assert "Observed:" not in messy.body
+    assert "Validation:\n- " in messy.body
+    assert "Required code outputs:" in messy.body
+
+
 def test_validate_issue_drafts_accepts_mega_final_catalog() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     wave_1 = build_issue_drafts(
@@ -165,6 +195,19 @@ def test_validate_issue_drafts_accepts_mega_final_catalog() -> None:
 
     validate_issue_drafts(wave_1, repo_root=repo_root)
     validate_issue_drafts(wave_2, repo_root=repo_root)
+
+
+def test_validate_issue_drafts_accepts_prod_eval_hybrid_heavy_catalog() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    drafts = build_issue_drafts(
+        count=10,
+        prefix="Prod eval hybrid-heavy",
+        ready_label="healer:ready",
+        extra_labels=("campaign:prod-eval",),
+        family=PROD_EVAL_HYBRID_HEAVY_FAMILY,
+    )
+
+    validate_issue_drafts(drafts, repo_root=repo_root)
 
 
 def test_validate_issue_drafts_rejects_missing_target_path() -> None:
@@ -207,3 +250,18 @@ def test_mega_final_catalog_round_trips_through_task_spec_parser() -> None:
             assert spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/"))
             assert spec.validation_commands
             assert spec.output_targets
+
+
+def test_prod_eval_hybrid_heavy_catalog_round_trips_through_task_spec_parser() -> None:
+    drafts = build_issue_drafts(
+        count=10,
+        prefix="Parser check prod eval",
+        ready_label="healer:ready",
+        family=PROD_EVAL_HYBRID_HEAVY_FAMILY,
+    )
+
+    for draft in drafts:
+        spec = compile_task_spec(issue_title=draft.title, issue_body=draft.body)
+        assert spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/"))
+        assert spec.validation_commands
+        assert spec.output_targets

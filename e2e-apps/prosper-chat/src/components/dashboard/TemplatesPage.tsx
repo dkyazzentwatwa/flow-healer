@@ -12,6 +12,12 @@ import {
 } from "@/components/ui/dialog";
 import { Briefcase, HelpCircle, Check, Plus, Loader2 } from "lucide-react";
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return typeof error === "object" && error && "message" in error && typeof error.message === "string"
+    ? error.message
+    : fallback;
+}
+
 const TemplatesPage = () => {
   const { activeBusiness: business } = useActiveBusiness();
   const { toast } = useToast();
@@ -44,8 +50,8 @@ const TemplatesPage = () => {
 
       toast({ title: "Template applied!", description: `Added ${template.services.length} services and ${template.faqs.length} FAQs.` });
       setPreview(null);
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: getErrorMessage(e, "Could not apply template"), variant: "destructive" });
     } finally {
       setApplying(false);
     }

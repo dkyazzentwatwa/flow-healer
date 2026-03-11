@@ -19,6 +19,22 @@
     {
       "name": "appointment_overlap",
       "path": "supabase/assertions/appointment_overlap.sql"
+    },
+    {
+      "name": "admin_lead_visibility",
+      "path": "supabase/assertions/admin_lead_visibility.sql"
+    },
+    {
+      "name": "bot_widget_integrity",
+      "path": "supabase/assertions/bot_widget_integrity.sql"
+    },
+    {
+      "name": "business_settings_alignment",
+      "path": "supabase/assertions/business_settings_alignment.sql"
+    },
+    {
+      "name": "widget_bootstrap_cleanup",
+      "path": "supabase/assertions/widget_bootstrap_cleanup.sql"
     }
   ]
 }

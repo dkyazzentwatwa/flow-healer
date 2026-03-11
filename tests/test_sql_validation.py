@@ -135,6 +135,27 @@ def test_load_sql_checks_allows_ad_hoc_selected_paths_not_in_manifest(tmp_path: 
     assert checks == [SqlCheck(name="custom", path=custom_file.resolve())]
 
 
+def test_load_sql_checks_allows_repo_relative_ad_hoc_selected_paths_not_in_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
+    schema_file = tmp_path / "supabase" / "assertions" / "schema.sql"
+    custom_file = tmp_path / "supabase" / "assertions" / "bot_widget_integrity.sql"
+    schema_file.parent.mkdir(parents=True)
+    schema_file.write_text("select 1;\n", encoding="utf-8")
+    custom_file.write_text("select 2;\n", encoding="utf-8")
+    manifest.write_text(
+        '{"checks":[{"name":"schema","path":"supabase/assertions/schema.sql"}]}',
+        encoding="utf-8",
+    )
+
+    checks = load_sql_checks(
+        project_dir=tmp_path,
+        manifest_path=manifest,
+        selected_paths=("e2e-apps/prosper-chat/supabase/assertions/bot_widget_integrity.sql",),
+    )
+
+    assert checks == [SqlCheck(name="bot_widget_integrity", path=custom_file.resolve())]
+
+
 def test_load_sql_checks_rejects_missing_ad_hoc_selected_paths(tmp_path: Path) -> None:
     manifest = tmp_path / "supabase" / "assertions" / "manifest.json"
     check_file = tmp_path / "supabase" / "assertions" / "schema.sql"

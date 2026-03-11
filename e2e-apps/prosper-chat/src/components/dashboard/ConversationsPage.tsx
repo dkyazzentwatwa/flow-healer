@@ -6,16 +6,21 @@ import { MessageCircle, AlertTriangle } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { Json } from "@/integrations/supabase/types";
+import type { Json, Tables } from "@/integrations/supabase/types";
 
 interface ConversationMessage {
   role: string;
   content: string;
 }
 
+type ConversationLead = Pick<Tables<"leads">, "first_name" | "email">;
+type ConversationRow = Tables<"conversations"> & {
+  leads: ConversationLead | null;
+};
+
 const ConversationsPage = () => {
   const { activeBusiness: business } = useActiveBusiness();
-  const [selected, setSelected] = useState<any>(null);
+  const [selected, setSelected] = useState<ConversationRow | null>(null);
 
   const { data: conversations, isLoading } = useQuery({
     queryKey: ["conversations", business?.id],
@@ -26,7 +31,7 @@ const ConversationsPage = () => {
         .eq("business_id", business!.id)
         .order("created_at", { ascending: false })
         .limit(50);
-      return data || [];
+      return (data || []) as ConversationRow[];
     },
     enabled: !!business,
   });
@@ -77,7 +82,7 @@ const ConversationsPage = () => {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-medium truncate">
-                      {(c.leads as any)?.first_name || "Anonymous"}
+                      {c.leads?.first_name || "Anonymous"}
                     </p>
                     {c.escalated && (
                       <span className="flex items-center gap-1 text-xs text-destructive">
@@ -107,7 +112,7 @@ const ConversationsPage = () => {
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>
-              Conversation with {(selected?.leads as any)?.first_name || "Anonymous"}
+              Conversation with {selected?.leads?.first_name || "Anonymous"}
             </DialogTitle>
             <DialogDescription>
               {selected && new Date(selected.created_at).toLocaleString()}

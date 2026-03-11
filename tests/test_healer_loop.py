@@ -2026,18 +2026,18 @@ def test_process_claimed_issue_swarm_infra_pause_requeues_with_infra_failure_cla
     loop.swarm.recover.return_value = SwarmRecoveryOutcome(
         recovered=False,
         strategy="infra_pause",
-        summary="Local Supabase bootstrap failed before SQL assertions could run.",
+        summary="Cannot connect to the Docker daemon while launching validator containers.",
         analyzer_results=(),
         plan=SwarmRecoveryPlan(
             strategy="infra_pause",
-            summary="Local Supabase bootstrap failed before SQL assertions could run.",
-            root_cause="local Supabase bootstrap failure",
+            summary="Cannot connect to the Docker daemon while launching validator containers.",
+            root_cause="docker daemon unavailable",
             edit_scope=("e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql",),
             targeted_tests=(),
             validation_focus=("supabase",),
         ),
         failure_class="tests_failed",
-        failure_reason="Local Supabase bootstrap failed before SQL assertions could run.",
+        failure_reason="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
     )
 
     loop._process_claimed_issue(claimed)
@@ -3618,6 +3618,46 @@ def test_swarm_quarantine_with_daemon_connectivity_maps_to_infra_pause(tmp_path)
 
     assert failure_class == "infra_pause"
     assert "docker daemon" in failure_reason.lower()
+
+
+def test_swarm_infra_pause_strategy_with_sql_path_resolution_stays_issue_scoped(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    outcome = SwarmRecoveryOutcome(
+        recovered=False,
+        strategy="infra_pause",
+        summary=(
+            "Pause autonomous repair because the current failure is a validation-path routing problem "
+            "outside the issue's exact allowed edit set, not a confirmed defect in the named migration/assertion pair."
+        ),
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="infra_pause",
+            summary=(
+                "Pause autonomous repair because the current failure is a validation-path routing problem "
+                "outside the issue's exact allowed edit set, not a confirmed defect in the named migration/assertion pair."
+            ),
+            root_cause="sql_assertion_path_resolution_mismatch",
+            edit_scope=("e2e-apps/prosper-chat/supabase/assertions/bot_widget_integrity.sql",),
+            targeted_tests=(),
+            validation_focus=("supabase",),
+        ),
+        failure_class="tests_failed",
+        failure_reason=(
+            "Requested SQL assertion path does not exist: "
+            "e2e-apps/prosper-chat/supabase/assertions/bot_widget_integrity.sql"
+        ),
+    )
+
+    failure_class, failure_reason = loop._swarm_failure_override(
+        base_failure_class="tests_failed",
+        base_failure_reason="Failed tests=1 exceeds cap=0",
+        swarm_outcome=outcome,
+    )
+
+    assert failure_class == "swarm_quarantine"
+    assert "Requested SQL assertion path does not exist" in failure_reason
 
 
 def test_backoff_or_fail_no_patch_does_not_exhaust_retry_budget(tmp_path):

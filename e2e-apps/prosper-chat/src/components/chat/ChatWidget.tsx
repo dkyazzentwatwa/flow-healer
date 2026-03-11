@@ -22,6 +22,19 @@ interface ServiceItem {
   price_text: string | null;
 }
 
+interface BusinessContext {
+  id?: string;
+  name: string;
+  services: ServiceItem[];
+  faqs: { question: string; answer: string }[];
+  phone: string;
+  email: string;
+  address?: string;
+  botId?: string;
+  systemPrompt?: string;
+  widgetToken?: string;
+}
+
 interface ChatWidgetProps {
   embedded?: boolean;
   botId?: string;
@@ -83,7 +96,7 @@ async function streamChat({
   onError,
 }: {
   messages: { role: string; content: string }[];
-  businessContext: Record<string, any>;
+  businessContext: BusinessContext;
   onDelta: (text: string) => void;
   onDone: () => void;
   onError: (msg: string) => void;
@@ -219,7 +232,7 @@ const ChatWidget = ({
         { name: "Consultation", duration_minutes: 15, price_text: null },
       ];
 
-  const businessContext = {
+  const businessContext: BusinessContext = {
     id: businessId,
     name: businessName,
     services: activeServices,
@@ -307,7 +320,7 @@ const ChatWidget = ({
         setStep("booking-calendly");
         return;
       }
-      if (!widgetToken || !activeServices.some((s) => (s as any).id)) {
+      if (!widgetToken || !activeServices.some((s) => Boolean(s.id))) {
         const userMsg: Message = { id: Date.now().toString(), role: "user", text: "I'd like to book an appointment" };
         setMessages((prev) => [...prev, userMsg]);
         setStep("conversation");
@@ -359,7 +372,7 @@ const ChatWidget = ({
         },
         body: JSON.stringify({
           widget_token: widgetToken,
-          service_id: (selectedService as any)?.id,
+          service_id: selectedService?.id,
           date: dateStr,
         }),
       });
@@ -412,7 +425,7 @@ const ChatWidget = ({
         },
         body: JSON.stringify({
           widget_token: widgetToken,
-          service_id: (selectedService as any)?.id,
+          service_id: selectedService?.id,
           start_time: startTime.toISOString(),
           name: bookingName.trim(),
           email: bookingEmail.trim(),

@@ -10,9 +10,15 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
-import type { Database } from "@/integrations/supabase/types";
+import type { Database, Tables } from "@/integrations/supabase/types";
 
 type AppointmentStatus = Database["public"]["Enums"]["appointment_status"];
+type AppointmentLead = Pick<Tables<"leads">, "first_name" | "email">;
+type AppointmentService = Pick<Tables<"services">, "name" | "duration_minutes">;
+type AppointmentRow = Tables<"appointments"> & {
+  leads: AppointmentLead | null;
+  services: AppointmentService | null;
+};
 
 const STATUSES: AppointmentStatus[] = ["pending", "confirmed", "cancelled", "completed", "no_show"];
 
@@ -21,11 +27,11 @@ const AppointmentsPage = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [selected, setSelected] = useState<any>(null);
+  const [selected, setSelected] = useState<AppointmentRow | null>(null);
   const [editStatus, setEditStatus] = useState<AppointmentStatus>("pending");
   const [editNotes, setEditNotes] = useState("");
 
-  const openDetail = (a: any) => {
+  const openDetail = (a: AppointmentRow) => {
     setSelected(a);
     setEditStatus(a.status);
     setEditNotes(a.notes || "");
@@ -39,13 +45,14 @@ const AppointmentsPage = () => {
         .select("*, leads(first_name, email), services(name, duration_minutes)")
         .eq("business_id", business!.id)
         .order("start_time", { ascending: true });
-      return data || [];
+      return (data || []) as AppointmentRow[];
     },
     enabled: !!business,
   });
 
   const updateMutation = useMutation({
     mutationFn: async () => {
+      if (!selected) return;
       const { error } = await supabase.from("appointments").update({
         status: editStatus,
         notes: editNotes || null,
@@ -89,7 +96,7 @@ const AppointmentsPage = () => {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <p className="font-medium truncate text-sm">
-                    {(a.leads as any)?.first_name || "Anonymous"}
+                    {a.leads?.first_name || "Anonymous"}
                   </p>
                   <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                     a.status === "confirmed" ? "bg-foreground/5 text-foreground" :
@@ -99,7 +106,7 @@ const AppointmentsPage = () => {
                     {a.status}
                   </span>
                 </div>
-                <p className="text-sm text-muted-foreground">{(a.services as any)?.name || "—"}</p>
+                <p className="text-sm text-muted-foreground">{a.services?.name || "—"}</p>
               </div>
               <div className="text-right text-sm">
                 <p className="font-medium">{new Date(a.start_time).toLocaleDateString()}</p>
@@ -107,7 +114,7 @@ const AppointmentsPage = () => {
                   <Clock className="h-3 w-3" />
                   {new Date(a.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                   {" • "}
-                  {(a.services as any)?.duration_minutes || "?"} min
+                  {a.services?.duration_minutes || "?"} min
                 </p>
               </div>
             </div>
@@ -127,19 +134,19 @@ const AppointmentsPage = () => {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-muted-foreground">Client</p>
-                  <p className="font-medium">{(selected.leads as any)?.first_name || "Anonymous"}</p>
+                  <p className="font-medium">{selected.leads?.first_name || "Anonymous"}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Email</p>
-                  <p className="font-medium">{(selected.leads as any)?.email || "—"}</p>
+                  <p className="font-medium">{selected.leads?.email || "—"}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Service</p>
-                  <p className="font-medium">{(selected.services as any)?.name || "—"}</p>
+                  <p className="font-medium">{selected.services?.name || "—"}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Duration</p>
-                  <p className="font-medium">{(selected.services as any)?.duration_minutes || "?"} min</p>
+                  <p className="font-medium">{selected.services?.duration_minutes || "?"} min</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Date</p>

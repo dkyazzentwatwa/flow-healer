@@ -12,6 +12,12 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 import { format, eachDayOfInterval, endOfMonth, startOfMonth } from "date-fns";
 import { useSearchParams } from "react-router-dom";
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return typeof error === "object" && error && "message" in error && typeof error.message === "string"
+    ? error.message
+    : fallback;
+}
+
 function getBoundedUsagePercent(count: number, limit: number | null): number {
   if (!limit || !Number.isFinite(limit) || limit <= 0) {
     return 0;
@@ -94,9 +100,9 @@ const BillingPage = () => {
     enabled: !!business,
   });
 
-  const chatCount = usageRecords?.filter((r: any) => r.type === "chat").length || 0;
-  const leadCount = usageRecords?.filter((r: any) => r.type === "lead_captured").length || 0;
-  const appointmentCount = usageRecords?.filter((r: any) => r.type === "appointment_booked").length || 0;
+  const chatCount = usageRecords?.filter((r) => r.type === "chat").length || 0;
+  const leadCount = usageRecords?.filter((r) => r.type === "lead_captured").length || 0;
+  const appointmentCount = usageRecords?.filter((r) => r.type === "appointment_booked").length || 0;
 
   const chartData = (() => {
     if (!usageRecords) return [];
@@ -104,7 +110,7 @@ const BillingPage = () => {
     return days.map((day) => {
       const dayStr = format(day, "yyyy-MM-dd");
       const chats = usageRecords.filter(
-        (r: any) => r.type === "chat" && format(new Date(r.recorded_at), "yyyy-MM-dd") === dayStr
+        (r) => r.type === "chat" && format(new Date(r.recorded_at), "yyyy-MM-dd") === dayStr
       ).length;
       return { date: format(day, "MMM d"), chats };
     });
@@ -132,8 +138,12 @@ const BillingPage = () => {
           window.location.href = data.url;
         }
       }
-    } catch (err: any) {
-      toast({ title: "Checkout error", description: err.message || "Could not start checkout", variant: "destructive" });
+    } catch (err: unknown) {
+      toast({
+        title: "Checkout error",
+        description: getErrorMessage(err, "Could not start checkout"),
+        variant: "destructive",
+      });
     } finally {
       setCheckoutLoading(null);
     }
@@ -150,8 +160,12 @@ const BillingPage = () => {
           window.location.href = data.url;
         }
       }
-    } catch (err: any) {
-      toast({ title: "Portal error", description: err.message || "Could not open portal", variant: "destructive" });
+    } catch (err: unknown) {
+      toast({
+        title: "Portal error",
+        description: getErrorMessage(err, "Could not open portal"),
+        variant: "destructive",
+      });
     } finally {
       setPortalLoading(false);
     }
