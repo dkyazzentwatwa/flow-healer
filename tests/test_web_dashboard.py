@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote_plus
 from urllib.request import urlopen
 
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
@@ -385,10 +386,26 @@ def test_issue_detail_payload_includes_issue_attempts_and_related_activity(tmp_p
         actual_diff_set=["e2e-smoke/node/src/add.js"],
         test_summary={"failed_tests": 1, "validation_commands": ["npm test"]},
         verifier_summary={"status": "failed"},
+        artifact_bundle={
+            "status": "captured",
+            "artifact_root": str((state_root / "artifacts" / "910").resolve()),
+        },
+        artifact_links=[
+            {
+                "label": "failure_screenshot",
+                "path": str((state_root / "artifacts" / "910" / "failure.png").resolve()),
+            }
+        ],
+        ci_status_summary={
+            "overall_state": "failure",
+            "failing_contexts": ["CI"],
+        },
         failure_class="tests_failed",
         failure_reason="Expected 4 to equal 5",
     )
     store.close()
+    (state_root / "artifacts" / "910").mkdir(parents=True, exist_ok=True)
+    (state_root / "artifacts" / "910" / "failure.png").write_bytes(b"pngdata")
 
     def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
         return [
@@ -441,6 +458,10 @@ def test_issue_detail_payload_includes_issue_attempts_and_related_activity(tmp_p
     assert len(payload["attempts"]) == 1
     assert payload["attempts"][0]["attempt_id"] == "ha_910_1"
     assert payload["attempts"][0]["test_summary"]["validation_commands"] == ["npm test"]
+    assert payload["attempts"][0]["artifact_bundle"]["artifact_root"].endswith("artifacts/910")
+    assert payload["attempts"][0]["artifact_links"][0]["label"] == "failure_screenshot"
+    assert payload["attempts"][0]["artifact_links"][0]["web_href"].startswith("/artifact?path=")
+    assert payload["attempts"][0]["ci_status_summary"]["overall_state"] == "failure"
     assert any(item["issue_id"] == "910" for item in payload["activity"])
     assert payload["repo"]["trust"]["state"] == "degraded"
 
@@ -575,6 +596,31 @@ def test_dashboard_server_serves_issue_detail_endpoint(tmp_path: Path) -> None:
     assert payload["issue"]["issue_id"] == "1202"
     assert payload["attempts"][0]["attempt_id"] == "ha_1202_1"
     assert payload["repo"]["name"] == "demo"
+
+
+def test_dashboard_server_serves_local_artifact_endpoint(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    state_root = Path(config.service.state_root).expanduser().resolve()
+    artifact_path = state_root / "artifacts" / "sample.png"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"pngdata")
+
+    class DummyRouter:
+        def execute(self, **kwargs):  # pragma: no cover - GET-only test stub
+            return {"ok": True}
+
+    server = DashboardServer(config=config, service=service, router=DummyRouter(), host="127.0.0.1", port=0)
+    server.start()
+    try:
+        port = server._httpd.server_address[1]  # type: ignore[union-attr]
+        with urlopen(f"http://127.0.0.1:{port}/artifact?path={quote_plus(str(artifact_path))}", timeout=5) as response:
+            payload = response.read()
+            content_type = response.headers.get("Content-Type")
+    finally:
+        server.stop()
+
+    assert payload == b"pngdata"
+    assert content_type == "image/png"
 
 
 def test_parse_log_activity_row_extracts_issue_and_attempt_metadata() -> None:

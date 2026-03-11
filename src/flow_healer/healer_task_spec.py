@@ -19,6 +19,13 @@ class HealerTaskSpec:
     framework_source: str = ""
     execution_root: str = ""
     validation_commands: tuple[str, ...] = ()
+    app_target: str = ""
+    entry_url: str = ""
+    repro_steps: tuple[str, ...] = ()
+    fixture_profile: str = ""
+    artifact_requirements: tuple[str, ...] = ()
+    runtime_profile: str = ""
+    judgment_required_conditions: tuple[str, ...] = ()
     parse_confidence: float = 1.0
 
 
@@ -63,6 +70,21 @@ _COMMAND_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"\bhttps?://[^\s)>`]+", re.IGNORECASE)
+_DIRECTIVE_LINE_RE = re.compile(r"^(?P<label>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<value>.*)$")
+_LIST_ITEM_PREFIX_RE = re.compile(r"^(?:[-*]\s+|\d+[.)]\s+)")
+
+_APP_SCALAR_FIELD_NAMES: tuple[str, ...] = (
+    "app_target",
+    "entry_url",
+    "fixture_profile",
+    "runtime_profile",
+)
+_APP_LIST_FIELD_NAMES: tuple[str, ...] = (
+    "repro_steps",
+    "artifact_requirements",
+    "judgment_required_conditions",
+)
+_APP_FIELD_NAMES = set((*_APP_SCALAR_FIELD_NAMES, *_APP_LIST_FIELD_NAMES))
 
 _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bnpm\s+test\b", re.IGNORECASE), "node"),
@@ -172,6 +194,19 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     explicit_paths = tuple(_explicit_paths(issue_text))
     explicit_directories = tuple(_explicit_directories(issue_text))
     validation_commands = _extract_validation_commands(issue_body)
+    app_target = _extract_explicit_scalar_field(issue_body=issue_body, field_name="app_target")
+    entry_url = _extract_explicit_scalar_field(issue_body=issue_body, field_name="entry_url")
+    repro_steps = _extract_explicit_list_field(issue_body=issue_body, field_name="repro_steps")
+    fixture_profile = _extract_explicit_scalar_field(issue_body=issue_body, field_name="fixture_profile")
+    artifact_requirements = _extract_explicit_list_field(
+        issue_body=issue_body,
+        field_name="artifact_requirements",
+    )
+    runtime_profile = _extract_explicit_scalar_field(issue_body=issue_body, field_name="runtime_profile")
+    judgment_required_conditions = _extract_explicit_list_field(
+        issue_body=issue_body,
+        field_name="judgment_required_conditions",
+    )
     input_context_paths = _explicit_input_context_paths(issue_text=issue_text, explicit_paths=explicit_paths)
     output_targets = tuple(path for path in explicit_paths if path not in input_context_paths)
     if not input_context_paths and _treat_markdown_targets_as_input_hints(issue_text=issue_text, output_targets=output_targets):
@@ -220,6 +255,13 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         framework_source=framework_source,
         execution_root=inferred_execution_root,
         validation_commands=validation_commands,
+        app_target=app_target,
+        entry_url=entry_url,
+        repro_steps=repro_steps,
+        fixture_profile=fixture_profile,
+        artifact_requirements=artifact_requirements,
+        runtime_profile=runtime_profile,
+        judgment_required_conditions=judgment_required_conditions,
         parse_confidence=parse_confidence,
     )
 
@@ -294,6 +336,22 @@ def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
         f"- Tool policy: {spec.tool_policy}",
         f"- Validation profile: {spec.validation_profile}",
     ]
+    if spec.app_target:
+        lines.append(f"- App target: {spec.app_target}")
+    if spec.entry_url:
+        lines.append(f"- Entry URL: {spec.entry_url}")
+    if spec.fixture_profile:
+        lines.append(f"- Fixture profile: {spec.fixture_profile}")
+    if spec.runtime_profile:
+        lines.append(f"- Runtime profile: {spec.runtime_profile}")
+    if spec.repro_steps:
+        lines.append(f"- Repro steps: {' | '.join(spec.repro_steps)}")
+    if spec.artifact_requirements:
+        lines.append(f"- Artifact requirements: {' | '.join(spec.artifact_requirements)}")
+    if spec.judgment_required_conditions:
+        lines.append(
+            f"- Judgment required conditions: {' | '.join(spec.judgment_required_conditions)}"
+        )
     if spec.language:
         lines.append(f"- Language: {spec.language}")
     if spec.framework:
@@ -507,6 +565,105 @@ def _extract_validation_commands(issue_text: str) -> tuple[str, ...]:
         seen.add(key)
         commands.append(command)
     return tuple(commands)
+
+
+def _extract_explicit_scalar_field(*, issue_body: str, field_name: str) -> str:
+    lines = issue_body.splitlines()
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        directive = _parse_directive_line(stripped)
+        if directive and directive[0] == field_name:
+            value = directive[1]
+            if value:
+                return value
+            return _collect_scalar_section_value(lines=lines, start_index=index + 1)
+
+        heading_name = _parse_heading_name(stripped)
+        if heading_name == field_name:
+            return _collect_scalar_section_value(lines=lines, start_index=index + 1)
+    return ""
+
+
+def _extract_explicit_list_field(*, issue_body: str, field_name: str) -> tuple[str, ...]:
+    lines = issue_body.splitlines()
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        directive = _parse_directive_line(stripped)
+        if directive and directive[0] == field_name:
+            if directive[1]:
+                return (directive[1],)
+            return _collect_list_section_values(lines=lines, start_index=index + 1)
+
+        heading_name = _parse_heading_name(stripped)
+        if heading_name == field_name:
+            return _collect_list_section_values(lines=lines, start_index=index + 1)
+    return ()
+
+
+def _collect_scalar_section_value(*, lines: list[str], start_index: int) -> str:
+    for raw_line in lines[start_index:]:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if _is_section_boundary(stripped):
+            return ""
+        return _clean_list_item(stripped)
+    return ""
+
+
+def _collect_list_section_values(*, lines: list[str], start_index: int) -> tuple[str, ...]:
+    items: list[str] = []
+    for raw_line in lines[start_index:]:
+        stripped = raw_line.strip()
+        if not stripped:
+            if items:
+                break
+            continue
+        if _is_section_boundary(stripped):
+            break
+        cleaned = _clean_list_item(stripped)
+        if cleaned:
+            items.append(cleaned)
+    return tuple(items)
+
+
+def _parse_directive_line(line: str) -> tuple[str, str] | None:
+    if not line or line.startswith("#"):
+        return None
+    match = _DIRECTIVE_LINE_RE.match(line)
+    if not match:
+        return None
+    normalized = _normalize_app_field_name(match.group("label"))
+    if normalized not in _APP_FIELD_NAMES:
+        return None
+    return normalized, match.group("value").strip().strip("`")
+
+
+def _parse_heading_name(line: str) -> str:
+    if not line.startswith("#"):
+        return ""
+    heading = line.lstrip("#").strip()
+    normalized = _normalize_app_field_name(heading)
+    if normalized in _APP_FIELD_NAMES:
+        return normalized
+    return ""
+
+
+def _is_section_boundary(line: str) -> bool:
+    if not line:
+        return False
+    if line.startswith("#"):
+        return True
+    return _DIRECTIVE_LINE_RE.match(line) is not None
+
+
+def _clean_list_item(line: str) -> str:
+    return _LIST_ITEM_PREFIX_RE.sub("", line).strip()
+
+
+def _normalize_app_field_name(label: str) -> str:
+    lowered = re.sub(r"[^a-z0-9]+", "_", str(label or "").strip().lower()).strip("_")
+    return lowered
 
 
 def _infer_execution_root(

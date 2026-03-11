@@ -634,3 +634,326 @@ def test_open_or_update_pr_rejects_payload_without_number(monkeypatch):
     error_class, error_reason = tracker.get_last_error()
     assert error_class == "github_api_error"
     assert "Validation Failed" in error_reason
+
+
+def test_publish_artifact_files_creates_branch_and_returns_markdown_ready_urls(monkeypatch, tmp_path):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    screenshot = tmp_path / "failure.png"
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    console_log = tmp_path / "failure-console.log"
+    console_log.write_text("console output", encoding="utf-8")
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append((path, method, body))
+        if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/git/ref/heads/main":
+            assert method == "GET"
+            return {"object": {"sha": "base123"}}
+        if path == "/repos/owner/repo/git/refs":
+            assert method == "POST"
+            assert body == {
+                "ref": "refs/heads/flow-healer-artifacts",
+                "sha": "base123",
+            }
+            return {"ref": "refs/heads/flow-healer-artifacts"}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure.png?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure-console.log?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure.png":
+            assert method == "PUT"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            assert body["message"] == "chore: publish flow-healer evidence for issue #123"
+            assert body["content"] == "iVBORw0KGgpmYWtl"
+            assert "sha" not in body
+            return {"content": {"path": "flow-healer/evidence/issue-123/attempt-1/failure.png", "sha": "pngsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure-console.log":
+            assert method == "PUT"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            assert body["message"] == "chore: publish flow-healer evidence for issue #123"
+            assert body["content"] == "Y29uc29sZSBvdXRwdXQ="
+            assert "sha" not in body
+            return {"content": {"path": "flow-healer/evidence/issue-123/attempt-1/failure-console.log", "sha": "logsha"}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    published = tracker.publish_artifact_files(
+        issue_id="123",
+        files=[screenshot, console_log],
+        branch="flow-healer-artifacts",
+        source_branch="main",
+        run_key="attempt-1",
+    )
+
+    assert [artifact.name for artifact in published] == ["failure.png", "failure-console.log"]
+    assert published[0].remote_path == "flow-healer/evidence/issue-123/attempt-1/failure.png"
+    assert published[0].html_url == "https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-123/attempt-1/failure.png"
+    assert published[0].markdown_url == "https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-123/attempt-1/failure.png"
+    assert published[0].download_url == "https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-123/attempt-1/failure.png"
+    assert published[0].content_type == "image/png"
+    assert published[1].content_type == "text/plain"
+
+
+def test_publish_artifact_files_updates_existing_artifact_sha(monkeypatch, tmp_path):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    screenshot = tmp_path / "resolution.png"
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nupdated")
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append((path, method, body))
+        if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
+            assert method == "GET"
+            return {"ref": "refs/heads/flow-healer-artifacts", "object": {"sha": "branchsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {"sha": "existingsha"}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png":
+            assert method == "PUT"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            assert body["sha"] == "existingsha"
+            return {"content": {"path": "flow-healer/evidence/issue-123/latest/resolution.png", "sha": "newsha"}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    published = tracker.publish_artifact_files(
+        issue_id="123",
+        files=[screenshot],
+        branch="flow-healer-artifacts",
+    )
+
+    assert len(published) == 1
+    assert published[0].sha == "newsha"
+    assert calls == [
+        ("/repos/owner/repo/git/ref/heads/flow-healer-artifacts", "GET", None),
+        (
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png?ref=flow-healer-artifacts",
+            "GET",
+            None,
+        ),
+        (
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png",
+            "PUT",
+            {
+                "message": "chore: publish flow-healer evidence for issue #123",
+                "content": "iVBORw0KGgp1cGRhdGVk",
+                "branch": "flow-healer-artifacts",
+                "sha": "existingsha",
+            },
+        ),
+    ]
+
+
+def test_publish_artifact_files_skips_unsupported_files(monkeypatch, tmp_path):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    artifact = tmp_path / "dump.sqlite"
+    artifact.write_bytes(b"sqlite")
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append((path, method, body))
+        if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
+            assert method == "GET"
+            return {"ref": "refs/heads/flow-healer-artifacts", "object": {"sha": "branchsha"}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    published = tracker.publish_artifact_files(
+        issue_id="123",
+        files=[artifact],
+        branch="flow-healer-artifacts",
+    )
+
+    assert published == []
+    assert calls == [
+        ("/repos/owner/repo/git/ref/heads/flow-healer-artifacts", "GET", None),
+    ]
+
+
+def test_get_pr_ci_status_summary_combines_check_runs_statuses_and_workflows(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    calls: list[str] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append(path)
+        assert method == "GET"
+        if path == "/repos/owner/repo/pulls/91":
+            return {
+                "number": 91,
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/91",
+                "mergeable_state": "clean",
+                "user": {"login": "alice"},
+                "head": {"ref": "healer/issue-91", "sha": "abc123"},
+                "updated_at": "2026-03-11T21:00:00Z",
+            }
+        if path == "/repos/owner/repo/commits/abc123/check-runs?per_page=100":
+            return {
+                "check_runs": [
+                    {
+                        "name": "unit",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "completed_at": "2026-03-11T21:03:00Z",
+                    },
+                    {
+                        "name": "lint",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "completed_at": "2026-03-11T21:04:00Z",
+                    },
+                    {
+                        "name": "e2e",
+                        "status": "in_progress",
+                        "conclusion": None,
+                    },
+                ]
+            }
+        if path == "/repos/owner/repo/commits/abc123/status":
+            return {
+                "state": "pending",
+                "statuses": [
+                    {
+                        "context": "status/lint",
+                        "state": "failure",
+                        "updated_at": "2026-03-11T21:04:30Z",
+                    },
+                    {
+                        "context": "status/typecheck",
+                        "state": "pending",
+                        "updated_at": "2026-03-11T21:05:00Z",
+                    },
+                ],
+            }
+        if path == "/repos/owner/repo/actions/runs?head_sha=abc123&per_page=100":
+            return {
+                "workflow_runs": [
+                    {
+                        "name": "CI",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "updated_at": "2026-03-11T21:06:00Z",
+                    },
+                    {
+                        "name": "Preview",
+                        "status": "queued",
+                        "conclusion": None,
+                        "updated_at": "2026-03-11T21:06:30Z",
+                    },
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    summary = tracker.get_pr_ci_status_summary(pr_number=91)
+
+    assert summary["head_sha"] == "abc123"
+    assert summary["overall_state"] == "failure"
+    assert summary["check_runs"]["failure"] == 1
+    assert summary["check_runs"]["pending"] == 1
+    assert summary["status_checks"]["failure"] == 1
+    assert summary["status_checks"]["pending"] == 1
+    assert summary["workflow_runs"]["failure"] == 1
+    assert summary["workflow_runs"]["pending"] == 1
+    assert "lint" in summary["failing_contexts"]
+    assert "CI" in summary["failing_contexts"]
+    assert "e2e" in summary["pending_contexts"]
+    assert "status/typecheck" in summary["pending_contexts"]
+    assert summary["updated_at"] == "2026-03-11T21:06:30Z"
+    assert calls == [
+        "/repos/owner/repo/pulls/91",
+        "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
+        "/repos/owner/repo/commits/abc123/status",
+        "/repos/owner/repo/actions/runs?head_sha=abc123&per_page=100",
+    ]
+
+
+def test_get_pr_ci_status_summary_returns_empty_when_head_sha_missing(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert path == "/repos/owner/repo/pulls/91"
+        return {
+            "number": 91,
+            "state": "open",
+            "html_url": "https://github.com/owner/repo/pull/91",
+            "mergeable_state": "clean",
+            "user": {"login": "alice"},
+            "head": {"ref": "healer/issue-91"},
+            "updated_at": "2026-03-11T21:00:00Z",
+        }
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    assert tracker.get_pr_ci_status_summary(pr_number=91) == {}
+
+
+def test_open_or_update_pr_updates_existing_pull_request_body(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append((path, method, body))
+        if method == "GET":
+            return [
+                {
+                    "number": 91,
+                    "state": "open",
+                    "html_url": "https://github.com/owner/repo/pull/91",
+                }
+            ]
+        assert path == "/repos/owner/repo/pulls/91"
+        assert method == "PATCH"
+        assert body == {
+            "title": "healer: fix issue #123",
+            "body": "updated body",
+            "base": "main",
+        }
+        return {
+            "number": 91,
+            "state": "open",
+            "html_url": "https://github.com/owner/repo/pull/91",
+        }
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    pr = tracker.open_or_update_pr(
+        issue_id="123",
+        branch="healer/issue-123",
+        title="healer: fix issue #123",
+        body="updated body",
+        base="main",
+    )
+
+    assert pr is not None
+    assert pr.number == 91
+    assert calls == [
+        ("/repos/owner/repo/pulls?state=open&head=owner%3Ahealer/issue-123", "GET", None),
+        (
+            "/repos/owner/repo/pulls/91",
+            "PATCH",
+            {
+                "title": "healer: fix issue #123",
+                "body": "updated body",
+                "base": "main",
+            },
+        ),
+    ]

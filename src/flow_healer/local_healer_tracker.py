@@ -272,9 +272,25 @@ class LocalHealerTracker:
                 mergeable_state=mergeable_state,
                 author=str(pr.get("author") or self._viewer_login),
                 head_ref=str(pr.get("head_ref") or ""),
+                head_sha=str(pr.get("head_sha") or ""),
                 updated_at=str(pr.get("updated_at") or ""),
             )
         return None
+
+    def get_pr_ci_status_summary(self, *, pr_number: int, head_sha: str = "") -> dict[str, Any]:
+        details = self.get_pr_details(pr_number=pr_number)
+        if details is None:
+            return {}
+        return {
+            "head_sha": str(head_sha or details.head_sha or "").strip(),
+            "overall_state": "unknown",
+            "check_runs": {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0},
+            "status_checks": {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0},
+            "workflow_runs": {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0},
+            "failing_contexts": [],
+            "pending_contexts": [],
+            "updated_at": str(details.updated_at or ""),
+        }
 
     def add_pr_comment(self, *, pr_number: int, body: str) -> bool:
         return self._append_to_pr(

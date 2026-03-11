@@ -79,6 +79,8 @@ repos:
     pr_auto_approve_clean: false
     pr_auto_merge_clean: false
     pr_merge_method: squash
+    github_artifact_publish_enabled: true
+    github_artifact_branch: flow-healer-artifacts
     trusted_actors: []
     max_concurrent_issues: 3
     retry_budget: 2
@@ -118,6 +120,18 @@ repos:
     docker_image: ""
     test_command: ""
     install_command: ""
+    # Optional app/browser harness defaults for app-scoped issues.
+    healer_app_default_runtime_profile: node-next-web
+    healer_app_runtime_profiles:
+      - name: node-next-web
+        start_command: npm run dev
+        working_directory: e2e-apps/node-next
+        ready_url: http://127.0.0.1:3000/
+        browser: chromium
+        headless: true
+        viewport:
+          width: 1280
+          height: 800
     auto_clean_generated_artifacts: true
     failure_fingerprint_quarantine_threshold: 2
     max_diff_files: 8

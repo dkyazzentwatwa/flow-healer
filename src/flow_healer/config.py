@@ -9,6 +9,11 @@ import yaml
 
 from .language_strategies import ensure_supported_language
 
+try:  # pragma: no cover - optional until app harness lands on all branches
+    from .app_harness import AppRuntimeProfile as _SharedAppRuntimeProfile
+except ImportError:  # pragma: no cover - exercised on branches without app_harness.py
+    _SharedAppRuntimeProfile = None
+
 
 @dataclass(slots=True)
 class ServiceSettings:
@@ -100,6 +105,8 @@ class RelaySettings:
     healer_pr_auto_approve_clean: bool = False
     healer_pr_auto_merge_clean: bool = False
     healer_pr_merge_method: str = "squash"
+    healer_github_artifact_publish_enabled: bool = True
+    healer_github_artifact_branch: str = "flow-healer-artifacts"
     healer_trusted_actors: list[str] = field(default_factory=list)
     healer_retry_budget: int = 2
     healer_backoff_initial_seconds: int = 60
@@ -138,6 +145,8 @@ class RelaySettings:
     healer_docker_image: str = ""
     healer_test_command: str = ""
     healer_install_command: str = ""
+    healer_app_default_runtime_profile: str = ""
+    healer_app_runtime_profiles: dict[str, Any] = field(default_factory=dict)
     healer_auto_clean_generated_artifacts: bool = True
     healer_failure_fingerprint_quarantine_threshold: int = 2
     healer_max_diff_files: int = 8
@@ -253,6 +262,12 @@ class AppConfig:
                     healer_pr_auto_approve_clean=bool(item.get("pr_auto_approve_clean", False)),
                     healer_pr_auto_merge_clean=bool(item.get("pr_auto_merge_clean", False)),
                     healer_pr_merge_method=str(item.get("pr_merge_method") or "squash"),
+                    healer_github_artifact_publish_enabled=bool(
+                        item.get("github_artifact_publish_enabled", True)
+                    ),
+                    healer_github_artifact_branch=str(
+                        item.get("github_artifact_branch") or "flow-healer-artifacts"
+                    ),
                     healer_trusted_actors=_list_of_str(item.get("trusted_actors"), []),
                     healer_retry_budget=int(item.get("retry_budget") or 2),
                     healer_backoff_initial_seconds=int(item.get("backoff_initial_seconds") or 60),
@@ -310,6 +325,21 @@ class AppConfig:
                     healer_docker_image=str(item.get("docker_image") or ""),
                     healer_test_command=str(item.get("test_command") or ""),
                     healer_install_command=str(item.get("install_command") or ""),
+                    healer_app_default_runtime_profile=str(
+                        _first_defined(
+                            item,
+                            "healer_app_default_runtime_profile",
+                            "app_default_runtime_profile",
+                        )
+                        or ""
+                    ),
+                    healer_app_runtime_profiles=_normalize_app_runtime_profiles(
+                        _first_defined(
+                            item,
+                            "healer_app_runtime_profiles",
+                            "app_runtime_profiles",
+                        )
+                    ),
                     healer_auto_clean_generated_artifacts=bool(item.get("auto_clean_generated_artifacts", True)),
                     healer_failure_fingerprint_quarantine_threshold=int(
                         item.get("failure_fingerprint_quarantine_threshold") or 2
@@ -404,6 +434,36 @@ def _list_of_str(value: Any, default: list[str]) -> list[str]:
     if not isinstance(value, list):
         return list(default)
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _first_defined(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping.get(key)
+    return None
+
+
+def _normalize_app_runtime_profiles(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    for raw_name, raw_profile in value.items():
+        profile_name = str(raw_name).strip()
+        if not profile_name or not isinstance(raw_profile, dict):
+            continue
+        normalized[profile_name] = _coerce_app_runtime_profile(raw_profile)
+    return normalized
+
+
+def _coerce_app_runtime_profile(raw_profile: dict[str, Any]) -> Any:
+    profile_data = dict(raw_profile)
+    if _SharedAppRuntimeProfile is None:
+        return profile_data
+    try:
+        return _SharedAppRuntimeProfile(**profile_data)
+    except TypeError:
+        return profile_data
 
 
 _SUPPORTED_CONNECTOR_BACKENDS = {"exec", "app_server", "claude_cli", "cline", "kilo_cli"}

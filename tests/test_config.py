@@ -53,6 +53,8 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert relay.healer_pr_auto_approve_clean is False
     assert relay.healer_pr_auto_merge_clean is False
     assert relay.healer_pr_merge_method == "squash"
+    assert relay.healer_github_artifact_publish_enabled is True
+    assert relay.healer_github_artifact_branch == "flow-healer-artifacts"
     assert relay.healer_verifier_policy == "required"
     assert relay.healer_local_gate_policy == "auto"
     assert relay.healer_issue_contract_mode == "lenient"
@@ -566,3 +568,66 @@ def test_app_config_loads_codex_native_multi_agent_settings(tmp_path: Path) -> N
     repo = config.repos[0]
     assert repo.healer_codex_native_multi_agent_enabled is True
     assert repo.healer_codex_native_multi_agent_max_subagents == 5
+
+
+def test_load_reads_app_runtime_profile_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    healer_app_default_runtime_profile: desktop\n"
+            "    healer_app_runtime_profiles:\n"
+            "      desktop:\n"
+            "        browser: chromium\n"
+            "        headless: true\n"
+            "        viewport:\n"
+            "          width: 1440\n"
+            "          height: 900\n"
+            "      mobile:\n"
+            "        browser: webkit\n"
+            "        device: iPhone 15\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_app_default_runtime_profile == "desktop"
+    assert repo.healer_app_runtime_profiles == {
+        "desktop": {
+            "browser": "chromium",
+            "headless": True,
+            "viewport": {"width": 1440, "height": 900},
+        },
+        "mobile": {
+            "browser": "webkit",
+            "device": "iPhone 15",
+        },
+    }
+
+
+def test_load_reads_github_artifact_publish_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    github_artifact_publish_enabled: false\n"
+            "    github_artifact_branch: healer-proof\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_github_artifact_publish_enabled is False
+    assert repo.healer_github_artifact_branch == "healer-proof"

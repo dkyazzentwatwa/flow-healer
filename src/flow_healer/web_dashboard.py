@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from html import escape
 import json
+import mimetypes
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
 import secrets
 import threading
+import tempfile
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
 from uuid import uuid4
@@ -106,6 +108,19 @@ class DashboardServer:
                 if parsed.path == "/api/overview":
                     self._write_json(_overview_payload(server.config, server.service))
                     return
+                if parsed.path == "/artifact":
+                    artifact_path = _resolve_dashboard_artifact_path(
+                        server.config,
+                        (query.get("path") or [""])[0],
+                    )
+                    if artifact_path is None:
+                        self.send_error(403, "Artifact path not allowed")
+                        return
+                    if not artifact_path.exists() or not artifact_path.is_file():
+                        self.send_error(404, "Artifact not found")
+                        return
+                    self._write_file(artifact_path)
+                    return
                 if parsed.path not in {"/", ""}:
                     self.send_error(404, "Not Found")
                     return
@@ -173,6 +188,16 @@ class DashboardServer:
                 raw = html.encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def _write_file(self, path: Path, status: int = 200) -> None:
+                raw = path.read_bytes()
+                content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
@@ -1861,6 +1886,45 @@ def _extract_bearer_token(headers: dict[str, str]) -> str:
     if authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
     return ""
+
+
+def _resolve_dashboard_artifact_path(config: AppConfig, raw_path: str) -> Path | None:
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        return None
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    for root in _allowed_dashboard_artifact_roots(config):
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    return None
+
+
+def _allowed_dashboard_artifact_roots(config: AppConfig) -> list[Path]:
+    roots = [Path(config.service.state_root).expanduser().resolve()]
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    roots.append(temp_root / "flow-healer-browser")
+    roots.append(temp_root / "flow-healer-live-verify")
+    for repo in config.repos:
+        repo_parent = Path(repo.healer_repo_path).expanduser().resolve().parent
+        roots.append(repo_parent / ".flow-healer-artifacts")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
 
 
 def _normalize_attempt_activity_rows(

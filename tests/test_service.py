@@ -1516,3 +1516,96 @@ def test_status_rows_surface_phased_validation_state_from_recent_attempts(tmp_pa
     assert attempt["validation_lane"] == "fast_then_full"
     assert attempt["promotion_state"] == "promotion_ready"
     assert attempt["phase_states"]["promotion_ready"] is True
+
+
+def test_status_rows_surface_attempt_observability_fields(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="302",
+        repo="owner/repo",
+        title="Issue 302",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_302_1",
+        issue_id="302",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_302_1",
+        state="failed",
+        actual_diff_set=["src/demo.py"],
+        test_summary={"failed_tests": 1},
+        verifier_summary={"summary": "Needs retry"},
+        runtime_summary={
+            "service": {"status": "degraded", "heartbeat_at": "2026-03-11 10:00:00"},
+            "app_harness": {"bundle_status": "captured", "artifacts_ready": True},
+        },
+        artifact_bundle={
+            "bundle_id": "bundle-302",
+            "artifacts": [{"kind": "patch", "path": "artifacts/302.patch"}],
+        },
+        artifact_links=[
+            {"label": "patch", "href": "artifacts/302.patch"},
+            {"label": "logs", "href": "artifacts/302.log"},
+        ],
+        ci_status_summary={
+            "overall_state": "pending",
+            "pending_contexts": ["CI"],
+        },
+        judgment_reason_code="tests_failed",
+        failure_class="tests_failed",
+        failure_reason="Targeted sandbox validation failed.",
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    attempt = rows[0]["recent_attempts"][0]
+    assert attempt["runtime_summary"]["service"]["status"] == "degraded"
+    assert attempt["runtime_summary"]["app_harness"]["bundle_status"] == "captured"
+    assert attempt["artifact_bundle"]["bundle_id"] == "bundle-302"
+    assert attempt["artifact_links"][0]["label"] == "patch"
+    assert attempt["ci_status_summary"]["overall_state"] == "pending"
+    assert attempt["judgment_reason_code"] == "tests_failed"
+
+
+def test_status_rows_surface_issue_ci_status_summary(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="303",
+        repo="owner/repo",
+        title="Issue 303",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.set_healer_issue_state(
+        issue_id="303",
+        state="pr_open",
+        pr_number=303,
+        pr_state="open",
+        ci_status_summary={
+            "overall_state": "failure",
+            "failing_contexts": ["CI"],
+            "pending_contexts": ["Preview"],
+        },
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    assert rows[0]["ci_status_summary"]["overall_state"] == "failure"
+    assert rows[0]["ci_status_summary"]["failing_contexts"] == ["CI"]
+    assert rows[0]["ci_status_summary"]["pending_contexts"] == ["Preview"]

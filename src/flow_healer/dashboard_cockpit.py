@@ -5,6 +5,7 @@ from html import escape
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from .config import AppConfig
 from .service import FlowHealerService
@@ -76,7 +77,7 @@ def issue_detail_payload(
     store.bootstrap()
     try:
         issue = store.get_healer_issue(normalized_issue)
-        attempts = store.list_healer_attempts(issue_id=normalized_issue, limit=25)
+        attempts = [_decorate_attempt_record(attempt) for attempt in store.list_healer_attempts(issue_id=normalized_issue, limit=25)]
     finally:
         store.close()
     if issue is None:
@@ -455,6 +456,25 @@ def render_dashboard(config: AppConfig, service: FlowHealerService, notice: str)
                       <span class='rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.2em]' :class='stateBadgeClass(attempt.state || "")' x-text='attempt.state || "unknown"'></span>
                     </div>
                     <p class='mt-2 text-sm text-slate-300' x-text='attempt.failure_reason || attempt.failure_class || "No failure details recorded."'></p>
+                    <template x-if='(attempt.artifact_bundle || {{}}).status || (attempt.artifact_bundle || {{}}).artifact_root'>
+                      <div class='mt-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-3'>
+                        <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Evidence bundle</div>
+                        <div class='mt-2 text-xs text-slate-300' x-text='(attempt.artifact_bundle || {{}}).status || "recorded"'></div>
+                        <template x-if='(attempt.artifact_bundle || {{}}).artifact_root'>
+                          <div class='mt-2 font-mono text-[11px] leading-5 text-cyan-100' x-text='(attempt.artifact_bundle || {{}}).artifact_root'></div>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if='(attempt.artifact_links || []).length'>
+                      <div class='mt-3 flex flex-wrap gap-2'>
+                        <template x-for='link in (attempt.artifact_links || [])' :key='`${{attempt.attempt_id}}-${{link.label}}-${{link.target}}`'>
+                          <a
+                            class='rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-2 text-xs text-cyan-100 transition hover:bg-cyan-400/15'
+                            :href='link.web_href || link.href || "#"' target='_blank' rel='noreferrer'
+                            x-text='link.label'></a>
+                        </template>
+                      </div>
+                    </template>
                   </div>
                 </template>
               </div>
@@ -898,3 +918,31 @@ def _build_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 def _now_label() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _decorate_attempt_record(attempt: dict[str, Any]) -> dict[str, Any]:
+    row = dict(attempt or {})
+    artifact_links = row.get("artifact_links")
+    if isinstance(artifact_links, list):
+        row["artifact_links"] = [_decorate_artifact_link(item) for item in artifact_links if isinstance(item, dict)]
+    else:
+        row["artifact_links"] = []
+    runtime_summary = row.get("runtime_summary")
+    row["runtime_summary"] = dict(runtime_summary) if isinstance(runtime_summary, dict) else {}
+    artifact_bundle = row.get("artifact_bundle")
+    row["artifact_bundle"] = dict(artifact_bundle) if isinstance(artifact_bundle, dict) else {}
+    ci_status_summary = row.get("ci_status_summary")
+    row["ci_status_summary"] = dict(ci_status_summary) if isinstance(ci_status_summary, dict) else {}
+    return row
+
+
+def _decorate_artifact_link(link: dict[str, Any]) -> dict[str, Any]:
+    row = dict(link or {})
+    target = str(row.get("path") or row.get("href") or "").strip()
+    row["target"] = target
+    row["exists"] = bool(target) and Path(target).exists()
+    if target and Path(target).is_absolute():
+        row["web_href"] = f"/artifact?path={quote_plus(target)}"
+    else:
+        row["web_href"] = ""
+    return row

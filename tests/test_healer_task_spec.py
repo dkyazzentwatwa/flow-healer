@@ -468,6 +468,77 @@ def test_task_spec_prompt_block_includes_execution_root_and_validation_commands(
     assert "Validation commands: cd e2e-smoke/swift && swift test" in prompt_block
 
 
+def test_compile_task_spec_parses_explicit_app_contract_fields() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix app replay regression",
+        issue_body=(
+            "Task kind: fix\n"
+            "app_target: web\n"
+            "entry_url: /dashboard?tab=activity\n"
+            "fixture_profile: seeded-team-admin\n"
+            "runtime_profile: desktop-chromium\n\n"
+            "repro_steps:\n"
+            "1. Open the dashboard.\n"
+            "2. Create a new alert.\n"
+            "- Refresh the page and confirm the alert still appears.\n\n"
+            "artifact_requirements:\n"
+            "- screenshot: artifacts/dashboard-alert.png\n"
+            "- trace bundle\n\n"
+            "judgment_required_conditions:\n"
+            "- visual layout differs from the stored baseline\n"
+            "- console errors appear after save\n"
+        ),
+    )
+
+    assert spec.app_target == "web"
+    assert spec.entry_url == "/dashboard?tab=activity"
+    assert spec.fixture_profile == "seeded-team-admin"
+    assert spec.runtime_profile == "desktop-chromium"
+    assert spec.repro_steps == (
+        "Open the dashboard.",
+        "Create a new alert.",
+        "Refresh the page and confirm the alert still appears.",
+    )
+    assert spec.artifact_requirements == (
+        "screenshot: artifacts/dashboard-alert.png",
+        "trace bundle",
+    )
+    assert spec.judgment_required_conditions == (
+        "visual layout differs from the stored baseline",
+        "console errors appear after save",
+    )
+
+
+def test_task_spec_prompt_block_includes_app_contract_fields() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix app replay regression",
+        issue_body=(
+            "Task kind: fix\n"
+            "app_target: web\n"
+            "entry_url: /dashboard?tab=activity\n"
+            "fixture_profile: seeded-team-admin\n"
+            "runtime_profile: desktop-chromium\n"
+            "repro_steps:\n"
+            "- Open the dashboard.\n"
+            "- Create a new alert.\n"
+            "artifact_requirements:\n"
+            "- screenshot: artifacts/dashboard-alert.png\n"
+            "judgment_required_conditions:\n"
+            "- visual layout differs from the stored baseline\n"
+        ),
+    )
+
+    prompt_block = task_spec_to_prompt_block(spec)
+
+    assert "- App target: web" in prompt_block
+    assert "- Entry URL: /dashboard?tab=activity" in prompt_block
+    assert "- Fixture profile: seeded-team-admin" in prompt_block
+    assert "- Runtime profile: desktop-chromium" in prompt_block
+    assert "- Repro steps: Open the dashboard. | Create a new alert." in prompt_block
+    assert "- Artifact requirements: screenshot: artifacts/dashboard-alert.png" in prompt_block
+    assert "- Judgment required conditions: visual layout differs from the stored baseline" in prompt_block
+
+
 def test_compile_task_spec_infers_node_execution_root_for_e2e_apps() -> None:
     spec = compile_task_spec(
         issue_title="Next.js sandbox regression",

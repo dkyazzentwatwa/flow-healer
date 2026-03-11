@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 import os
 import random
 import re
@@ -18,6 +20,19 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger("apple_flow.healer_tracker")
+
+_ALLOWED_ARTIFACT_SUFFIXES = {
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".jsonl",
+    ".log",
+    ".png",
+    ".txt",
+    ".webp",
+}
+_MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 
 
 @dataclass(slots=True, frozen=True)
@@ -49,6 +64,7 @@ class PullRequestDetails:
     mergeable_state: str
     author: str
     head_ref: str = ""
+    head_sha: str = ""
     updated_at: str = ""
 
 
@@ -58,6 +74,18 @@ class TrackerRequestMetric:
     path: str
     status: str
     duration_ms: int
+
+
+@dataclass(slots=True, frozen=True)
+class PublishedArtifact:
+    name: str
+    branch: str
+    remote_path: str
+    html_url: str
+    download_url: str
+    markdown_url: str
+    content_type: str
+    sha: str = ""
 
 
 class GitHubHealerTracker:
@@ -405,10 +433,27 @@ class GitHubHealerTracker:
                     reason="GitHub returned an open-PR payload without a valid PR number.",
                 )
                 return None
+            updated_payload = self._request_json(
+                f"/repos/{self.repo_slug}/pulls/{pr_number}",
+                method="PATCH",
+                body={
+                    "title": title,
+                    "body": body,
+                    "base": base,
+                },
+            )
+            payload = updated_payload if isinstance(updated_payload, dict) else pr
+            number = int(payload.get("number") or pr_number)
+            if number <= 0:
+                self._set_last_error(
+                    error_class=self._last_error_class or "github_api_error",
+                    reason=self._last_error_reason or "GitHub returned an unexpected response while updating a PR.",
+                )
+                return None
             return PullRequestResult(
-                number=pr_number,
-                state=str(pr.get("state") or "open"),
-                html_url=str(pr.get("html_url") or ""),
+                number=number,
+                state=str(payload.get("state") or pr.get("state") or "open"),
+                html_url=str(payload.get("html_url") or pr.get("html_url") or ""),
             )
 
         payload = self._request_json(
@@ -441,6 +486,79 @@ class GitHubHealerTracker:
             html_url=str(payload.get("html_url") or ""),
         )
 
+    def publish_artifact_files(
+        self,
+        *,
+        issue_id: str,
+        files: list[str | Path],
+        branch: str = "flow-healer-artifacts",
+        source_branch: str = "main",
+        run_key: str = "latest",
+    ) -> list[PublishedArtifact]:
+        normalized_issue = self._sanitize_artifact_segment(issue_id)
+        normalized_branch = str(branch or "").strip().strip("/")
+        normalized_source_branch = str(source_branch or "").strip().strip("/")
+        normalized_run_key = self._sanitize_artifact_segment(run_key or "latest")
+        if not self.enabled or not normalized_issue or not normalized_branch or not normalized_source_branch:
+            return []
+        if not self._ensure_branch_exists(branch=normalized_branch, source_branch=normalized_source_branch):
+            return []
+        published: list[PublishedArtifact] = []
+        for raw_file in files:
+            local_path = Path(raw_file).expanduser()
+            if not local_path.exists() or not local_path.is_file():
+                logger.warning("Skipping missing artifact publish candidate: %s", local_path)
+                continue
+            if not self._artifact_file_is_publishable(local_path):
+                logger.warning("Skipping unsupported artifact publish candidate: %s", local_path)
+                continue
+            artifact_name = self._sanitize_artifact_filename(local_path.name)
+            if not artifact_name:
+                logger.warning("Skipping artifact with unsupported name: %s", local_path)
+                continue
+            remote_path = (
+                f"flow-healer/evidence/issue-{normalized_issue}/{normalized_run_key}/{artifact_name}"
+            )
+            existing_sha = self._get_content_sha(branch=normalized_branch, remote_path=remote_path)
+            encoded_content = base64.b64encode(local_path.read_bytes()).decode("ascii")
+            payload: dict[str, Any] = {
+                "message": f"chore: publish flow-healer evidence for issue #{normalized_issue}",
+                "content": encoded_content,
+                "branch": normalized_branch,
+            }
+            if existing_sha:
+                payload["sha"] = existing_sha
+            response = self._request_json(
+                f"/repos/{self.repo_slug}/contents/{quote(remote_path)}",
+                method="PUT",
+                body=payload,
+            )
+            if not isinstance(response, dict):
+                continue
+            content = response.get("content")
+            if not isinstance(content, dict):
+                continue
+            published_path = str(content.get("path") or remote_path).strip() or remote_path
+            sha = str(content.get("sha") or "").strip()
+            html_url = self._artifact_blob_url(branch=normalized_branch, remote_path=published_path)
+            download_url = str(content.get("download_url") or "").strip() or self._artifact_download_url(
+                branch=normalized_branch,
+                remote_path=published_path,
+            )
+            published.append(
+                PublishedArtifact(
+                    name=artifact_name,
+                    branch=normalized_branch,
+                    remote_path=published_path,
+                    html_url=html_url,
+                    download_url=download_url,
+                    markdown_url=download_url,
+                    content_type=self._artifact_content_type(artifact_name),
+                    sha=sha,
+                )
+            )
+        return published
+
     def get_pr_state(self, *, pr_number: int) -> str:
         details = self.get_pr_details(pr_number=pr_number)
         return details.state if details is not None else ""
@@ -461,8 +579,66 @@ class GitHubHealerTracker:
             mergeable_state=str(payload.get("mergeable_state") or "").strip().lower(),
             author=str((payload.get("user") or {}).get("login") or "").strip(),
             head_ref=str(payload.get("head", {}).get("ref", "") or "").strip(),
+            head_sha=str(payload.get("head", {}).get("sha", "") or "").strip(),
             updated_at=str(payload.get("updated_at") or "").strip(),
         )
+
+    def get_pr_ci_status_summary(self, *, pr_number: int, head_sha: str = "") -> dict[str, Any]:
+        if not self.enabled or pr_number <= 0:
+            return {}
+        resolved_head_sha = str(head_sha or "").strip()
+        if not resolved_head_sha:
+            details = self.get_pr_details(pr_number=pr_number)
+            if details is None:
+                return {}
+            resolved_head_sha = str(details.head_sha or "").strip()
+        if not resolved_head_sha:
+            return {}
+
+        check_runs_payload = self._request_json(
+            f"/repos/{self.repo_slug}/commits/{quote(resolved_head_sha, safe='')}/check-runs?per_page=100"
+        )
+        status_payload = self._request_json(
+            f"/repos/{self.repo_slug}/commits/{quote(resolved_head_sha, safe='')}/status"
+        )
+        workflow_runs_payload = self._request_json(
+            f"/repos/{self.repo_slug}/actions/runs?head_sha={quote(resolved_head_sha, safe='')}&per_page=100"
+        )
+
+        check_runs_summary = self._summarize_check_runs(check_runs_payload)
+        status_checks_summary = self._summarize_status_checks(status_payload)
+        workflow_runs_summary = self._summarize_workflow_runs(workflow_runs_payload)
+        overall_state = self._derive_ci_overall_state(
+            check_runs=check_runs_summary,
+            status_checks=status_checks_summary,
+            workflow_runs=workflow_runs_summary,
+        )
+        return {
+            "head_sha": resolved_head_sha,
+            "overall_state": overall_state,
+            "check_runs": check_runs_summary["counts"],
+            "status_checks": status_checks_summary["counts"],
+            "workflow_runs": workflow_runs_summary["counts"],
+            "failing_contexts": sorted(
+                {
+                    *check_runs_summary["failing_contexts"],
+                    *status_checks_summary["failing_contexts"],
+                    *workflow_runs_summary["failing_contexts"],
+                }
+            ),
+            "pending_contexts": sorted(
+                {
+                    *check_runs_summary["pending_contexts"],
+                    *status_checks_summary["pending_contexts"],
+                    *workflow_runs_summary["pending_contexts"],
+                }
+            ),
+            "updated_at": self._latest_timestamp(
+                check_runs_summary["updated_at"],
+                status_checks_summary["updated_at"],
+                workflow_runs_summary["updated_at"],
+            ),
+        }
 
     def add_pr_comment(self, *, pr_number: int, body: str) -> bool:
         if not self.enabled or pr_number <= 0 or not body.strip():
@@ -596,6 +772,278 @@ class GitHubHealerTracker:
         if mergeable_state == "dirty":
             return "conflict"
         return state
+
+    def _ensure_branch_exists(self, *, branch: str, source_branch: str) -> bool:
+        existing = self._request_json(
+            f"/repos/{self.repo_slug}/git/ref/heads/{quote(branch, safe='')}"
+        )
+        if isinstance(existing, dict) and str((existing.get("object") or {}).get("sha") or "").strip():
+            return True
+        source = self._request_json(
+            f"/repos/{self.repo_slug}/git/ref/heads/{quote(source_branch, safe='')}"
+        )
+        source_sha = str((source.get("object") or {}).get("sha") or "").strip() if isinstance(source, dict) else ""
+        if not source_sha:
+            self._set_last_error(
+                error_class=self._last_error_class or "github_api_error",
+                reason=self._last_error_reason or f"GitHub did not return a commit SHA for branch {source_branch}.",
+            )
+            return False
+        created = self._request_json(
+            f"/repos/{self.repo_slug}/git/refs",
+            method="POST",
+            body={
+                "ref": f"refs/heads/{branch}",
+                "sha": source_sha,
+            },
+        )
+        return isinstance(created, dict) and str(created.get("ref") or "").strip() == f"refs/heads/{branch}"
+
+    def _get_content_sha(self, *, branch: str, remote_path: str) -> str:
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/contents/{quote(remote_path)}?ref={quote(branch)}"
+        )
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("sha") or "").strip()
+
+    def _artifact_blob_url(self, *, branch: str, remote_path: str) -> str:
+        web_base = self._repo_web_base_url().rstrip("/")
+        quoted_path = "/".join(quote(part, safe="") for part in remote_path.split("/") if part)
+        return f"{web_base}/{self.repo_slug}/blob/{quote(branch, safe='')}/{quoted_path}"
+
+    def _artifact_download_url(self, *, branch: str, remote_path: str) -> str:
+        quoted_path = "/".join(quote(part, safe="") for part in remote_path.split("/") if part)
+        web_base = self._repo_web_base_url().rstrip("/")
+        if web_base == "https://github.com":
+            return f"https://raw.githubusercontent.com/{self.repo_slug}/{quote(branch, safe='')}/{quoted_path}"
+        return f"{web_base}/{self.repo_slug}/raw/{quote(branch, safe='')}/{quoted_path}"
+
+    def _repo_web_base_url(self) -> str:
+        api_base = self.api_base_url.rstrip("/")
+        if api_base == "https://api.github.com":
+            return "https://github.com"
+        if api_base.endswith("/api/v3"):
+            return api_base[: -len("/api/v3")]
+        if "://" in api_base:
+            scheme, rest = api_base.split("://", 1)
+            if rest.startswith("api."):
+                return f"{scheme}://{rest[4:]}"
+        return "https://github.com"
+
+    @staticmethod
+    def _sanitize_artifact_segment(value: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+        normalized = normalized.strip(".-")
+        return normalized[:120]
+
+    @staticmethod
+    def _sanitize_artifact_filename(value: str) -> str:
+        if not value:
+            return ""
+        name = Path(value).name
+        if not name or name in {".", ".."}:
+            return ""
+        parts = name.split(".")
+        if len(parts) > 1:
+            stem = ".".join(parts[:-1])
+            suffix = parts[-1]
+            normalized_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip(".-")
+            normalized_suffix = re.sub(r"[^A-Za-z0-9]+", "", suffix).strip().lower()
+            if normalized_stem and normalized_suffix:
+                return f"{normalized_stem}.{normalized_suffix}"[:180]
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")[:180]
+
+    @staticmethod
+    def _artifact_content_type(filename: str) -> str:
+        content_type, _ = mimetypes.guess_type(filename)
+        return str(content_type or "application/octet-stream")
+
+    @staticmethod
+    def _artifact_file_is_publishable(path: Path) -> bool:
+        suffix = path.suffix.strip().lower()
+        if suffix not in _ALLOWED_ARTIFACT_SUFFIXES:
+            return False
+        try:
+            return path.stat().st_size <= _MAX_ARTIFACT_BYTES
+        except OSError:
+            return False
+
+    @classmethod
+    def _summarize_check_runs(cls, payload: Any) -> dict[str, Any]:
+        entries = payload.get("check_runs") if isinstance(payload, dict) else []
+        return cls._summarize_ci_entries(
+            entries=entries if isinstance(entries, list) else [],
+            name_key="name",
+            status_key="status",
+            conclusion_key="conclusion",
+            updated_at_keys=("completed_at", "started_at"),
+            pending_states={"queued", "in_progress", "pending", "requested", "waiting"},
+            success_conclusions={"success"},
+            neutral_conclusions={"neutral", "skipped"},
+            failure_conclusions={"action_required", "cancelled", "failure", "startup_failure", "timed_out"},
+            state_key="",
+        )
+
+    @classmethod
+    def _summarize_status_checks(cls, payload: Any) -> dict[str, Any]:
+        entries = payload.get("statuses") if isinstance(payload, dict) else []
+        return cls._summarize_ci_entries(
+            entries=entries if isinstance(entries, list) else [],
+            name_key="context",
+            status_key="",
+            conclusion_key="",
+            updated_at_keys=("updated_at", "created_at"),
+            pending_states=set(),
+            success_conclusions=set(),
+            neutral_conclusions=set(),
+            failure_conclusions=set(),
+            state_key="state",
+        )
+
+    @classmethod
+    def _summarize_workflow_runs(cls, payload: Any) -> dict[str, Any]:
+        entries = payload.get("workflow_runs") if isinstance(payload, dict) else []
+        return cls._summarize_ci_entries(
+            entries=entries if isinstance(entries, list) else [],
+            name_key="name",
+            status_key="status",
+            conclusion_key="conclusion",
+            updated_at_keys=("updated_at", "run_started_at", "created_at"),
+            pending_states={"queued", "in_progress", "pending", "requested", "waiting"},
+            success_conclusions={"success"},
+            neutral_conclusions={"neutral", "skipped"},
+            failure_conclusions={"action_required", "cancelled", "failure", "startup_failure", "timed_out"},
+            state_key="",
+        )
+
+    @classmethod
+    def _summarize_ci_entries(
+        cls,
+        *,
+        entries: list[Any],
+        name_key: str,
+        status_key: str,
+        conclusion_key: str,
+        updated_at_keys: tuple[str, ...],
+        pending_states: set[str],
+        success_conclusions: set[str],
+        neutral_conclusions: set[str],
+        failure_conclusions: set[str],
+        state_key: str,
+    ) -> dict[str, Any]:
+        counts = {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0}
+        failing_contexts: list[str] = []
+        pending_contexts: list[str] = []
+        updated_values: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            counts["total"] += 1
+            name = str(entry.get(name_key) or "").strip() if name_key else ""
+            normalized_state = ""
+            if state_key:
+                normalized_state = cls._normalize_status_check_state(str(entry.get(state_key) or ""))
+            else:
+                normalized_status = str(entry.get(status_key) or "").strip().lower() if status_key else ""
+                normalized_conclusion = str(entry.get(conclusion_key) or "").strip().lower() if conclusion_key else ""
+                normalized_state = cls._normalize_ci_state(
+                    status=normalized_status,
+                    conclusion=normalized_conclusion,
+                    pending_states=pending_states,
+                    success_conclusions=success_conclusions,
+                    neutral_conclusions=neutral_conclusions,
+                    failure_conclusions=failure_conclusions,
+                )
+            if normalized_state == "failure":
+                counts["failure"] += 1
+                if name:
+                    failing_contexts.append(name)
+            elif normalized_state == "pending":
+                counts["pending"] += 1
+                if name:
+                    pending_contexts.append(name)
+            elif normalized_state == "success":
+                counts["success"] += 1
+            elif normalized_state == "neutral":
+                counts["neutral"] += 1
+            for key in updated_at_keys:
+                timestamp = str(entry.get(key) or "").strip()
+                if timestamp:
+                    updated_values.append(timestamp)
+                    break
+        return {
+            "counts": counts,
+            "failing_contexts": failing_contexts,
+            "pending_contexts": pending_contexts,
+            "updated_at": cls._latest_timestamp(*updated_values),
+        }
+
+    @staticmethod
+    def _normalize_ci_state(
+        *,
+        status: str,
+        conclusion: str,
+        pending_states: set[str],
+        success_conclusions: set[str],
+        neutral_conclusions: set[str],
+        failure_conclusions: set[str],
+    ) -> str:
+        if status in pending_states:
+            return "pending"
+        if status == "completed":
+            if conclusion in success_conclusions:
+                return "success"
+            if conclusion in neutral_conclusions:
+                return "neutral"
+            if conclusion in failure_conclusions:
+                return "failure"
+        return "unknown"
+
+    @staticmethod
+    def _normalize_status_check_state(state: str) -> str:
+        normalized = str(state or "").strip().lower()
+        if normalized in {"error", "failure"}:
+            return "failure"
+        if normalized == "pending":
+            return "pending"
+        if normalized == "success":
+            return "success"
+        return "unknown"
+
+    @staticmethod
+    def _derive_ci_overall_state(
+        *,
+        check_runs: dict[str, Any],
+        status_checks: dict[str, Any],
+        workflow_runs: dict[str, Any],
+    ) -> str:
+        failure = sum(
+            int(source.get("counts", {}).get("failure", 0) or 0)
+            for source in (check_runs, status_checks, workflow_runs)
+        )
+        if failure > 0:
+            return "failure"
+        pending = sum(
+            int(source.get("counts", {}).get("pending", 0) or 0)
+            for source in (check_runs, status_checks, workflow_runs)
+        )
+        if pending > 0:
+            return "pending"
+        total = sum(
+            int(source.get("counts", {}).get("total", 0) or 0)
+            for source in (check_runs, status_checks, workflow_runs)
+        )
+        if total <= 0:
+            return "unknown"
+        return "success"
+
+    @staticmethod
+    def _latest_timestamp(*values: str) -> str:
+        timestamps = [str(value or "").strip() for value in values if str(value or "").strip()]
+        if not timestamps:
+            return ""
+        return max(timestamps)
 
     def _request_json(self, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
         self._last_error_class = ""

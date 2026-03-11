@@ -2,6 +2,8 @@
 
 This roadmap outlines the next areas of investment for Flow Healer. It is intentionally directional rather than date-bound so the project can prioritize reliability and operator trust over shipping volume.
 
+Execution tracker: `docs/plans/2026-03-11-harness-roadmap-master-checklist.md`
+
 ## Guiding Themes
 
 - Keep autonomous changes safe, reviewable, and easy to audit.

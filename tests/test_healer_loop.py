@@ -76,6 +76,8 @@ def _make_loop(store, **overrides):
         healer_pr_auto_approve_clean=overrides.get("healer_pr_auto_approve_clean", True),
         healer_pr_auto_merge_clean=overrides.get("healer_pr_auto_merge_clean", True),
         healer_pr_merge_method=overrides.get("healer_pr_merge_method", "squash"),
+        healer_github_artifact_publish_enabled=overrides.get("healer_github_artifact_publish_enabled", True),
+        healer_github_artifact_branch=overrides.get("healer_github_artifact_branch", "flow-healer-artifacts"),
         healer_default_branch=overrides.get("healer_default_branch", "main"),
         healer_trusted_actors=[],
         healer_scan_enable_issue_creation=overrides.get("healer_scan_enable_issue_creation", False),
@@ -115,6 +117,8 @@ def _make_loop(store, **overrides):
     loop.tracker = MagicMock()
     loop.tracker.viewer_login.return_value = "healer-service"
     loop.tracker.repo_slug = "owner/repo"
+    loop.tracker.publish_artifact_files.return_value = []
+    loop.tracker.get_pr_ci_status_summary.return_value = {}
     loop.tracker.get_pr_details.return_value = PullRequestDetails(
         number=123,
         state="open",
@@ -4423,6 +4427,243 @@ def test_backoff_sets_feedback_context_with_hint(tmp_path):
     assert issue["feedback_context"] == hint
 
 
+def test_loop_passes_app_runtime_profiles_to_runner(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    captured_runner_kwargs: list[dict[str, object]] = []
+
+    class _FakeRunner:
+        def __init__(self, connector, **kwargs):
+            captured_runner_kwargs.append(dict(kwargs))
+
+    class _FakeVerifier:
+        def __init__(self, connector, timeout_seconds=300):
+            self.connector = connector
+            self.timeout_seconds = timeout_seconds
+
+    class _FakeReviewer:
+        def __init__(self, connector):
+            self.connector = connector
+
+    class _FakeSwarm:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _FakePreflight:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeDispatcher:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("flow_healer.healer_loop.HealerRunner", _FakeRunner)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerVerifier", _FakeVerifier)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerReviewer", _FakeReviewer)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerSwarm", _FakeSwarm)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerPreflight", _FakePreflight)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerDispatcher", _FakeDispatcher)
+    monkeypatch.setattr("flow_healer.healer_loop.build_connector_subagent_backend", lambda connector: connector)
+
+    settings = SimpleNamespace(
+        healer_repo_path=str(repo),
+        healer_poll_interval_seconds=60,
+        healer_max_concurrent_issues=1,
+        healer_max_wall_clock_seconds_per_issue=300,
+        healer_test_gate_mode="local_then_docker",
+        healer_local_gate_policy="auto",
+        healer_completion_artifact_mode="fallback_only",
+        healer_language="",
+        healer_docker_image="",
+        healer_test_command="",
+        healer_install_command="",
+        healer_auto_clean_generated_artifacts=True,
+        healer_app_default_runtime_profile="web",
+        healer_app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/health",
+                "working_directory": "e2e-apps/node-next",
+            }
+        ],
+        healer_swarm_max_parallel_agents=2,
+        healer_swarm_max_repair_cycles_per_attempt=1,
+        healer_swarm_analysis_timeout_seconds=60,
+        healer_swarm_recovery_timeout_seconds=120,
+        healer_learning_enabled=False,
+        healer_enable_review=False,
+        healer_issue_required_labels=["healer:ready"],
+        healer_pr_actions_require_approval=False,
+        healer_pr_required_label="healer:pr-approved",
+        healer_pr_auto_approve_clean=False,
+        healer_pr_auto_merge_clean=False,
+        healer_pr_merge_method="squash",
+        healer_retry_budget=2,
+        healer_backoff_initial_seconds=60,
+        healer_backoff_max_seconds=3600,
+        healer_circuit_breaker_window=5,
+        healer_circuit_breaker_failure_rate=0.5,
+        healer_circuit_breaker_cooldown_seconds=900,
+        healer_verifier_policy="required",
+        healer_codex_native_multi_agent_enabled=False,
+        healer_codex_native_multi_agent_max_subagents=3,
+        healer_swarm_enabled=False,
+        healer_swarm_mode="failure_repair",
+        healer_swarm_trigger_failure_classes=["tests_failed"],
+        healer_swarm_backend_strategy="match_selected_backend",
+        healer_issue_contract_mode="lenient",
+        healer_parse_confidence_threshold=0.3,
+        healer_max_diff_files=8,
+        healer_max_diff_lines=400,
+        healer_max_failed_tests_allowed=0,
+        healer_overlap_scope_queue_enabled=True,
+    )
+
+    connector = _HealthyConnector()
+    loop = AutonomousHealerLoop(
+        settings=settings,
+        store=store,
+        connector=connector,
+        tracker=MagicMock(),
+        connectors_by_backend={"exec": connector},
+    )
+
+    assert loop.runners_by_backend["exec"] is not None
+    assert captured_runner_kwargs == [
+        {
+            "timeout_seconds": 300,
+            "test_gate_mode": "local_then_docker",
+            "local_gate_policy": "auto",
+            "completion_artifact_mode": "fallback_only",
+            "language": "",
+            "docker_image": "",
+            "test_command": "",
+            "install_command": "",
+            "auto_clean_generated_artifacts": True,
+            "default_runtime_profile": "web",
+            "app_runtime_profiles": [
+                {
+                    "name": "web",
+                    "start_command": "npm run dev",
+                    "ready_url": "http://127.0.0.1:3000/health",
+                    "working_directory": "e2e-apps/node-next",
+                }
+            ],
+        }
+    ]
+
+
+def test_loop_coerces_scalar_scan_label_to_single_default_label(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    captured_scanner_kwargs: list[dict[str, object]] = []
+
+    class _FakeRunner:
+        def __init__(self, connector, **kwargs):
+            self.connector = connector
+
+    class _FakeVerifier:
+        def __init__(self, connector, timeout_seconds=300):
+            self.connector = connector
+            self.timeout_seconds = timeout_seconds
+
+    class _FakeReviewer:
+        def __init__(self, connector):
+            self.connector = connector
+
+    class _FakeSwarm:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _FakePreflight:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeDispatcher:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeScanner:
+        def __init__(self, **kwargs):
+            captured_scanner_kwargs.append(dict(kwargs))
+
+    monkeypatch.setattr("flow_healer.healer_loop.HealerRunner", _FakeRunner)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerVerifier", _FakeVerifier)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerReviewer", _FakeReviewer)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerSwarm", _FakeSwarm)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerPreflight", _FakePreflight)
+    monkeypatch.setattr("flow_healer.healer_loop.HealerDispatcher", _FakeDispatcher)
+    monkeypatch.setattr("flow_healer.healer_loop.FlowHealerScanner", _FakeScanner)
+    monkeypatch.setattr("flow_healer.healer_loop.build_connector_subagent_backend", lambda connector: connector)
+
+    settings = SimpleNamespace(
+        healer_repo_path=str(repo),
+        healer_poll_interval_seconds=60,
+        healer_max_concurrent_issues=1,
+        healer_max_wall_clock_seconds_per_issue=300,
+        healer_test_gate_mode="local_then_docker",
+        healer_local_gate_policy="auto",
+        healer_completion_artifact_mode="fallback_only",
+        healer_language="",
+        healer_docker_image="",
+        healer_test_command="",
+        healer_install_command="",
+        healer_auto_clean_generated_artifacts=True,
+        healer_app_default_runtime_profile="",
+        healer_app_runtime_profiles={},
+        healer_swarm_max_parallel_agents=2,
+        healer_swarm_max_repair_cycles_per_attempt=1,
+        healer_swarm_analysis_timeout_seconds=60,
+        healer_swarm_recovery_timeout_seconds=120,
+        healer_learning_enabled=False,
+        healer_enable_review=False,
+        healer_issue_required_labels=["healer:ready"],
+        healer_pr_actions_require_approval=False,
+        healer_pr_required_label="healer:pr-approved",
+        healer_pr_auto_approve_clean=False,
+        healer_pr_auto_merge_clean=False,
+        healer_pr_merge_method="squash",
+        healer_retry_budget=2,
+        healer_backoff_initial_seconds=60,
+        healer_backoff_max_seconds=3600,
+        healer_circuit_breaker_window=5,
+        healer_circuit_breaker_failure_rate=0.5,
+        healer_circuit_breaker_cooldown_seconds=900,
+        healer_verifier_policy="required",
+        healer_codex_native_multi_agent_enabled=False,
+        healer_codex_native_multi_agent_max_subagents=3,
+        healer_swarm_enabled=False,
+        healer_swarm_mode="failure_repair",
+        healer_swarm_trigger_failure_classes=["tests_failed"],
+        healer_swarm_backend_strategy="match_selected_backend",
+        healer_issue_contract_mode="lenient",
+        healer_parse_confidence_threshold=0.3,
+        healer_max_diff_files=8,
+        healer_max_diff_lines=400,
+        healer_max_failed_tests_allowed=0,
+        healer_overlap_scope_queue_enabled=True,
+        healer_scan_default_labels="kind:scan",
+    )
+
+    connector = _HealthyConnector()
+    AutonomousHealerLoop(
+        settings=settings,
+        store=store,
+        connector=connector,
+        tracker=MagicMock(),
+        connectors_by_backend={"exec": connector},
+    )
+
+    assert captured_scanner_kwargs[0]["default_labels"] == ["kind:scan"]
+
+
 def test_backoff_push_failed_requeues_without_consuming_issue_trust(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -4747,3 +4988,179 @@ def test_format_pr_description_uses_markdown_sections():
     assert "### Test Summary" in body
     assert "- Test gates: `passed`" in body
     assert "Built with a little hustle by Flow Healer" in body
+
+
+def test_format_pr_description_includes_evidence_section_when_artifacts_present():
+    body = AutonomousHealerLoop._format_pr_description(
+        issue_id="155",
+        verifier_summary="Verified and approved.",
+        test_summary={
+            "failed_tests": 0,
+            "mode": "local_only",
+            "artifact_bundle": {
+                "status": "captured",
+                "artifact_root": "/tmp/flow-healer-browser/155",
+                "github_artifact_branch": "flow-healer-artifacts",
+                "journey_transcript": [{"phase": "failure"}, {"phase": "resolution"}],
+            },
+            "artifact_links": [
+                {
+                    "label": "failure_screenshot",
+                    "path": "/tmp/flow-healer-browser/155/failure/failure.png",
+                    "href": "https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/failure.png",
+                    "raw_href": "https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/failure.png",
+                },
+                {
+                    "label": "resolution_screenshot",
+                    "path": "/tmp/flow-healer-browser/155/resolution/resolution.png",
+                    "href": "https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/resolution.png",
+                    "raw_href": "https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/resolution.png",
+                },
+                {
+                    "label": "failure_console_log",
+                    "path": "/tmp/flow-healer-browser/155/failure/failure-console.log",
+                    "href": "https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/failure-console.log",
+                },
+                {
+                    "label": "journey_transcript",
+                    "path": "/tmp/flow-healer-browser/155/journey-transcript.json",
+                    "href": "https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/journey-transcript.json",
+                },
+            ],
+        },
+    )
+
+    assert "### Evidence" in body
+    assert "| Before | After |" in body
+    assert "![Failure screenshot]" in body
+    assert "![Resolution screenshot]" in body
+    assert "Evidence bundle: `captured`" in body
+    assert "Published branch: `flow-healer-artifacts`" in body
+    assert "Operational links:" in body
+    assert "<details>" in body
+    assert "<summary>Journey transcript</summary>" in body
+
+
+def test_publish_pr_artifacts_enriches_links_and_bundle(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    screenshot = artifact_root / "failure.png"
+    screenshot.write_bytes(b"png")
+    transcript_path = artifact_root / "journey-transcript.json"
+    bundle = {
+        "status": "captured",
+        "artifact_root": str(artifact_root),
+        "journey_transcript": [
+            {"phase": "failure", "transcript": [{"step": "goto /", "status": "passed"}]},
+        ],
+    }
+    loop.tracker.publish_artifact_files.return_value = [
+        SimpleNamespace(
+            name="failure.png",
+            branch="flow-healer-artifacts",
+            remote_path="flow-healer/evidence/issue-155/attempt-1/failure.png",
+            html_url="https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/failure.png",
+            download_url="https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/failure.png",
+            markdown_url="https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/failure.png",
+            content_type="image/png",
+            sha="pngsha",
+        ),
+        SimpleNamespace(
+            name="journey-transcript.json",
+            branch="flow-healer-artifacts",
+            remote_path="flow-healer/evidence/issue-155/attempt-1/journey-transcript.json",
+            html_url="https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/journey-transcript.json",
+            download_url="https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/journey-transcript.json",
+            markdown_url="https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-155/attempt-1/journey-transcript.json",
+            content_type="application/json",
+            sha="jsonsha",
+        ),
+    ]
+
+    summary = loop._publish_pr_artifacts(
+        issue_id="155",
+        attempt_id="attempt-1",
+        base_branch="main",
+        test_summary={
+            "artifact_bundle": bundle,
+            "artifact_links": [{"label": "failure_screenshot", "path": str(screenshot)}],
+        },
+    )
+
+    loop.tracker.publish_artifact_files.assert_called_once()
+    call = loop.tracker.publish_artifact_files.call_args
+    assert call.kwargs["issue_id"] == "155"
+    assert call.kwargs["branch"] == "flow-healer-artifacts"
+    assert transcript_path.exists()
+    assert summary["artifact_bundle"]["github_artifact_branch"] == "flow-healer-artifacts"
+    assert summary["artifact_bundle"]["github_artifact_root"] == "flow-healer/evidence/issue-155/attempt-1"
+    links = summary["artifact_links"]
+    screenshot_link = next(item for item in links if item["label"] == "failure_screenshot")
+    transcript_link = next(item for item in links if item["label"] == "journey_transcript")
+    assert screenshot_link["href"].startswith("https://github.com/owner/repo/blob/flow-healer-artifacts/")
+    assert screenshot_link["raw_href"].startswith("https://raw.githubusercontent.com/owner/repo/")
+    assert transcript_link["href"].endswith("/journey-transcript.json")
+
+
+def test_reconcile_pr_outcomes_persists_ci_status_summary_for_open_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50446",
+        repo="owner/repo",
+        title="Issue 50446",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="50446",
+        state="pr_open",
+        pr_number=246,
+        pr_state="open",
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_50446_1",
+        issue_id="50446",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_50446_1",
+        state="pr_open",
+        actual_diff_set=["src/flow_healer/service.py"],
+        test_summary={"promotion_state": "merge_blocked"},
+        verifier_summary={},
+    )
+
+    loop = _make_loop(store, healer_enable_review=False)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=246,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/246",
+        mergeable_state="clean",
+        author="healer-service",
+        head_ref="healer/issue-50446",
+        head_sha="abc123",
+        updated_at="2026-03-11T22:00:00Z",
+    )
+    loop.tracker.get_pr_ci_status_summary.return_value = {
+        "head_sha": "abc123",
+        "overall_state": "pending",
+        "pending_contexts": ["CI"],
+    }
+
+    loop._reconcile_pr_outcomes(force_refresh=True)
+
+    issue = store.get_healer_issue("50446")
+    attempt = store.list_healer_attempts(issue_id="50446", limit=1)[0]
+
+    assert issue is not None
+    assert issue["ci_status_summary"]["overall_state"] == "pending"
+    assert attempt["ci_status_summary"]["pending_contexts"] == ["CI"]

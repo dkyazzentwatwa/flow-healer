@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from flow_healer.store import SQLiteStore
@@ -265,3 +266,151 @@ def test_store_bootstrap_adds_hot_path_indexes(tmp_path):
     assert "idx_healer_attempts_issue_started" in attempt_index_names
     assert "idx_healer_attempts_state_finished_issue" in attempt_index_names
     assert "idx_healer_attempts_issue_attempt_no" in attempt_index_names
+
+
+def test_store_migrates_legacy_attempt_rows_with_default_observability_fields(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE healer_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                issue_id TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                prediction_source TEXT NOT NULL DEFAULT '',
+                predicted_lock_set_json TEXT NOT NULL DEFAULT '[]',
+                actual_diff_set_json TEXT NOT NULL DEFAULT '[]',
+                test_summary_json TEXT NOT NULL DEFAULT '{}',
+                verifier_summary_json TEXT NOT NULL DEFAULT '{}',
+                failure_class TEXT NOT NULL DEFAULT '',
+                failure_reason TEXT NOT NULL DEFAULT '',
+                proposer_output_excerpt TEXT NOT NULL DEFAULT '',
+                swarm_summary_json TEXT NOT NULL DEFAULT '{}',
+                task_kind TEXT NOT NULL DEFAULT '',
+                output_targets_json TEXT NOT NULL DEFAULT '[]',
+                tool_policy TEXT NOT NULL DEFAULT '',
+                validation_profile TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT DEFAULT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO healer_attempts(
+                attempt_id, issue_id, attempt_no, state, prediction_source, predicted_lock_set_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            ("legacy_attempt", "401", 1, "failed", "path_level", json.dumps(["repo:*"])),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = SQLiteStore(db_path)
+    store.bootstrap()
+
+    attempt = store.list_recent_healer_attempts(limit=1)[0]
+
+    assert attempt["attempt_id"] == "legacy_attempt"
+    assert attempt["runtime_summary"] == {}
+    assert attempt["artifact_bundle"] == {}
+    assert attempt["artifact_links"] == []
+    assert attempt["judgment_reason_code"] == ""
+
+
+def test_store_persists_attempt_observability_fields(tmp_path):
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+
+    store.create_healer_attempt(
+        attempt_id="attempt_obs_1",
+        issue_id="501",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="attempt_obs_1",
+        state="failed",
+        actual_diff_set=["src/example.py"],
+        test_summary={"failed_tests": 1},
+        verifier_summary={"status": "needs_review"},
+        runtime_summary={
+            "service": {"status": "degraded", "last_error": "connector timeout"},
+            "app_harness": {"artifacts_ready": True, "bundle_status": "captured"},
+        },
+        artifact_bundle={
+            "bundle_id": "bundle-501",
+            "artifacts": [{"kind": "patch", "path": "artifacts/501.patch"}],
+        },
+        artifact_links=[
+            {"label": "patch", "href": "artifacts/501.patch"},
+            {"label": "logs", "href": "artifacts/501.log"},
+        ],
+        ci_status_summary={
+            "overall_state": "pending",
+            "check_runs": {"total": 2, "success": 1, "pending": 1, "failure": 0, "neutral": 0},
+        },
+        judgment_reason_code="tests_failed",
+        failure_class="tests_failed",
+        failure_reason="Validation failed in targeted suite.",
+    )
+
+    attempt = store.list_recent_healer_attempts(limit=1)[0]
+
+    assert attempt["runtime_summary"]["service"]["status"] == "degraded"
+    assert attempt["runtime_summary"]["app_harness"]["artifacts_ready"] is True
+    assert attempt["artifact_bundle"]["bundle_id"] == "bundle-501"
+    assert attempt["artifact_bundle"]["artifacts"][0]["kind"] == "patch"
+    assert attempt["artifact_links"][1]["label"] == "logs"
+    assert attempt["ci_status_summary"]["overall_state"] == "pending"
+    assert attempt["judgment_reason_code"] == "tests_failed"
+
+
+def test_store_updates_issue_and_latest_attempt_ci_status_summary(tmp_path):
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="502",
+        repo="owner/repo",
+        title="Issue 502",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.create_healer_attempt(
+        attempt_id="attempt_obs_2",
+        issue_id="502",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="attempt_obs_2",
+        state="pr_open",
+        actual_diff_set=[],
+        test_summary={"promotion_state": "merge_blocked"},
+        verifier_summary={},
+    )
+
+    store.update_issue_pr_ci_status(
+        issue_id="502",
+        ci_status_summary={
+            "overall_state": "failure",
+            "failing_contexts": ["CI"],
+        },
+    )
+
+    issue = store.get_healer_issue("502")
+    attempt = store.list_recent_healer_attempts(limit=1)[0]
+
+    assert issue is not None
+    assert issue["ci_status_summary"]["overall_state"] == "failure"
+    assert attempt["ci_status_summary"]["failing_contexts"] == ["CI"]

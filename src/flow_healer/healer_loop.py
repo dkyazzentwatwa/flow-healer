@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -309,6 +310,8 @@ class AutonomousHealerLoop:
                 docker_image=settings.healer_docker_image,
                 test_command=settings.healer_test_command,
                 install_command=settings.healer_install_command,
+                default_runtime_profile=str(getattr(settings, "healer_app_default_runtime_profile", "") or ""),
+                app_runtime_profiles=getattr(settings, "healer_app_runtime_profiles", {}),
                 auto_clean_generated_artifacts=settings.healer_auto_clean_generated_artifacts,
             )
             self.runners_by_backend[backend] = runner
@@ -339,14 +342,20 @@ class AutonomousHealerLoop:
         self.runner = self.runners_by_backend[primary_backend]
         self.verifier = self.verifiers_by_backend[primary_backend]
         self.reviewer = self.reviewers_by_backend[primary_backend]
+        raw_scan_labels = getattr(settings, "healer_scan_default_labels", ["kind:scan"])
+        if isinstance(raw_scan_labels, list):
+            scan_default_labels = [str(label).strip() for label in raw_scan_labels if str(label).strip()]
+        else:
+            single_label = str(raw_scan_labels or "").strip()
+            scan_default_labels = [single_label] if single_label else ["kind:scan"]
         self.scanner = FlowHealerScanner(
             repo_path=self.repo_path,
             store=store,
             tracker=self.tracker,
-            severity_threshold=settings.healer_scan_severity_threshold,
-            max_issues_per_run=settings.healer_scan_max_issues_per_run,
-            default_labels=settings.healer_scan_default_labels,
-            enable_issue_creation=settings.healer_scan_enable_issue_creation,
+            severity_threshold=str(getattr(settings, "healer_scan_severity_threshold", "medium")),
+            max_issues_per_run=int(getattr(settings, "healer_scan_max_issues_per_run", 5)),
+            default_labels=scan_default_labels,
+            enable_issue_creation=bool(getattr(settings, "healer_scan_enable_issue_creation", False)),
         )
         self._last_scan_started_at = 0.0
         self.reconciler = HealerReconciler(
@@ -1360,6 +1369,7 @@ class AutonomousHealerLoop:
     ) -> int:
         active_prs = active_prs or self._list_active_pr_rows(include_blocked=True)
         details_cache = details_cache if details_cache is not None else {}
+        ci_status_cache: dict[int, dict[str, Any]] = {}
         resolved = 0
         for row in active_prs:
             issue_id = str(row.get("issue_id") or "")
@@ -1372,6 +1382,7 @@ class AutonomousHealerLoop:
             pr_state = ""
             mergeable_state = ""
             head_ref = ""
+            head_sha = ""
             if pr_number > 0:
                 pr_details = self._get_pr_details_cached(
                     pr_number=pr_number,
@@ -1383,6 +1394,7 @@ class AutonomousHealerLoop:
                 pr_state = pr_details.state
                 mergeable_state = pr_details.mergeable_state
                 head_ref = pr_details.head_ref
+                head_sha = pr_details.head_sha
                 pr_state, mergeable_state, refreshed = self._recheck_conflict_state(
                     pr_number=pr_number,
                     current_state=pr_state,
@@ -1391,6 +1403,7 @@ class AutonomousHealerLoop:
                 if refreshed is not None:
                     details_cache[pr_number] = refreshed
                     head_ref = refreshed.head_ref
+                    head_sha = refreshed.head_sha
             else:
                 try:
                     discovered_pr = self.tracker.find_pr_for_issue(issue_id=issue_id)
@@ -1402,6 +1415,15 @@ class AutonomousHealerLoop:
                 pr_number = discovered_pr.number
                 pr_state = discovered_pr.state.strip().lower()
                 head_ref = ""
+
+            if pr_number > 0 and pr_state != "merged":
+                ci_status_summary = self._get_pr_ci_status_summary_cached(
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    cache=ci_status_cache,
+                    force_refresh=force_refresh,
+                )
+                self.store.update_issue_pr_ci_status(issue_id=issue_id, ci_status_summary=ci_status_summary)
 
             if pr_state == "conflict":
                 stuck_since = str(row.get("stuck_since") or "").strip()
@@ -1441,6 +1463,7 @@ class AutonomousHealerLoop:
                         state="archived",
                         pr_number=pr_number,
                         pr_state="closed",
+                        ci_status_summary={},
                         clear_lease=True,
                     )
                     self._cleanup_managed_remote_branch(branch=head_ref)
@@ -1478,6 +1501,7 @@ class AutonomousHealerLoop:
                         state="pr_open",
                         pr_number=pr_number,
                         pr_state=pr_state,
+                        ci_status_summary=ci_status_cache.get(pr_number, {}),
                         last_failure_class="" if current_pr_state == "conflict" else None,
                         last_failure_reason="" if current_pr_state == "conflict" else None,
                     )
@@ -1499,6 +1523,7 @@ class AutonomousHealerLoop:
                     state="pr_open",
                     pr_number=pr_number,
                     pr_state="merged",
+                    ci_status_summary={},
                 )
                 continue
 
@@ -1507,6 +1532,7 @@ class AutonomousHealerLoop:
                 state="resolved",
                 pr_number=pr_number,
                 pr_state="merged",
+                ci_status_summary={},
                 clear_lease=True,
             )
             self._sync_blocked_issue_label(issue_id=issue_id, state="resolved")
@@ -1541,6 +1567,19 @@ class AutonomousHealerLoop:
     ) -> PullRequestDetails | None:
         if force_refresh or pr_number not in cache:
             cache[pr_number] = self.tracker.get_pr_details(pr_number=pr_number)
+        return cache[pr_number]
+
+    def _get_pr_ci_status_summary_cached(
+        self,
+        *,
+        pr_number: int,
+        head_sha: str,
+        cache: dict[int, dict[str, Any]],
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        if force_refresh or pr_number not in cache:
+            summary = self.tracker.get_pr_ci_status_summary(pr_number=pr_number, head_sha=head_sha)
+            cache[pr_number] = dict(summary) if isinstance(summary, dict) else {}
         return cache[pr_number]
 
     @staticmethod
@@ -2496,6 +2535,7 @@ class AutonomousHealerLoop:
         issue_state = "claimed"
         attempt_state = "failed"
         workspace = None
+        run_result: Any = None
 
         def _attempt_label() -> int:
             return max(1, attempt_no or proposed_attempt_no)
@@ -3097,6 +3137,7 @@ class AutonomousHealerLoop:
                             f"Verifier mode: `{_verifier_mode_label(self.settings, verification)}`",
                             f"Verifier: {self._clean_comment_text(verification.summary, max_chars=260)}",
                             *self._format_test_summary_bullets(run_result.test_summary),
+                            *self._format_evidence_bullets(run_result.test_summary),
                         ],
                         outro="Add the approval label to continue automatic pull-request actions.",
                     ),
@@ -3138,11 +3179,17 @@ class AutonomousHealerLoop:
             if _abort_for_lost_lease():
                 return
 
+            test_summary = self._publish_pr_artifacts(
+                issue_id=issue.issue_id,
+                attempt_id=attempt_id,
+                base_branch=self.settings.healer_default_branch,
+                test_summary=test_summary,
+            )
             pr_title = f"healer: fix issue #{issue.issue_id} - {issue.title[:80]}"
             pr_body = self._format_pr_description(
                 issue_id=issue.issue_id,
                 verifier_summary=verification.summary,
-                test_summary=run_result.test_summary,
+                test_summary=test_summary,
             )
             pr = self._open_or_reconcile_pr(
                 issue_id=issue.issue_id,
@@ -3194,7 +3241,8 @@ class AutonomousHealerLoop:
                         f"Connector backend: `{selected_backend}`",
                         f"Verifier mode: `{_verifier_mode_label(self.settings, verification)}`",
                         f"Verifier verdict: `{getattr(verification, 'verdict', 'pass' if verification.passed else 'hard_fail')}`",
-                        *self._format_test_summary_bullets(run_result.test_summary),
+                        *self._format_test_summary_bullets(test_summary),
+                        *self._format_evidence_bullets(test_summary),
                     ],
                 ),
             )
@@ -3210,7 +3258,7 @@ class AutonomousHealerLoop:
                         issue_title=issue.title,
                         issue_body=issue.body,
                         diff_paths=run_result.diff_paths,
-                        test_summary=run_result.test_summary,
+                        test_summary=test_summary,
                         proposer_output=run_result.proposer_output,
                         verifier_summary=verification.summary,
                         learned_context=learned_context,
@@ -3230,6 +3278,22 @@ class AutonomousHealerLoop:
                     test_summary=test_summary,
                     verifier_summary=verifier_summary,
                     swarm_summary=swarm_summary,
+                    runtime_summary=self._resolve_attempt_runtime_summary(
+                        test_summary=test_summary,
+                        workspace_status=getattr(run_result, "workspace_status", None),
+                    ),
+                    artifact_bundle=self._resolve_attempt_artifact_bundle(
+                        test_summary=test_summary,
+                        workspace_status=getattr(run_result, "workspace_status", None),
+                    ),
+                    artifact_links=self._resolve_attempt_artifact_links(
+                        test_summary=test_summary,
+                        workspace_status=getattr(run_result, "workspace_status", None),
+                    ),
+                    judgment_reason_code=self._resolve_attempt_judgment_reason_code(
+                        test_summary=test_summary,
+                        workspace_status=getattr(run_result, "workspace_status", None),
+                    ),
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                     proposer_output_excerpt=proposer_output_excerpt,
@@ -3262,6 +3326,7 @@ class AutonomousHealerLoop:
                             f"Attempt state: `{attempt_state}`",
                             f"Failure class: `{failure_class}`",
                             f"Reason: {self._clean_comment_text(failure_reason, max_chars=320)}",
+                            *self._format_evidence_bullets(test_summary),
                         ],
                         outro="Failure details were saved so the next pass can reuse the context.",
                         ),
@@ -4543,6 +4608,76 @@ class AutonomousHealerLoop:
         return bullets
 
     @classmethod
+    def _format_evidence_bullets(cls, summary: dict[str, object] | None) -> list[str]:
+        if not summary:
+            return []
+        bundle = summary.get("artifact_bundle")
+        bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
+        links = cls._normalized_artifact_links(summary.get("artifact_links"))
+        if not bundle_dict and not links:
+            return []
+        bullets: list[str] = []
+        bundle_status = cls._clean_comment_text(bundle_dict.get("status") or "", max_chars=40)
+        if bundle_status:
+            bullets.append(f"Evidence bundle: `{bundle_status}`")
+        artifact_root = cls._clean_comment_text(bundle_dict.get("artifact_root") or "", max_chars=180)
+        if artifact_root:
+            bullets.append(f"Evidence root: `{artifact_root}`")
+        published_branch = cls._clean_comment_text(bundle_dict.get("github_artifact_branch") or "", max_chars=80)
+        if published_branch:
+            bullets.append(f"Published branch: `{published_branch}`")
+        if isinstance(bundle_dict.get("journey_transcript"), list):
+            bullets.append(f"Journey transcripts: `{len(bundle_dict.get('journey_transcript') or [])}` phase(s)")
+        preferred_labels = (
+            "failure_screenshot",
+            "resolution_screenshot",
+            "failure_video",
+            "resolution_video",
+            "failure_console_log",
+            "resolution_console_log",
+            "failure_network_log",
+            "resolution_network_log",
+            "journey_transcript",
+        )
+        for label in preferred_labels:
+            target = next((item for item in links if item["label"] == label), None)
+            if target is None:
+                continue
+            target_markdown = cls._artifact_link_reference(target)
+            bullets.append(f"{label.replace('_', ' ').title()}: {target_markdown}")
+        return bullets
+
+    @classmethod
+    def _normalized_artifact_links(cls, raw_links: object) -> list[dict[str, str]]:
+        if not isinstance(raw_links, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in raw_links:
+            if not isinstance(item, dict):
+                continue
+            label = cls._clean_comment_text(item.get("label") or "", max_chars=80)
+            path = cls._clean_comment_text(item.get("path") or "", max_chars=240)
+            href = cls._clean_comment_text(item.get("href") or "", max_chars=400)
+            raw_href = cls._clean_comment_text(item.get("raw_href") or "", max_chars=400)
+            download_href = cls._clean_comment_text(item.get("download_href") or "", max_chars=400)
+            published_path = cls._clean_comment_text(item.get("published_path") or "", max_chars=240)
+            target = path or href
+            if not label or not target:
+                continue
+            normalized.append(
+                {
+                    "label": label,
+                    "target": target,
+                    "path": path,
+                    "href": href,
+                    "raw_href": raw_href,
+                    "download_href": download_href,
+                    "published_path": published_path,
+                }
+            )
+        return normalized
+
+    @classmethod
     def _format_pr_description(
         cls,
         *,
@@ -4562,8 +4697,245 @@ class AutonomousHealerLoop:
             "### Test Summary",
         ]
         lines.extend(f"- {item}" for item in cls._format_test_summary_bullets(test_summary))
+        evidence_lines = cls._format_pr_evidence_lines(test_summary)
+        if evidence_lines:
+            lines.extend(["", "### Evidence"])
+            lines.extend(evidence_lines)
         lines.extend(["", "_Built with a little hustle by Flow Healer 🤖✨_"])
         return "\n".join(lines) + "\n"
+
+    def _publish_pr_artifacts(
+        self,
+        *,
+        issue_id: str,
+        attempt_id: str,
+        base_branch: str,
+        test_summary: dict[str, object] | None,
+    ) -> dict[str, object]:
+        summary = dict(test_summary or {})
+        if not bool(getattr(self.settings, "healer_github_artifact_publish_enabled", True)):
+            return summary
+        publish_fn = getattr(self.tracker, "publish_artifact_files", None)
+        if not callable(publish_fn):
+            return summary
+        artifact_links = self._normalized_artifact_links(summary.get("artifact_links"))
+        artifact_bundle = summary.get("artifact_bundle")
+        bundle_dict = dict(artifact_bundle) if isinstance(artifact_bundle, dict) else {}
+        publish_paths: list[Path] = []
+        by_name: dict[str, dict[str, str]] = {}
+        for link in artifact_links:
+            local_path = Path(str(link.get("path") or "")).expanduser()
+            if not local_path.is_file():
+                continue
+            publish_paths.append(local_path)
+            by_name[local_path.name] = link
+        transcript_path = self._write_journey_transcript_artifact(bundle_dict)
+        if transcript_path is not None:
+            publish_paths.append(transcript_path)
+        if not publish_paths:
+            return summary
+        artifact_branch = str(
+            getattr(self.settings, "healer_github_artifact_branch", "flow-healer-artifacts") or "flow-healer-artifacts"
+        ).strip() or "flow-healer-artifacts"
+        published_artifacts = publish_fn(
+            issue_id=issue_id,
+            files=publish_paths,
+            branch=artifact_branch,
+            source_branch=str(base_branch or "main").strip() or "main",
+            run_key=str(attempt_id or "latest").strip() or "latest",
+        )
+        if not isinstance(published_artifacts, list) or not published_artifacts:
+            return summary
+        enriched_links = [dict(item) for item in artifact_links]
+        published_root = ""
+        for published in published_artifacts:
+            name = str(getattr(published, "name", "") or "").strip()
+            html_url = str(getattr(published, "html_url", "") or "").strip()
+            markdown_url = str(getattr(published, "markdown_url", "") or "").strip()
+            download_url = str(getattr(published, "download_url", "") or "").strip()
+            remote_path = str(getattr(published, "remote_path", "") or "").strip()
+            published_branch = str(getattr(published, "branch", "") or "").strip()
+            if remote_path and not published_root:
+                published_root = str(Path(remote_path).parent).replace("\\", "/")
+            existing = by_name.get(name)
+            if existing is not None:
+                target = next((item for item in enriched_links if item.get("label") == existing.get("label")), None)
+                if target is None:
+                    target = dict(existing)
+                    enriched_links.append(target)
+                target["href"] = html_url
+                target["raw_href"] = markdown_url
+                target["download_href"] = download_url
+                target["published_path"] = remote_path
+                target["published_branch"] = published_branch
+                continue
+            if name == "journey-transcript.json":
+                enriched_links.append(
+                    {
+                        "label": "journey_transcript",
+                        "path": str(transcript_path) if transcript_path is not None else "",
+                        "href": html_url,
+                        "raw_href": markdown_url,
+                        "download_href": download_url,
+                        "published_path": remote_path,
+                        "published_branch": published_branch,
+                    }
+                )
+        if bundle_dict:
+            bundle_dict["github_artifact_branch"] = artifact_branch
+            if published_root:
+                bundle_dict["github_artifact_root"] = published_root
+            summary["artifact_bundle"] = bundle_dict
+        summary["artifact_links"] = enriched_links
+        return summary
+
+    @classmethod
+    def _write_journey_transcript_artifact(cls, bundle: dict[str, object]) -> Path | None:
+        transcript = bundle.get("journey_transcript")
+        if not isinstance(transcript, list) or not transcript:
+            return None
+        artifact_root = str(bundle.get("artifact_root") or "").strip()
+        if not artifact_root:
+            return None
+        root_path = Path(artifact_root).expanduser()
+        if not root_path.exists():
+            return None
+        transcript_path = root_path / "journey-transcript.json"
+        transcript_path.write_text(json.dumps(transcript, indent=2) + "\n", encoding="utf-8")
+        return transcript_path
+
+    @classmethod
+    def _format_pr_evidence_lines(cls, summary: dict[str, object] | None) -> list[str]:
+        if not summary:
+            return []
+        links = cls._normalized_artifact_links(summary.get("artifact_links"))
+        if not links and not isinstance(summary.get("artifact_bundle"), dict):
+            return []
+        lines: list[str] = []
+        failure_screenshot = cls._artifact_link_by_label(links, "failure_screenshot")
+        resolution_screenshot = cls._artifact_link_by_label(links, "resolution_screenshot")
+        if failure_screenshot and resolution_screenshot:
+            lines.extend(
+                [
+                    "| Before | After |",
+                    "| --- | --- |",
+                    (
+                        f"| {cls._artifact_inline_image_markdown(failure_screenshot, alt='Failure screenshot')} "
+                        f"| {cls._artifact_inline_image_markdown(resolution_screenshot, alt='Resolution screenshot')} |"
+                    ),
+                    "",
+                ]
+            )
+        elif failure_screenshot or resolution_screenshot:
+            screenshot = failure_screenshot or resolution_screenshot
+            title = "Before" if failure_screenshot else "After"
+            lines.extend([f"**{title}**", cls._artifact_inline_image_markdown(screenshot, alt=f"{title} screenshot"), ""])
+        published_branch = str(
+            (summary.get("artifact_bundle") or {}).get("github_artifact_branch")
+            if isinstance(summary.get("artifact_bundle"), dict)
+            else ""
+        ).strip()
+        evidence_bullets = []
+        for item in cls._format_evidence_bullets(summary):
+            normalized = item.lower()
+            if normalized.startswith("failure screenshot:") or normalized.startswith("resolution screenshot:"):
+                continue
+            if normalized.startswith("failure video:") or normalized.startswith("resolution video:"):
+                continue
+            if published_branch and normalized.startswith("evidence root:"):
+                continue
+            evidence_bullets.append(item)
+        lines.extend(f"- {item}" for item in evidence_bullets)
+        operational_links = cls._format_operational_artifact_links(links)
+        if operational_links:
+            lines.extend(["", f"Operational links: {operational_links}"])
+        transcript_lines = cls._format_transcript_details(summary)
+        if transcript_lines:
+            lines.extend(["", *transcript_lines])
+        return lines
+
+    @classmethod
+    def _format_operational_artifact_links(cls, links: list[dict[str, str]]) -> str:
+        labels = (
+            "failure_console_log",
+            "failure_network_log",
+            "resolution_console_log",
+            "resolution_network_log",
+            "journey_transcript",
+        )
+        chunks: list[str] = []
+        for label in labels:
+            link = cls._artifact_link_by_label(links, label)
+            if link is None:
+                continue
+            chunks.append(cls._artifact_link_markdown(link, title=label.replace("_", " ")))
+        return ", ".join(chunks)
+
+    @classmethod
+    def _format_transcript_details(cls, summary: dict[str, object]) -> list[str]:
+        bundle = summary.get("artifact_bundle")
+        bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
+        transcript = bundle_dict.get("journey_transcript")
+        if not isinstance(transcript, list) or not transcript:
+            return []
+        lines = ["<details>", "<summary>Journey transcript</summary>", ""]
+        for phase_payload in transcript:
+            if not isinstance(phase_payload, dict):
+                continue
+            phase = cls._clean_comment_text(phase_payload.get("phase") or "journey", max_chars=40) or "journey"
+            lines.append(f"**{phase.title()}**")
+            entries = phase_payload.get("transcript")
+            if not isinstance(entries, list) or not entries:
+                lines.append("1. No recorded steps")
+                lines.append("")
+                continue
+            for index, entry in enumerate(entries[:8], start=1):
+                if not isinstance(entry, dict):
+                    continue
+                step = cls._clean_comment_text(entry.get("step") or "step", max_chars=160) or "step"
+                status = cls._clean_comment_text(entry.get("status") or "unknown", max_chars=40) or "unknown"
+                error = cls._clean_comment_text(entry.get("error") or "", max_chars=160)
+                suffix = f" - {status}"
+                if error:
+                    suffix += f" ({error})"
+                lines.append(f"{index}. `{step}`{suffix}")
+            if len(entries) > 8:
+                lines.append(f"9. ... +{len(entries) - 8} more step(s)")
+            lines.append("")
+        lines.append("</details>")
+        return lines
+
+    @staticmethod
+    def _artifact_link_by_label(links: list[dict[str, str]], label: str) -> dict[str, str] | None:
+        return next((item for item in links if item.get("label") == label), None)
+
+    @classmethod
+    def _artifact_inline_image_markdown(cls, link: dict[str, str], *, alt: str) -> str:
+        raw_href = str(link.get("raw_href") or link.get("href") or "").strip()
+        href = str(link.get("href") or raw_href).strip()
+        alt_text = cls._clean_comment_text(alt, max_chars=80) or "Evidence image"
+        if not raw_href:
+            return cls._artifact_link_reference(link)
+        image_markdown = f"![{alt_text}]({raw_href})"
+        if href and href != raw_href:
+            return f"[{image_markdown}]({href})"
+        return image_markdown
+
+    @classmethod
+    def _artifact_link_markdown(cls, link: dict[str, str], *, title: str) -> str:
+        href = str(link.get("href") or link.get("raw_href") or "").strip()
+        label = cls._clean_comment_text(title, max_chars=80) or "artifact"
+        if href:
+            return f"[{label}]({href})"
+        return cls._artifact_link_reference(link)
+
+    @classmethod
+    def _artifact_link_reference(cls, link: dict[str, str]) -> str:
+        href = str(link.get("href") or "").strip()
+        if href:
+            return f"[view evidence]({href})"
+        target = cls._clean_comment_text(link.get("target") or "", max_chars=180)
+        return f"`{target}`"
 
     def _cleanup_workspace(self, *, issue_id: str, state: str, workspace_path: Path) -> None:
         try:
@@ -4625,6 +4997,73 @@ class AutonomousHealerLoop:
             if execution_root:
                 metadata["execution_root"] = execution_root
         return metadata
+
+    @staticmethod
+    def _resolve_attempt_runtime_summary(
+        *,
+        test_summary: dict[str, object] | None,
+        workspace_status: dict[str, object] | None,
+    ) -> dict[str, object]:
+        if isinstance(test_summary, dict):
+            runtime_summary = test_summary.get("runtime_summary")
+            if isinstance(runtime_summary, dict):
+                return dict(runtime_summary)
+        if isinstance(workspace_status, dict):
+            runtime_summary = workspace_status.get("runtime_summary")
+            if isinstance(runtime_summary, dict):
+                return dict(runtime_summary)
+            app_runtime = workspace_status.get("app_runtime")
+            if isinstance(app_runtime, dict):
+                return {"app_harness": dict(app_runtime)}
+        return {}
+
+    @staticmethod
+    def _resolve_attempt_artifact_bundle(
+        *,
+        test_summary: dict[str, object] | None,
+        workspace_status: dict[str, object] | None,
+    ) -> dict[str, object]:
+        if isinstance(test_summary, dict):
+            artifact_bundle = test_summary.get("artifact_bundle")
+            if isinstance(artifact_bundle, dict):
+                return dict(artifact_bundle)
+        if isinstance(workspace_status, dict):
+            artifact_bundle = workspace_status.get("artifact_bundle")
+            if isinstance(artifact_bundle, dict):
+                return dict(artifact_bundle)
+        return {}
+
+    @staticmethod
+    def _resolve_attempt_artifact_links(
+        *,
+        test_summary: dict[str, object] | None,
+        workspace_status: dict[str, object] | None,
+    ) -> list[dict[str, object]]:
+        if isinstance(test_summary, dict):
+            artifact_links = test_summary.get("artifact_links")
+            if isinstance(artifact_links, list):
+                return [dict(item) for item in artifact_links if isinstance(item, dict)]
+        if isinstance(workspace_status, dict):
+            artifact_links = workspace_status.get("artifact_links")
+            if isinstance(artifact_links, list):
+                return [dict(item) for item in artifact_links if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _resolve_attempt_judgment_reason_code(
+        *,
+        test_summary: dict[str, object] | None,
+        workspace_status: dict[str, object] | None,
+    ) -> str:
+        if isinstance(test_summary, dict):
+            value = str(test_summary.get("judgment_reason_code") or "").strip()
+            if value:
+                return value[:120]
+        if isinstance(workspace_status, dict):
+            value = str(workspace_status.get("judgment_reason_code") or "").strip()
+            if value:
+                return value[:120]
+        return ""
 
     @staticmethod
     def _commit_and_push(

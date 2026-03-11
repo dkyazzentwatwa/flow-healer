@@ -3,6 +3,8 @@ import sys
 import hashlib
 from pathlib import Path
 
+from flow_healer.app_harness import AppHarnessBootResult
+from flow_healer.browser_harness import BrowserJourneyResult
 from flow_healer.healer_runner import (
     HealerRunner,
     ResolvedExecution,
@@ -3362,3 +3364,925 @@ def test_run_attempt_completion_artifact_not_triggered_for_structured_output(tmp
     assert result.success is False
     artifact = workspace / "docs" / "healer-runs" / "888-fix-x.md"
     assert not artifact.exists(), "Completion artifact should NOT be written for structured diff output"
+
+
+class _FakeAppHarnessSession:
+    def __init__(self, profile):
+        self.profile = profile
+        self.stop_calls = 0
+
+    def stop(self) -> int:
+        self.stop_calls += 1
+        return 0
+
+
+class _FakeAppHarness:
+    def __init__(self):
+        self.boot_calls = []
+        self.sessions: list[_FakeAppHarnessSession] = []
+
+    def boot(self, profile):
+        self.boot_calls.append(profile)
+        session = _FakeAppHarnessSession(profile)
+        self.sessions.append(session)
+        return (
+            AppHarnessBootResult(
+                profile=profile,
+                pid=4321,
+                readiness_url=profile.readiness_url,
+                ready_via_url=bool(profile.readiness_url),
+                ready_via_log=bool(profile.readiness_log_text),
+                startup_seconds=0.25,
+                output_tail="APP READY",
+            ),
+            session,
+        )
+
+
+class _ArtifactWritingAppHarnessSession(_FakeAppHarnessSession):
+    def __init__(self, profile, *, artifact_path: Path):
+        super().__init__(profile)
+        self.artifact_path = artifact_path
+
+    def stop(self) -> int:
+        result = super().stop()
+        self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        self.artifact_path.write_text("runtime shutdown noise\n", encoding="utf-8")
+        return result
+
+
+class _ArtifactWritingAppHarness(_FakeAppHarness):
+    def __init__(self, *, artifact_path: Path):
+        super().__init__()
+        self.artifact_path = artifact_path
+
+    def boot(self, profile):
+        self.boot_calls.append(profile)
+        session = _ArtifactWritingAppHarnessSession(profile, artifact_path=self.artifact_path)
+        self.sessions.append(session)
+        return (
+            AppHarnessBootResult(
+                profile=profile,
+                pid=4321,
+                readiness_url=profile.readiness_url,
+                ready_via_url=bool(profile.readiness_url),
+                ready_via_log=bool(profile.readiness_log_text),
+                startup_seconds=0.25,
+                output_tail="APP READY",
+            ),
+            session,
+        )
+
+
+class _FakeBrowserHarness:
+    def __init__(self, results, *, runtime_available=True, runtime_reason=""):
+        self.results = list(results)
+        self.runtime_available = runtime_available
+        self.runtime_reason = runtime_reason
+        self.calls: list[dict[str, object]] = []
+
+    def check_runtime_available(self):
+        return self.runtime_available, self.runtime_reason
+
+    def capture_journey(
+        self,
+        *,
+        profile,
+        entry_url: str,
+        repro_steps,
+        artifact_root: Path,
+        phase: str,
+        expect_failure: bool,
+    ):
+        self.calls.append(
+            {
+                "profile": profile,
+                "entry_url": entry_url,
+                "repro_steps": tuple(repro_steps),
+                "artifact_root": artifact_root,
+                "phase": phase,
+                "expect_failure": expect_failure,
+            }
+        )
+        result = self.results.pop(0)
+        for path in (
+            result.screenshot_path,
+            result.video_path,
+            result.console_log_path,
+            result.network_log_path,
+        ):
+            if not path:
+                continue
+            artifact_path = Path(path)
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(f"{phase} artifact\n", encoding="utf-8")
+        return result
+
+
+def test_run_attempt_boots_selected_app_runtime_profile_and_stops_session(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/health",
+                "working_directory": ".",
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0, "mode": "local_only"}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-101",
+        issue_title="Fix runtime-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000",
+            runtime_profile="web",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert len(app_harness.boot_calls) == 1
+    profile = app_harness.boot_calls[0]
+    assert profile.name == "web"
+    assert profile.command == ("npm", "run", "dev")
+    assert profile.cwd == workspace
+    assert result.workspace_status["app_runtime"]["status"] == "ready"
+    assert result.test_summary["runtime_summary"]["app_harness"]["entry_url"] == "http://127.0.0.1:3000"
+    assert app_harness.sessions[0].stop_calls == 1
+
+
+def test_run_attempt_fails_when_app_runtime_profile_is_missing(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+
+    result = runner.run_attempt(
+        issue_id="app-102",
+        issue_title="Fix runtime-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            runtime_profile="web",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "app_runtime_profile_missing"
+    assert result.workspace_status["app_runtime"]["status"] == "unconfigured"
+    assert "not configured" in result.failure_reason.lower()
+
+
+def test_run_attempt_stops_app_runtime_session_when_validation_fails(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/health",
+                "working_directory": ".",
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 1,
+        "failure_class": "tests_failed",
+        "failure_reason": "Validation failed in app flow.",
+    }
+
+    result = runner.run_attempt(
+        issue_id="app-103",
+        issue_title="Fix runtime-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            runtime_profile="web",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "tests_failed"
+    assert app_harness.sessions[0].stop_calls == 1
+
+
+def test_run_attempt_does_not_require_runtime_for_artifact_requirements_alone(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-104",
+        issue_title="Fix runtime-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert "app_runtime" not in result.workspace_status
+
+
+def test_run_attempt_detects_shutdown_generated_artifacts_from_app_runtime(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _ArtifactWritingAppHarness(artifact_path=workspace / "dist" / "runtime.log")
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/health",
+                "working_directory": ".",
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        auto_clean_generated_artifacts=False,
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-105",
+        issue_title="Fix runtime-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            runtime_profile="web",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "generated_artifact_contamination"
+    assert "dist/runtime.log" in result.failure_reason
+
+
+def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "after.png"),
+                video_path=str(tmp_path / "after.webm"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-201",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert [call["phase"] for call in browser_harness.calls] == ["failure", "resolution"]
+    assert browser_harness.calls[0]["profile"].browser == "chromium"
+    assert browser_harness.calls[0]["profile"].headless is True
+    assert result.test_summary["artifact_bundle"]["failure_artifacts"]["video_path"].endswith("before.webm")
+    assert result.test_summary["artifact_bundle"]["resolution_artifacts"]["video_path"].endswith("after.webm")
+    assert result.test_summary["artifact_links"][0]["label"] == "failure_screenshot"
+
+
+def test_run_attempt_fails_when_browser_bug_is_not_reproduced_before_fix(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(["not used"])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            )
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+
+    result = runner.run_attempt(
+        issue_id="app-202",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "browser_repro_failed"
+
+
+def test_run_attempt_allows_missing_failure_video_when_screenshot_exists(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path="",
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "after.png"),
+                video_path=str(tmp_path / "after.webm"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-203",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert "video_path" not in result.test_summary["artifact_bundle"]["failure_artifacts"]
+    assert all(link["label"] != "failure_video" for link in result.test_summary["artifact_links"])
+
+
+def test_run_attempt_fails_when_resolution_browser_evidence_is_incomplete(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path="",
+                video_path=str(tmp_path / "after.webm"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-204",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "artifacts_missing"
+
+
+def test_run_attempt_fails_when_browser_runtime_is_missing(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    runner = HealerRunner(
+        _RetryConnector(["not used"]),
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        browser_harness=_FakeBrowserHarness([], runtime_available=False, runtime_reason="Playwright missing"),  # type: ignore[arg-type]
+    )
+
+    result = runner.run_attempt(
+        issue_id="app-203",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "browser_runtime_missing"
+    assert "playwright" in result.failure_reason.lower()
+
+
+def test_run_attempt_allows_missing_resolution_video_when_screenshots_exist(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "after.png"),
+                video_path="",
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-204",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert "video_path" not in result.test_summary["artifact_bundle"]["resolution_artifacts"]
+    assert all(link["label"] != "resolution_video" for link in result.test_summary["artifact_links"])

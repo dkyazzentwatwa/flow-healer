@@ -44,9 +44,14 @@ config.yaml
 
 # Flow Healer local artifacts
 .apple-flow-healer/
+.superpowers/
+.worktrees/
 .tmp-home/
 *.patch
 *.orig
 *.rej
 e2e-apps/prosper-chat/supabase/.branches/
 e2e-apps/prosper-chat/supabase/.temp/
+e2e-apps/node-next/.next/
+e2e-apps/node-next/node_modules/
+e2e-apps/node-next/package-lock.json

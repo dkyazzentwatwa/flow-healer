@@ -243,6 +243,23 @@ class FlowHealerService:
                 annotated_attempts: list[dict[str, object]] = []
                 for attempt in recent_attempts:
                     attempt_row = dict(attempt)
+                    runtime_summary = attempt_row.get("runtime_summary")
+                    if not isinstance(runtime_summary, dict):
+                        runtime_summary = {}
+                    artifact_bundle = attempt_row.get("artifact_bundle")
+                    if not isinstance(artifact_bundle, dict):
+                        artifact_bundle = {}
+                    artifact_links = attempt_row.get("artifact_links")
+                    if not isinstance(artifact_links, list):
+                        artifact_links = []
+                    ci_status_summary = attempt_row.get("ci_status_summary")
+                    if not isinstance(ci_status_summary, dict):
+                        ci_status_summary = {}
+                    attempt_row["runtime_summary"] = dict(runtime_summary)
+                    attempt_row["artifact_bundle"] = dict(artifact_bundle)
+                    attempt_row["artifact_links"] = list(artifact_links)
+                    attempt_row["ci_status_summary"] = dict(ci_status_summary)
+                    attempt_row["judgment_reason_code"] = str(attempt_row.get("judgment_reason_code") or "")
                     issue = issues_by_id.get(str(attempt.get("issue_id") or ""))
                     route = classify_issue_route(issue, attempt)
                     test_summary = attempt.get("test_summary") or {}
@@ -335,6 +352,7 @@ class FlowHealerService:
                 )
                 trust["policy_outcome"] = str(policy.get("outcome") or "")
                 trust["policy_recommendation"] = str(policy.get("recommendation") or "")
+                repo_ci_status_summary = _aggregate_ci_status_summary(issues)
                 rows.append(
                     {
                         "repo": repo.repo_name,
@@ -413,6 +431,7 @@ class FlowHealerService:
                         "reliability_trends": _reliability_trend_metrics(runtime.store),
                         "issue_outcomes": _issue_outcome_metrics(issues),
                         "recent_attempts": annotated_attempts,
+                        "ci_status_summary": repo_ci_status_summary,
                     }
                 )
             finally:
@@ -1570,6 +1589,47 @@ def _safe_float(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _aggregate_ci_status_summary(issues: list[dict[str, object]]) -> dict[str, object]:
+    summaries = [
+        dict(issue.get("ci_status_summary") or {})
+        for issue in issues
+        if isinstance(issue.get("ci_status_summary"), dict) and dict(issue.get("ci_status_summary") or {})
+    ]
+    if not summaries:
+        return {}
+    overall_state = "unknown"
+    if any(str(summary.get("overall_state") or "").strip().lower() == "failure" for summary in summaries):
+        overall_state = "failure"
+    elif any(str(summary.get("overall_state") or "").strip().lower() == "pending" for summary in summaries):
+        overall_state = "pending"
+    elif any(str(summary.get("overall_state") or "").strip().lower() == "success" for summary in summaries):
+        overall_state = "success"
+    return {
+        "overall_state": overall_state,
+        "tracked_prs": len(summaries),
+        "failing_contexts": sorted(
+            {
+                str(context).strip()
+                for summary in summaries
+                for context in (summary.get("failing_contexts") or [])
+                if str(context).strip()
+            }
+        ),
+        "pending_contexts": sorted(
+            {
+                str(context).strip()
+                for summary in summaries
+                for context in (summary.get("pending_contexts") or [])
+                if str(context).strip()
+            }
+        ),
+        "updated_at": max(
+            (str(summary.get("updated_at") or "").strip() for summary in summaries if str(summary.get("updated_at") or "").strip()),
+            default="",
+        ),
+    }
 
 
 def _attempt_duration_minutes(attempt: dict[str, object]) -> float | None:

@@ -28,6 +28,11 @@ class _Connector:
         }
 
 
+class _BrowserHarness:
+    def check_runtime_available(self) -> tuple[bool, str]:
+        return False, "playwright runtime is not installed"
+
+
 def test_probe_connector_respects_available_false_snapshot(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.bootstrap()
@@ -41,6 +46,21 @@ def test_probe_connector_respects_available_false_snapshot(tmp_path: Path) -> No
 
     assert ok is False
     assert reason == "connector boot failed"
+
+
+def test_probe_browser_runtime_returns_harness_readiness(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    preflight = HealerPreflight(
+        store=store,
+        runner=_Runner(),  # type: ignore[arg-type]
+        repo_path=tmp_path,
+    )
+
+    ok, reason = preflight.probe_browser_runtime(_BrowserHarness())  # type: ignore[arg-type]
+
+    assert ok is False
+    assert reason == "playwright runtime is not installed"
 
 
 def test_probe_node_toolchain_detects_pnpm_lock(tmp_path: Path) -> None:

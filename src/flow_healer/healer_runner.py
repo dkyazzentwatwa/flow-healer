@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from .app_harness import AppHarnessSession, AppRuntimeProfile, LocalAppHarness
+from .browser_harness import BrowserJourneyResult, LocalBrowserHarness, parse_repro_steps
 from .docker_runtime import ensure_docker_runtime_running, record_docker_activity
 from .language_detector import detect_language_details
 from .language_strategies import (
@@ -110,6 +113,10 @@ class HealerRunner:
         docker_image: str = "",
         test_command: str = "",
         install_command: str = "",
+        default_runtime_profile: str = "",
+        app_runtime_profiles: Any = None,
+        app_harness: LocalAppHarness | None = None,
+        browser_harness: LocalBrowserHarness | None = None,
         completion_artifact_mode: str = "fallback_only",
         auto_clean_generated_artifacts: bool = True,
     ) -> None:
@@ -122,6 +129,10 @@ class HealerRunner:
         self._docker_image = docker_image.strip()
         self._test_command = test_command.strip()
         self._install_command = install_command.strip()
+        self._default_runtime_profile = str(default_runtime_profile or "").strip()
+        self._app_runtime_profiles = _normalize_app_runtime_profiles(app_runtime_profiles)
+        self._app_harness = app_harness or LocalAppHarness()
+        self._browser_harness = browser_harness or LocalBrowserHarness()
         self.auto_clean_generated_artifacts = bool(auto_clean_generated_artifacts)
         self.max_proposer_retries = 1
         self.max_code_proposer_retries = 3
@@ -129,6 +140,60 @@ class HealerRunner:
         self.code_change_turn_timeout_seconds = max(900, self.timeout_seconds)
         # Allow one cleanup before validation and one more after validation if tests regenerate artifacts.
         self.max_generated_artifact_cleanup_cycles = 2
+
+    def _task_requests_app_runtime(self, *, task_spec: HealerTaskSpec) -> bool:
+        return any(
+            (
+                task_spec.app_target,
+                task_spec.entry_url,
+                task_spec.repro_steps,
+                task_spec.runtime_profile,
+            )
+        )
+
+    def _task_requests_browser_evidence(self, *, task_spec: HealerTaskSpec) -> bool:
+        return bool(task_spec.repro_steps) and self._task_requests_app_runtime(task_spec=task_spec)
+
+    def _resolve_app_runtime_profile(
+        self,
+        *,
+        task_spec: HealerTaskSpec,
+        workspace: Path,
+    ) -> tuple[AppRuntimeProfile | None, str, str]:
+        if not self._task_requests_app_runtime(task_spec=task_spec):
+            return None, "", ""
+
+        selected_name = str(task_spec.runtime_profile or self._default_runtime_profile).strip()
+        if not selected_name and len(self._app_runtime_profiles) == 1:
+            selected_name = next(iter(self._app_runtime_profiles))
+        if not selected_name:
+            return None, "app_runtime_profile_missing", "App-scoped task did not declare a runtime profile and no default runtime profile is configured."
+
+        profile = self._app_runtime_profiles.get(selected_name)
+        if profile is None:
+            return None, "app_runtime_profile_missing", f"Runtime profile '{selected_name}' is not configured."
+
+        cwd = profile.cwd
+        if not cwd.is_absolute():
+            cwd = (workspace / cwd).resolve()
+        profile = AppRuntimeProfile(
+            name=profile.name,
+            command=profile.command,
+            cwd=cwd,
+            env=profile.env,
+            readiness_url=profile.readiness_url,
+            readiness_log_text=profile.readiness_log_text,
+            browser=profile.browser,
+            headless=profile.headless,
+            viewport=dict(profile.viewport or {}) or None,
+            device=profile.device,
+            startup_timeout_seconds=profile.startup_timeout_seconds,
+            shutdown_timeout_seconds=profile.shutdown_timeout_seconds,
+            poll_interval_seconds=profile.poll_interval_seconds,
+        )
+        if not profile.command:
+            return None, "app_runtime_profile_invalid", f"Runtime profile '{selected_name}' does not define a start command."
+        return profile, "", ""
 
     def run_attempt(
         self,
@@ -172,6 +237,200 @@ class HealerRunner:
 
         _annotate_app_server_recovery_status(workspace_status)
         cleanup_cycles_used = 0
+        browser_evidence_requested = self._task_requests_browser_evidence(task_spec=task_spec)
+        browser_profile: AppRuntimeProfile | None = None
+        browser_artifact_bundle: dict[str, Any] = {}
+        browser_artifact_links: list[dict[str, Any]] = []
+        parsed_repro_steps = parse_repro_steps(task_spec.repro_steps) if task_spec.repro_steps else ()
+        browser_artifact_root = Path(
+            tempfile.mkdtemp(prefix=f"flow-healer-browser-{issue_id}-", dir=os.getenv("TMPDIR") or None)
+        ).resolve()
+
+        if browser_evidence_requested:
+            browser_ready, browser_reason = self._browser_harness.check_runtime_available()
+            if not browser_ready:
+                return HealerRunResult(
+                    success=False,
+                    failure_class="browser_runtime_missing",
+                    failure_reason=browser_reason or "Browser runtime is unavailable.",
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        {},
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            browser_profile, runtime_failure_class, runtime_failure_reason = self._resolve_app_runtime_profile(
+                task_spec=task_spec,
+                workspace=workspace,
+            )
+            if browser_profile is None:
+                if runtime_failure_class:
+                    browser_runtime_status = {
+                        "status": "unconfigured",
+                        "profile": str(task_spec.runtime_profile or self._default_runtime_profile).strip(),
+                        "entry_url": task_spec.entry_url,
+                        "app_target": task_spec.app_target,
+                        "fixture_profile": task_spec.fixture_profile,
+                        "reason": runtime_failure_reason,
+                    }
+                    _annotate_app_runtime_status(workspace_status, browser_runtime_status)
+                return HealerRunResult(
+                    success=False,
+                    failure_class=runtime_failure_class or "app_runtime_profile_missing",
+                    failure_reason=runtime_failure_reason or "App runtime profile is required for browser evidence.",
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        {},
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+
+            pre_fix_session: AppHarnessSession | None = None
+            browser_entry_url = task_spec.entry_url or browser_profile.readiness_url or ""
+            try:
+                boot_result, pre_fix_session = self._app_harness.boot(browser_profile)
+                pre_fix_runtime_status = {
+                    "status": "ready",
+                    "profile": boot_result.profile.name,
+                    "pid": boot_result.pid,
+                    "readiness_url": boot_result.readiness_url or task_spec.entry_url,
+                    "entry_url": browser_entry_url,
+                    "app_target": task_spec.app_target,
+                    "fixture_profile": task_spec.fixture_profile,
+                    "ready_via_url": boot_result.ready_via_url,
+                    "ready_via_log": boot_result.ready_via_log,
+                    "startup_seconds": round(boot_result.startup_seconds, 3),
+                }
+                _annotate_app_runtime_status(workspace_status, pre_fix_runtime_status)
+                failure_journey = self._browser_harness.capture_journey(
+                    profile=browser_profile,
+                    entry_url=browser_entry_url,
+                    repro_steps=parsed_repro_steps,
+                    artifact_root=browser_artifact_root / "failure",
+                    phase="failure",
+                    expect_failure=True,
+                )
+            except Exception as exc:
+                failure_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        {},
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="browser_step_failed",
+                    failure_reason=str(exc),
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        failure_summary,
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            finally:
+                if pre_fix_session is not None:
+                    try:
+                        pre_fix_session.stop()
+                    except Exception as exc:
+                        logger.warning("Failed to stop pre-fix app runtime profile '%s': %s", browser_profile.name, exc)
+
+            browser_artifact_bundle = _browser_artifact_bundle(
+                profile=browser_profile,
+                entry_url=browser_entry_url,
+                failure_journey=failure_journey,
+            )
+            browser_artifact_links = _browser_artifact_links(browser_artifact_bundle)
+            if browser_evidence_requested and not _browser_phase_artifacts_ready(
+                browser_artifact_bundle,
+                phase="failure_artifacts",
+            ):
+                missing_artifacts = ", ".join(_browser_missing_artifacts(browser_artifact_bundle))
+                failure_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        {},
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="artifacts_missing",
+                    failure_reason=(
+                        "Failure browser evidence is incomplete; required screenshots are missing"
+                        + (f": {missing_artifacts}" if missing_artifacts else ".")
+                    ),
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        failure_summary,
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            if failure_journey.passed or not failure_journey.expected_failure_observed:
+                failure_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        {},
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                failure_reason = str(failure_journey.error or "").strip()
+                if failure_journey.failure_step:
+                    if failure_reason:
+                        failure_reason = f"{failure_reason} ({failure_journey.failure_step})"
+                    else:
+                        failure_reason = (
+                            "Browser journey did not reproduce the reported bug before the fix "
+                            f"at step '{failure_journey.failure_step}'."
+                        )
+                if not failure_reason:
+                    failure_reason = "Browser journey did not reproduce the reported bug before the fix."
+                return HealerRunResult(
+                    success=False,
+                    failure_class="browser_repro_failed",
+                    failure_reason=failure_reason,
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        failure_summary,
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
         sender = f"healer:{issue_id}"
         workspace_edit_mode = _prefers_workspace_edits(connector=self.connector, task_spec=task_spec)
         # For app-server workspace-edit mode, always start each attempt with a fresh thread.
@@ -823,9 +1082,97 @@ class HealerRunner:
                 workspace_status=workspace_status,
             )
 
+        app_runtime_session: AppHarnessSession | None = None
+        app_runtime_status: dict[str, Any] = {}
+
+        def _stop_app_runtime() -> None:
+            nonlocal app_runtime_session
+            if app_runtime_session is None:
+                return
+            try:
+                app_runtime_session.stop()
+            except Exception as exc:
+                logger.warning("Failed to stop app runtime profile '%s': %s", app_runtime_session.profile.name, exc)
+            finally:
+                app_runtime_session = None
+
+        runtime_profile, runtime_failure_class, runtime_failure_reason = self._resolve_app_runtime_profile(
+            task_spec=task_spec,
+            workspace=workspace,
+        )
+        if runtime_profile is not None:
+            try:
+                boot_result, app_runtime_session = self._app_harness.boot(runtime_profile)
+            except Exception as exc:
+                app_runtime_status = {
+                    "status": "failed",
+                    "profile": runtime_profile.name,
+                    "entry_url": task_spec.entry_url,
+                    "app_target": task_spec.app_target,
+                    "fixture_profile": task_spec.fixture_profile,
+                    "reason": str(exc),
+                }
+                _annotate_app_runtime_status(workspace_status, app_runtime_status)
+                return HealerRunResult(
+                    success=False,
+                    failure_class="app_runtime_boot_failed",
+                    failure_reason=str(exc),
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=_with_workspace_status(
+                        {},
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            app_runtime_status = {
+                "status": "ready",
+                "profile": boot_result.profile.name,
+                "pid": boot_result.pid,
+                "readiness_url": boot_result.readiness_url or task_spec.entry_url,
+                "entry_url": task_spec.entry_url,
+                "app_target": task_spec.app_target,
+                "fixture_profile": task_spec.fixture_profile,
+                "ready_via_url": boot_result.ready_via_url,
+                "ready_via_log": boot_result.ready_via_log,
+                "startup_seconds": round(boot_result.startup_seconds, 3),
+            }
+            _annotate_app_runtime_status(workspace_status, app_runtime_status)
+        elif runtime_failure_class:
+            app_runtime_status = {
+                "status": "unconfigured",
+                "profile": str(task_spec.runtime_profile or self._default_runtime_profile).strip(),
+                "entry_url": task_spec.entry_url,
+                "app_target": task_spec.app_target,
+                "fixture_profile": task_spec.fixture_profile,
+                "reason": runtime_failure_reason,
+            }
+            _annotate_app_runtime_status(workspace_status, app_runtime_status)
+            return HealerRunResult(
+                success=False,
+                failure_class=runtime_failure_class,
+                failure_reason=runtime_failure_reason,
+                failure_fingerprint="",
+                proposer_output=proposer_output,
+                diff_paths=diff_paths,
+                diff_files=diff_files,
+                diff_lines=diff_lines,
+                test_summary=_with_workspace_status(
+                    {},
+                    workspace_status=workspace_status,
+                    failure_fingerprint="",
+                ),
+                workspace_status=workspace_status,
+            )
+
         if task_spec.validation_profile == "artifact_only":
             artifact_summary = _validate_artifact_outputs(workspace=workspace, diff_paths=diff_paths)
             if not artifact_summary["passed"]:
+                _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
                     failure_class="artifact_validation_failed",
@@ -857,6 +1204,134 @@ class HealerRunner:
                 task_spec=task_spec,
                 targeted_tests=targeted_tests,
             )
+        if browser_evidence_requested and runtime_profile is not None and app_runtime_session is not None:
+            browser_entry_url = task_spec.entry_url or runtime_profile.readiness_url or ""
+            try:
+                resolution_journey = self._browser_harness.capture_journey(
+                    profile=runtime_profile,
+                    entry_url=browser_entry_url,
+                    repro_steps=parsed_repro_steps,
+                    artifact_root=browser_artifact_root / "resolution",
+                    phase="resolution",
+                    expect_failure=False,
+                )
+            except Exception as exc:
+                test_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        test_summary,
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                _stop_app_runtime()
+                return HealerRunResult(
+                    success=False,
+                    failure_class="browser_step_failed",
+                    failure_reason=str(exc),
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=_with_workspace_status(
+                        test_summary,
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            browser_artifact_bundle = _browser_artifact_bundle(
+                profile=runtime_profile,
+                entry_url=browser_entry_url,
+                failure_journey=_browser_bundle_phase_result(browser_artifact_bundle, phase="failure"),
+                resolution_journey=resolution_journey,
+            )
+            browser_artifact_links = _browser_artifact_links(browser_artifact_bundle)
+            app_runtime_status["browser_profile"] = _browser_profile_summary(runtime_profile)
+            app_runtime_status["artifacts_ready"] = _browser_artifacts_ready(browser_artifact_bundle)
+            app_runtime_status["bundle_status"] = str(browser_artifact_bundle.get("status") or "")
+            _annotate_app_runtime_status(workspace_status, app_runtime_status)
+            if browser_evidence_requested and not _browser_artifacts_ready(browser_artifact_bundle):
+                missing_artifacts = ", ".join(_browser_missing_artifacts(browser_artifact_bundle))
+                test_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        test_summary,
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                _stop_app_runtime()
+                return HealerRunResult(
+                    success=False,
+                    failure_class="artifacts_missing",
+                    failure_reason=(
+                        "Browser evidence is incomplete; required screenshots are missing"
+                        + (f": {missing_artifacts}" if missing_artifacts else ".")
+                    ),
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=_with_workspace_status(
+                        test_summary,
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            if not resolution_journey.passed:
+                failure_reason = str(resolution_journey.error or "").strip()
+                if resolution_journey.failure_step:
+                    if failure_reason:
+                        failure_reason = f"{failure_reason} ({resolution_journey.failure_step})"
+                    else:
+                        failure_reason = (
+                            "Browser journey failed after the fix "
+                            f"at step '{resolution_journey.failure_step}'."
+                        )
+                if not failure_reason:
+                    failure_reason = "Browser journey failed after the fix."
+                test_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        test_summary,
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                _stop_app_runtime()
+                return HealerRunResult(
+                    success=False,
+                    failure_class="browser_step_failed",
+                    failure_reason=failure_reason,
+                    failure_fingerprint="",
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=_with_workspace_status(
+                        test_summary,
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+        test_summary = _annotate_test_summary_runtime(
+            test_summary,
+            workspace_status=workspace_status,
+            task_spec=task_spec,
+        )
+        test_summary = _annotate_test_summary_browser_artifacts(
+            test_summary,
+            artifact_bundle=browser_artifact_bundle,
+            artifact_links=browser_artifact_links,
+        )
         test_summary = _with_workspace_status(
             test_summary,
             workspace_status=workspace_status,
@@ -880,6 +1355,8 @@ class HealerRunner:
                 execution_root=resolved_execution.execution_root,
                 allow_cleanup=self.auto_clean_generated_artifacts and cleanup_cycles_used < self.max_generated_artifact_cleanup_cycles,
             )
+            if app_runtime_status:
+                _annotate_app_runtime_status(workspace_status, app_runtime_status)
             _annotate_completion_artifact_parser(
                 workspace_status,
                 mode=completion_parser_mode,
@@ -901,6 +1378,7 @@ class HealerRunner:
                     workspace_status=workspace_status,
                     failure_fingerprint=fingerprint,
                 )
+                _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
                     failure_class="generated_artifact_contamination",
@@ -916,6 +1394,7 @@ class HealerRunner:
             diff_paths = _changed_paths(workspace)
             diff_files, diff_lines = _diff_stats(workspace)
             if not diff_paths:
+                _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
                     failure_class="no_workspace_change:connector_noop",
@@ -939,6 +1418,7 @@ class HealerRunner:
                 task_spec=task_spec,
             )
             if scope_violations:
+                _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
                     failure_class="scope_violation",
@@ -973,6 +1453,7 @@ class HealerRunner:
                     "workspace_hygiene_rerun": True,
                 }
                 if not artifact_summary["passed"]:
+                    _stop_app_runtime()
                     return HealerRunResult(
                         success=False,
                         failure_class="artifact_validation_failed",
@@ -996,6 +1477,11 @@ class HealerRunner:
                     targeted_tests=targeted_tests,
                 )
                 test_summary["workspace_hygiene_rerun"] = True
+            test_summary = _annotate_test_summary_runtime(
+                test_summary,
+                workspace_status=workspace_status,
+                task_spec=task_spec,
+            )
             final_workspace_status = _workspace_status_summary(
                 workspace,
                 issue_title=issue_title,
@@ -1025,6 +1511,8 @@ class HealerRunner:
                     reason=completion_parser_reason,
                 )
                 _annotate_app_server_recovery_status(final_workspace_status)
+                if app_runtime_status:
+                    _annotate_app_runtime_status(final_workspace_status, app_runtime_status)
                 fingerprint = _generated_artifact_failure_fingerprint(
                     final_workspace_status["contamination_paths"],
                     execution_root=resolved_execution.execution_root,
@@ -1034,6 +1522,7 @@ class HealerRunner:
                     workspace_status=final_workspace_status,
                     failure_fingerprint=fingerprint,
                 )
+                _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
                     failure_class="generated_artifact_contamination",
@@ -1054,6 +1543,51 @@ class HealerRunner:
                 workspace_status=workspace_status,
                 failure_fingerprint="",
             )
+        _stop_app_runtime()
+        if app_runtime_status:
+            workspace_status, cleaned_paths, contamination_reason = _stabilize_workspace_hygiene(
+                workspace,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                task_spec=task_spec,
+                language=resolved_execution.language_effective,
+                execution_root=resolved_execution.execution_root,
+                allow_cleanup=self.auto_clean_generated_artifacts and cleanup_cycles_used < self.max_generated_artifact_cleanup_cycles,
+            )
+            _annotate_app_runtime_status(workspace_status, app_runtime_status)
+            _annotate_completion_artifact_parser(
+                workspace_status,
+                mode=completion_parser_mode,
+                confidence=completion_parser_confidence,
+                source=completion_parser_source,
+                reason=completion_parser_reason,
+            )
+            _annotate_app_server_recovery_status(workspace_status)
+            if cleaned_paths:
+                cleanup_cycles_used += 1
+            workspace_status["cleanup_cycles_used"] = cleanup_cycles_used
+            if contamination_reason:
+                fingerprint = _generated_artifact_failure_fingerprint(
+                    workspace_status.get("contamination_paths") or workspace_status.get("cleaned_paths") or [],
+                    execution_root=resolved_execution.execution_root,
+                )
+                test_summary = _with_workspace_status(
+                    test_summary,
+                    workspace_status=workspace_status,
+                    failure_fingerprint=fingerprint,
+                )
+                return HealerRunResult(
+                    success=False,
+                    failure_class="generated_artifact_contamination",
+                    failure_reason=contamination_reason,
+                    failure_fingerprint=fingerprint,
+                    proposer_output=proposer_output,
+                    diff_paths=diff_paths,
+                    diff_files=diff_files,
+                    diff_lines=diff_lines,
+                    test_summary=test_summary,
+                    workspace_status=workspace_status,
+                )
         _annotate_completion_artifact_parser(
             workspace_status,
             mode=completion_parser_mode,
@@ -4294,6 +4828,317 @@ def _annotate_completion_artifact_parser(
         workspace_status["completion_artifact_parser_reason"] = reason
     elif "completion_artifact_parser_reason" in workspace_status:
         workspace_status.pop("completion_artifact_parser_reason", None)
+
+
+def _annotate_app_runtime_status(
+    workspace_status: dict[str, Any],
+    app_runtime_status: dict[str, Any],
+) -> None:
+    runtime_copy = dict(app_runtime_status or {})
+    workspace_status["app_runtime"] = runtime_copy
+    workspace_status["runtime_summary"] = {"app_harness": runtime_copy}
+
+
+def _annotate_test_summary_runtime(
+    summary: dict[str, Any],
+    *,
+    workspace_status: dict[str, Any],
+    task_spec: HealerTaskSpec,
+) -> dict[str, Any]:
+    enriched = dict(summary or {})
+    runtime_summary = workspace_status.get("runtime_summary")
+    if isinstance(runtime_summary, dict) and runtime_summary:
+        enriched["runtime_summary"] = dict(runtime_summary)
+    if task_spec.artifact_requirements:
+        enriched["artifact_requirements"] = list(task_spec.artifact_requirements)
+    return enriched
+
+
+def _annotate_test_summary_browser_artifacts(
+    summary: dict[str, Any],
+    *,
+    artifact_bundle: dict[str, Any],
+    artifact_links: list[dict[str, Any]],
+) -> dict[str, Any]:
+    enriched = dict(summary or {})
+    if artifact_bundle:
+        enriched["artifact_bundle"] = dict(artifact_bundle)
+    if artifact_links:
+        enriched["artifact_links"] = [dict(link) for link in artifact_links]
+    return enriched
+
+
+def _normalize_app_runtime_profiles(value: Any) -> dict[str, AppRuntimeProfile]:
+    normalized: dict[str, AppRuntimeProfile] = {}
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, list):
+        items = [
+            (str(item.get("name") or ""), item)
+            for item in value
+            if isinstance(item, dict)
+        ]
+    else:
+        items = []
+
+    for raw_name, raw_profile in items:
+        profile = _coerce_app_runtime_profile(raw_name=raw_name, raw_profile=raw_profile)
+        if profile is not None:
+            normalized[profile.name] = profile
+    return normalized
+
+
+def _coerce_app_runtime_profile(*, raw_name: str, raw_profile: Any) -> AppRuntimeProfile | None:
+    if isinstance(raw_profile, AppRuntimeProfile):
+        profile_name = str(raw_profile.name or raw_name).strip()
+        if not profile_name:
+            return None
+        return AppRuntimeProfile(
+            name=profile_name,
+            command=tuple(raw_profile.command),
+            cwd=Path(raw_profile.cwd),
+            env=dict(raw_profile.env or {}),
+            readiness_url=raw_profile.readiness_url,
+            readiness_log_text=raw_profile.readiness_log_text,
+            browser=raw_profile.browser,
+            headless=bool(raw_profile.headless),
+            viewport=dict(raw_profile.viewport or {}) or None,
+            device=raw_profile.device,
+            startup_timeout_seconds=float(raw_profile.startup_timeout_seconds),
+            shutdown_timeout_seconds=float(raw_profile.shutdown_timeout_seconds),
+            poll_interval_seconds=float(raw_profile.poll_interval_seconds),
+        )
+    if not isinstance(raw_profile, dict):
+        return None
+
+    profile_name = str(raw_profile.get("name") or raw_name).strip()
+    if not profile_name:
+        return None
+    command = _normalize_app_runtime_command(
+        raw_profile.get("command") or raw_profile.get("start_command") or raw_profile.get("boot_command")
+    )
+    cwd_value = raw_profile.get("cwd") or raw_profile.get("working_directory") or "."
+    readiness_url = str(raw_profile.get("readiness_url") or raw_profile.get("ready_url") or "").strip() or None
+    readiness_log_text = (
+        str(raw_profile.get("readiness_log_text") or raw_profile.get("ready_log_text") or "").strip() or None
+    )
+    env_value = raw_profile.get("env") if isinstance(raw_profile.get("env"), dict) else None
+    viewport_value = raw_profile.get("viewport") if isinstance(raw_profile.get("viewport"), dict) else None
+    return AppRuntimeProfile(
+        name=profile_name,
+        command=command,
+        cwd=Path(str(cwd_value or ".")).expanduser(),
+        env={str(key): str(value) for key, value in dict(env_value or {}).items()},
+        readiness_url=readiness_url,
+        readiness_log_text=readiness_log_text,
+        browser=str(raw_profile.get("browser") or "").strip(),
+        headless=_coerce_bool(raw_profile.get("headless"), default=True),
+        viewport=_coerce_viewport(viewport_value),
+        device=str(raw_profile.get("device") or "").strip(),
+        startup_timeout_seconds=_coerce_float(raw_profile.get("startup_timeout_seconds"), default=30.0),
+        shutdown_timeout_seconds=_coerce_float(raw_profile.get("shutdown_timeout_seconds"), default=10.0),
+        poll_interval_seconds=_coerce_float(raw_profile.get("poll_interval_seconds"), default=0.1),
+    )
+
+
+def _normalize_app_runtime_command(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part for part in shlex.split(value) if part)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(part).strip() for part in value if str(part).strip())
+    return ()
+
+
+def _coerce_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in {"1", "true", "yes", "on"}:
+            return True
+        if candidate in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _coerce_viewport(value: dict[str, Any] | None) -> dict[str, int] | None:
+    if not value:
+        return None
+    normalized: dict[str, int] = {}
+    for key in ("width", "height"):
+        try:
+            normalized[key] = int(value[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return normalized or None
+
+
+def _browser_profile_summary(profile: AppRuntimeProfile) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "browser": profile.browser,
+        "headless": bool(profile.headless),
+    }
+    if profile.device:
+        summary["device"] = profile.device
+    if profile.viewport:
+        summary["viewport"] = dict(profile.viewport)
+    return summary
+
+
+def _browser_phase_payload(result: BrowserJourneyResult) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "phase": result.phase,
+        "passed": bool(result.passed),
+        "expected_failure_observed": bool(result.expected_failure_observed),
+        "final_url": result.final_url,
+        "transcript": [dict(entry) for entry in result.transcript],
+    }
+    if result.failure_step:
+        payload["failure_step"] = result.failure_step
+    if result.error:
+        payload["error"] = result.error
+    if result.screenshot_path:
+        payload["screenshot_path"] = result.screenshot_path
+    if result.video_path:
+        payload["video_path"] = result.video_path
+    if result.console_log_path:
+        payload["console_log_path"] = result.console_log_path
+    if result.network_log_path:
+        payload["network_log_path"] = result.network_log_path
+    return payload
+
+
+def _browser_artifact_bundle(
+    *,
+    profile: AppRuntimeProfile,
+    entry_url: str,
+    failure_journey: BrowserJourneyResult | None = None,
+    resolution_journey: BrowserJourneyResult | None = None,
+) -> dict[str, Any]:
+    bundle_status = "partial"
+    if failure_journey is not None and resolution_journey is not None:
+        bundle_status = "captured"
+    bundle: dict[str, Any] = {
+        "status": bundle_status,
+        "browser_profile": _browser_profile_summary(profile),
+        "entry_url": entry_url,
+    }
+    journey_transcript: list[dict[str, Any]] = []
+    if failure_journey is not None:
+        bundle["failure_artifacts"] = _browser_phase_payload(failure_journey)
+        journey_transcript.append(
+            {
+                "phase": failure_journey.phase,
+                "transcript": [dict(entry) for entry in failure_journey.transcript],
+            }
+        )
+    if resolution_journey is not None:
+        bundle["resolution_artifacts"] = _browser_phase_payload(resolution_journey)
+        journey_transcript.append(
+            {
+                "phase": resolution_journey.phase,
+                "transcript": [dict(entry) for entry in resolution_journey.transcript],
+            }
+        )
+    if journey_transcript:
+        bundle["journey_transcript"] = journey_transcript
+    artifact_dirs: list[str] = []
+    for result in (failure_journey, resolution_journey):
+        if result is None:
+            continue
+        for path_value in (
+            result.screenshot_path,
+            result.video_path,
+            result.console_log_path,
+            result.network_log_path,
+        ):
+            path_text = str(path_value or "").strip()
+            if not path_text:
+                continue
+            artifact_dirs.append(str(Path(path_text).expanduser().resolve().parent))
+    if artifact_dirs:
+        bundle["artifact_root"] = os.path.commonpath(artifact_dirs)
+    if failure_journey is not None and resolution_journey is not None and not _browser_artifacts_ready(bundle):
+        bundle["status"] = "artifacts_missing"
+    return bundle
+
+
+def _browser_artifact_links(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    links: list[dict[str, Any]] = []
+    for phase_name in ("failure", "resolution"):
+        phase_payload = bundle.get(f"{phase_name}_artifacts")
+        if not isinstance(phase_payload, dict):
+            continue
+        for field_name, label_suffix in (
+            ("screenshot_path", "screenshot"),
+            ("video_path", "video"),
+            ("console_log_path", "console_log"),
+            ("network_log_path", "network_log"),
+        ):
+            path = str(phase_payload.get(field_name) or "").strip()
+            if not path:
+                continue
+            if not Path(path).exists():
+                continue
+            links.append({"label": f"{phase_name}_{label_suffix}", "path": path})
+    return links
+
+
+def _browser_bundle_phase_result(bundle: dict[str, Any], *, phase: str) -> BrowserJourneyResult | None:
+    phase_payload = bundle.get(f"{phase}_artifacts")
+    if not isinstance(phase_payload, dict):
+        return None
+    transcript = phase_payload.get("transcript")
+    return BrowserJourneyResult(
+        phase=str(phase_payload.get("phase") or phase),
+        passed=bool(phase_payload.get("passed")),
+        expected_failure_observed=bool(phase_payload.get("expected_failure_observed")),
+        final_url=str(phase_payload.get("final_url") or ""),
+        failure_step=str(phase_payload.get("failure_step") or ""),
+        error=str(phase_payload.get("error") or ""),
+        screenshot_path=str(phase_payload.get("screenshot_path") or ""),
+        video_path=str(phase_payload.get("video_path") or ""),
+        console_log_path=str(phase_payload.get("console_log_path") or ""),
+        network_log_path=str(phase_payload.get("network_log_path") or ""),
+        transcript=tuple(dict(entry) for entry in transcript) if isinstance(transcript, list) else (),
+    )
+
+
+def _browser_artifacts_ready(bundle: dict[str, Any]) -> bool:
+    return not _browser_missing_artifacts(bundle)
+
+
+def _browser_phase_artifacts_ready(bundle: dict[str, Any], *, phase: str) -> bool:
+    return not _browser_phase_missing_artifacts(bundle, phase=phase)
+
+
+def _browser_missing_artifacts(bundle: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for phase_name in ("failure_artifacts", "resolution_artifacts"):
+        missing.extend(_browser_phase_missing_artifacts(bundle, phase=phase_name))
+    return missing
+
+
+def _browser_phase_missing_artifacts(bundle: dict[str, Any], *, phase: str) -> list[str]:
+    phase_payload = bundle.get(phase)
+    if not isinstance(phase_payload, dict):
+        phase_prefix = phase.replace("_artifacts", "")
+        return [f"{phase_prefix}_screenshot"]
+
+    missing: list[str] = []
+    raw_path = str(phase_payload.get("screenshot_path") or "").strip()
+    if not raw_path:
+        missing.append(f"{phase.replace('_artifacts', '')}_screenshot")
+    elif not Path(raw_path).exists():
+        missing.append(f"{phase.replace('_artifacts', '')}_screenshot")
+    return missing
 
 
 def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:

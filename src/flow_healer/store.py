@@ -79,6 +79,7 @@ class SQLiteStore:
                     output_targets_json TEXT NOT NULL DEFAULT '[]',
                     tool_policy TEXT NOT NULL DEFAULT '',
                     validation_profile TEXT NOT NULL DEFAULT '',
+                    ci_status_summary_json TEXT NOT NULL DEFAULT '{}',
                     scope_key TEXT NOT NULL DEFAULT '',
                     dedupe_key TEXT NOT NULL DEFAULT '',
                     conflict_requeue_count INTEGER NOT NULL DEFAULT 0,
@@ -101,6 +102,11 @@ class SQLiteStore:
                     failure_reason TEXT NOT NULL DEFAULT '',
                     proposer_output_excerpt TEXT NOT NULL DEFAULT '',
                     swarm_summary_json TEXT NOT NULL DEFAULT '{}',
+                    runtime_summary_json TEXT NOT NULL DEFAULT '{}',
+                    artifact_bundle_json TEXT NOT NULL DEFAULT '{}',
+                    artifact_links_json TEXT NOT NULL DEFAULT '[]',
+                    ci_status_summary_json TEXT NOT NULL DEFAULT '{}',
+                    judgment_reason_code TEXT NOT NULL DEFAULT '',
                     task_kind TEXT NOT NULL DEFAULT '',
                     output_targets_json TEXT NOT NULL DEFAULT '[]',
                     tool_policy TEXT NOT NULL DEFAULT '',
@@ -246,6 +252,7 @@ class SQLiteStore:
                 ("output_targets_json", "ALTER TABLE healer_issues ADD COLUMN output_targets_json TEXT NOT NULL DEFAULT '[]'"),
                 ("tool_policy", "ALTER TABLE healer_issues ADD COLUMN tool_policy TEXT NOT NULL DEFAULT ''"),
                 ("validation_profile", "ALTER TABLE healer_issues ADD COLUMN validation_profile TEXT NOT NULL DEFAULT ''"),
+                ("ci_status_summary_json", "ALTER TABLE healer_issues ADD COLUMN ci_status_summary_json TEXT NOT NULL DEFAULT '{}'"),
                 ("stuck_since", "ALTER TABLE healer_issues ADD COLUMN stuck_since TEXT DEFAULT NULL"),
                 ("scope_key", "ALTER TABLE healer_issues ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''"),
                 ("dedupe_key", "ALTER TABLE healer_issues ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''"),
@@ -265,6 +272,11 @@ class SQLiteStore:
                 ("validation_profile", "ALTER TABLE healer_attempts ADD COLUMN validation_profile TEXT NOT NULL DEFAULT ''"),
                 ("proposer_output_excerpt", "ALTER TABLE healer_attempts ADD COLUMN proposer_output_excerpt TEXT NOT NULL DEFAULT ''"),
                 ("swarm_summary_json", "ALTER TABLE healer_attempts ADD COLUMN swarm_summary_json TEXT NOT NULL DEFAULT '{}'"),
+                ("runtime_summary_json", "ALTER TABLE healer_attempts ADD COLUMN runtime_summary_json TEXT NOT NULL DEFAULT '{}'"),
+                ("artifact_bundle_json", "ALTER TABLE healer_attempts ADD COLUMN artifact_bundle_json TEXT NOT NULL DEFAULT '{}'"),
+                ("artifact_links_json", "ALTER TABLE healer_attempts ADD COLUMN artifact_links_json TEXT NOT NULL DEFAULT '[]'"),
+                ("ci_status_summary_json", "ALTER TABLE healer_attempts ADD COLUMN ci_status_summary_json TEXT NOT NULL DEFAULT '{}'"),
+                ("judgment_reason_code", "ALTER TABLE healer_attempts ADD COLUMN judgment_reason_code TEXT NOT NULL DEFAULT ''"),
             ]
             for column, statement in attempt_migrations:
                 if column not in attempt_cols:
@@ -324,6 +336,7 @@ class SQLiteStore:
             return None
         data["labels"] = _json_loads(data.pop("labels_json", "[]"), [])
         data["output_targets"] = _json_loads(data.pop("output_targets_json", "[]"), [])
+        data["ci_status_summary"] = _json_loads(data.pop("ci_status_summary_json", "{}"), {})
         return data
 
     @staticmethod
@@ -335,6 +348,10 @@ class SQLiteStore:
         data["test_summary"] = _json_loads(data.pop("test_summary_json", "{}"), {})
         data["verifier_summary"] = _json_loads(data.pop("verifier_summary_json", "{}"), {})
         data["swarm_summary"] = _json_loads(data.pop("swarm_summary_json", "{}"), {})
+        data["runtime_summary"] = _json_loads(data.pop("runtime_summary_json", "{}"), {})
+        data["artifact_bundle"] = _json_loads(data.pop("artifact_bundle_json", "{}"), {})
+        data["artifact_links"] = _json_loads(data.pop("artifact_links_json", "[]"), [])
+        data["ci_status_summary"] = _json_loads(data.pop("ci_status_summary_json", "{}"), {})
         data["output_targets"] = _json_loads(data.pop("output_targets_json", "[]"), [])
         return data
 
@@ -613,6 +630,7 @@ class SQLiteStore:
         output_targets: list[str] | None = None,
         tool_policy: str | None = None,
         validation_profile: str | None = None,
+        ci_status_summary: dict[str, Any] | None = None,
         scope_key: str | None = None,
         dedupe_key: str | None = None,
         conflict_requeue_count: int | None = None,
@@ -674,6 +692,9 @@ class SQLiteStore:
             if validation_profile is not None:
                 updates.append("validation_profile = ?")
                 params.append(validation_profile)
+            if ci_status_summary is not None:
+                updates.append("ci_status_summary_json = ?")
+                params.append(json.dumps(ci_status_summary or {}))
             if scope_key is not None:
                 updates.append("scope_key = ?")
                 params.append(scope_key)
@@ -728,6 +749,40 @@ class SQLiteStore:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def update_issue_pr_ci_status(self, *, issue_id: str, ci_status_summary: dict[str, Any]) -> bool:
+        normalized_summary = dict(ci_status_summary or {})
+        conn = self._connect()
+        with self._lock:
+            issue_cursor = conn.execute(
+                """
+                UPDATE healer_issues
+                SET ci_status_summary_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE issue_id = ?
+                """,
+                (json.dumps(normalized_summary), issue_id),
+            )
+            attempt_row = conn.execute(
+                """
+                SELECT attempt_id
+                FROM healer_attempts
+                WHERE issue_id = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (issue_id,),
+            ).fetchone()
+            if attempt_row is not None:
+                conn.execute(
+                    """
+                    UPDATE healer_attempts
+                    SET ci_status_summary_json = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (json.dumps(normalized_summary), str(attempt_row["attempt_id"])),
+                )
+            conn.commit()
+            return issue_cursor.rowcount > 0
 
     def requeue_expired_healer_issue_leases(self) -> int:
         conn = self._connect()
@@ -840,6 +895,11 @@ class SQLiteStore:
         test_summary: dict[str, Any],
         verifier_summary: dict[str, Any],
         swarm_summary: dict[str, Any] | None = None,
+        runtime_summary: dict[str, Any] | None = None,
+        artifact_bundle: dict[str, Any] | None = None,
+        artifact_links: list[dict[str, Any]] | None = None,
+        ci_status_summary: dict[str, Any] | None = None,
+        judgment_reason_code: str = "",
         failure_class: str = "",
         failure_reason: str = "",
         proposer_output_excerpt: str = "",
@@ -854,6 +914,11 @@ class SQLiteStore:
                     test_summary_json = ?,
                     verifier_summary_json = ?,
                     swarm_summary_json = ?,
+                    runtime_summary_json = ?,
+                    artifact_bundle_json = ?,
+                    artifact_links_json = ?,
+                    ci_status_summary_json = ?,
+                    judgment_reason_code = ?,
                     failure_class = ?,
                     failure_reason = ?,
                     proposer_output_excerpt = ?,
@@ -866,6 +931,11 @@ class SQLiteStore:
                     json.dumps(test_summary or {}),
                     json.dumps(verifier_summary or {}),
                     json.dumps(swarm_summary or {}),
+                    json.dumps(runtime_summary or {}),
+                    json.dumps(artifact_bundle or {}),
+                    json.dumps(artifact_links or []),
+                    json.dumps(ci_status_summary or {}),
+                    (judgment_reason_code or "")[:120],
                     (failure_class or "")[:120],
                     (failure_reason or "")[:500],
                     (proposer_output_excerpt or "")[:1500],

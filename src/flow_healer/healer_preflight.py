@@ -139,6 +139,7 @@ class HealerPreflight:
         self.repo_path = Path(repo_path).expanduser().resolve()
         self.ttl_seconds = max(60, int(ttl_seconds))
         self._connector_probe_cache: dict[str, tuple[bool, str, datetime]] = {}
+        self._browser_probe_cache: dict[str, tuple[bool, str, datetime]] = {}
 
     def probe_connector(self, connector: ConnectorProtocol) -> tuple[bool, str]:
         connector_name = type(connector).__name__
@@ -173,6 +174,30 @@ class HealerPreflight:
                 pass
         self._connector_probe_cache[connector_name] = (True, "", now)
         return True, ""
+
+    def probe_browser_runtime(self, browser_harness: object) -> tuple[bool, str]:
+        harness_name = type(browser_harness).__name__
+        now = datetime.now(UTC)
+        cached = self._browser_probe_cache.get(harness_name)
+        if cached is not None:
+            ok, reason, checked_at = cached
+            age = (now - checked_at).total_seconds()
+            if age < _CONNECTOR_PROBE_TTL_SECONDS:
+                return ok, reason
+
+        check_fn = getattr(browser_harness, "check_runtime_available", None)
+        if not callable(check_fn):
+            reason = "browser harness does not expose check_runtime_available()"
+            self._browser_probe_cache[harness_name] = (False, reason, now)
+            return False, reason
+        try:
+            ok, reason = check_fn()
+        except Exception as exc:
+            reason = f"browser_harness.check_runtime_available() raised: {exc}"
+            self._browser_probe_cache[harness_name] = (False, reason, now)
+            return False, reason
+        self._browser_probe_cache[harness_name] = (bool(ok), str(reason or ""), now)
+        return bool(ok), str(reason or "")
 
     def refresh_all(self, *, force: bool = False) -> list[PreflightReport]:
         reports: list[PreflightReport] = []
