@@ -18,3 +18,11 @@ def test_add_preserves_numpy_array_behavior() -> None:
     result = add(values, 0.5)
 
     np.testing.assert_allclose(result, np.array([1.5, 2.5, 3.5]))
+
+
+def test_add_supports_sklearn_style_array_like_inputs() -> None:
+    values = [1.0, 2.0, 3.0]
+
+    result = add(values, 0.5)
+
+    np.testing.assert_allclose(result, np.array([1.5, 2.5, 3.5]))
