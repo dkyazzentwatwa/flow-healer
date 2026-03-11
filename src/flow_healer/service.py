@@ -234,6 +234,13 @@ class FlowHealerService:
                     runtime.loop._record_connector_health(connector_health)
                 issues = runtime.store.list_healer_issues(limit=500)
                 issues_by_id = {str(issue.get("issue_id") or ""): issue for issue in issues}
+                latest_attempts_by_issue: dict[str, dict[str, object] | None] = {}
+                for issue in issues:
+                    issue_id = str(issue.get("issue_id") or "")
+                    if not issue_id:
+                        continue
+                    attempts = runtime.store.list_healer_attempts(issue_id=issue_id, limit=1)
+                    latest_attempts_by_issue[issue_id] = attempts[0] if attempts else None
                 breaker = runtime.loop._circuit_breaker_status()
                 counts: dict[str, int] = {}
                 for issue in issues:
@@ -267,6 +274,7 @@ class FlowHealerService:
                         attempt_row["validation_lane"] = str(test_summary.get("validation_lane") or "")
                         attempt_row["promotion_state"] = str(test_summary.get("promotion_state") or "")
                         attempt_row["phase_states"] = dict(test_summary.get("phase_states") or {})
+                    attempt_row["issue_promotion_state"] = derive_issue_promotion_state(issue=issue, latest_attempt=attempt)
                     attempt_row["diagnosis"] = route.diagnosis
                     attempt_row["failure_family"] = route.failure_family
                     attempt_row["recommended_skill"] = route.recommended_skill
@@ -353,6 +361,10 @@ class FlowHealerService:
                 trust["policy_outcome"] = str(policy.get("outcome") or "")
                 trust["policy_recommendation"] = str(policy.get("recommendation") or "")
                 repo_ci_status_summary = _aggregate_ci_status_summary(issues)
+                promotion_state_counts = _aggregate_promotion_state_counts(
+                    issues=issues,
+                    latest_attempts_by_issue=latest_attempts_by_issue,
+                )
                 rows.append(
                     {
                         "repo": repo.repo_name,
@@ -432,6 +444,7 @@ class FlowHealerService:
                         "issue_outcomes": _issue_outcome_metrics(issues),
                         "recent_attempts": annotated_attempts,
                         "ci_status_summary": repo_ci_status_summary,
+                        "promotion_state_counts": promotion_state_counts,
                     }
                 )
             finally:
@@ -1646,6 +1659,77 @@ def _aggregate_ci_status_summary(issues: list[dict[str, object]]) -> dict[str, o
             default="",
         ),
     }
+
+
+def derive_issue_promotion_state(
+    *,
+    issue: dict[str, object] | None,
+    latest_attempt: dict[str, object] | None = None,
+) -> str:
+    issue_row = dict(issue or {})
+    latest_attempt_row = dict(latest_attempt or {})
+    issue_state = str(issue_row.get("state") or "").strip().lower()
+    pr_number = int(issue_row.get("pr_number") or 0)
+    ci_summary = issue_row.get("ci_status_summary")
+    ci_state = (
+        str((ci_summary or {}).get("overall_state") or "").strip().lower()
+        if isinstance(ci_summary, dict)
+        else ""
+    )
+    test_summary = latest_attempt_row.get("test_summary")
+    attempt_summary = dict(test_summary) if isinstance(test_summary, dict) else {}
+    attempt_promotion_state = str(attempt_summary.get("promotion_state") or "").strip().lower()
+    phase_states = attempt_summary.get("phase_states")
+    phase_state_map = dict(phase_states) if isinstance(phase_states, dict) else {}
+    artifact_bundle = latest_attempt_row.get("artifact_bundle")
+    artifact_map = dict(artifact_bundle) if isinstance(artifact_bundle, dict) else {}
+    artifact_links = latest_attempt_row.get("artifact_links")
+    artifact_list = list(artifact_links) if isinstance(artifact_links, list) else []
+    labels = {
+        str(item.get("label") or "").strip().lower()
+        for item in artifact_list
+        if isinstance(item, dict) and str(item.get("label") or "").strip()
+    }
+
+    if issue_state == "resolved":
+        return "promotion_ready"
+    if issue_state in {"failed", "blocked"}:
+        return "merge_blocked"
+    if attempt_promotion_state == "merge_blocked" or bool(phase_state_map.get("merge_blocked")):
+        return "merge_blocked"
+    if pr_number > 0:
+        if ci_state == "success":
+            return "ci_green"
+        if ci_state == "failure":
+            return "merge_blocked"
+        return "pr_open"
+    if labels and any(label.startswith("failure_") for label in labels) and any(
+        label.startswith("resolution_") for label in labels
+    ):
+        return "resolution_artifacts_captured"
+    if artifact_map or labels:
+        return "failure_artifacts_captured"
+    if attempt_promotion_state == "promotion_ready" or bool(phase_state_map.get("promotion_ready")):
+        return "local_validated"
+    return ""
+
+
+def _aggregate_promotion_state_counts(
+    *,
+    issues: list[dict[str, object]],
+    latest_attempts_by_issue: dict[str, dict[str, object] | None],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for issue in issues:
+        issue_id = str(issue.get("issue_id") or "")
+        promotion_state = derive_issue_promotion_state(
+            issue=issue,
+            latest_attempt=latest_attempts_by_issue.get(issue_id),
+        )
+        if not promotion_state:
+            continue
+        counts[promotion_state] = counts.get(promotion_state, 0) + 1
+    return counts
 
 
 def _attempt_duration_minutes(attempt: dict[str, object]) -> float | None:

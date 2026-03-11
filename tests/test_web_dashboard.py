@@ -462,6 +462,7 @@ def test_issue_detail_payload_includes_issue_attempts_and_related_activity(tmp_p
     assert payload["attempts"][0]["artifact_links"][0]["label"] == "failure_screenshot"
     assert payload["attempts"][0]["artifact_links"][0]["web_href"].startswith("/artifact?path=")
     assert payload["attempts"][0]["ci_status_summary"]["overall_state"] == "failure"
+    assert payload["issue"]["promotion_state"] == "merge_blocked"
     assert any(item["issue_id"] == "910" for item in payload["activity"])
     assert payload["repo"]["trust"]["state"] == "degraded"
 

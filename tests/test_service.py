@@ -1613,3 +1613,49 @@ def test_status_rows_surface_issue_ci_status_summary(tmp_path, monkeypatch) -> N
     assert rows[0]["ci_status_summary"]["pending_buckets"] == ["deploy_blocked"]
     assert rows[0]["ci_status_summary"]["failing_contexts"] == ["CI"]
     assert rows[0]["ci_status_summary"]["pending_contexts"] == ["Preview"]
+    assert rows[0]["promotion_state_counts"]["merge_blocked"] == 1
+
+
+def test_status_rows_surface_promotion_state_counts_for_green_pr(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="304",
+        repo="owner/repo",
+        title="Issue 304",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_304_1",
+        issue_id="304",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_304_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={
+            "promotion_state": "promotion_ready",
+            "phase_states": {"promotion_ready": True, "merge_blocked": False},
+        },
+        verifier_summary={},
+    )
+    runtime.store.set_healer_issue_state(
+        issue_id="304",
+        state="pr_open",
+        pr_number=304,
+        pr_state="open",
+        ci_status_summary={"overall_state": "success"},
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    assert rows[0]["promotion_state_counts"]["ci_green"] == 1

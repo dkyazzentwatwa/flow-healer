@@ -30,9 +30,9 @@ Last updated: `2026-03-11`
 | Record a second video demonstrating the resolution | Partial | Best-effort only; screenshots are the required proof path. |
 | Open a pull request | Done | Existing PR open/update loop works. |
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
-| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, deterministic CI failures now requeue automatically on the same PR, and failure buckets are classified; live GitHub CI remediation proof is still pending. |
+| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, deterministic CI failures now requeue automatically on the same PR, failure buckets are classified, and promotion state now surfaces in status views; live GitHub CI remediation proof is still pending. |
 | Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
-| Merge the change | Partial | Auto-merge now waits for local promotion readiness plus green remote CI, but full promotion-state and judgment routing are still incomplete. |
+| Merge the change | Partial | Auto-merge now waits for local promotion readiness plus green remote CI, and promotion state is visible in status/dashboard views, but the full state machine and judgment routing are still incomplete. |
 
 ## Coordination
 
@@ -136,7 +136,7 @@ Last updated: `2026-03-11`
 
 ## Phase 3: Promotion Engine
 
-Status: `Next`
+Status: `Partial`
 
 ### Remote CI ingestion
 
@@ -164,7 +164,7 @@ Status: `Next`
 
 - [ ] Define stable promotion states: `local_validated`, `failure_artifacts_captured`, `resolution_artifacts_captured`, `pr_open`, `ci_green`, `promotion_ready`, `merge_blocked`
 - [ ] Persist promotion state transitions
-- [ ] Surface promotion state in dashboard/service/status output
+- [x] Surface promotion state in dashboard/service/status output
 - [ ] Require app proof + screenshots + local validation + green CI before promotion
 - [ ] Keep the lighter path for code-only issues where appropriate
 
@@ -180,7 +180,7 @@ Status: `Next`
 
 - [x] Tracker tests for CI/check-run ingestion
 - [x] Loop tests for CI failure remediation
-- [ ] Service/dashboard tests for promotion-state surfacing
+- [x] Service/dashboard tests for promotion-state surfacing
 - [ ] Live PR smoke with remote CI observed and reflected in status
 
 ## Phase 4: Judgment Routing
@@ -272,7 +272,9 @@ Status: `Later`
 - [x] Persist `ci_status_summary` in attempts and status surfaces
 - [x] Classify remote CI failures into normalized buckets
 - [x] Add the first CI-aware retry/remediation loop in `healer_loop.py`
-- [ ] Add explicit promotion states beyond the current merge gate
+- [x] Surface current promotion states in dashboard/service/status views
+- [ ] Persist explicit promotion-state transitions beyond the current merge gate
+- [ ] Require screenshot proof + local validation + green CI before final promotion
 - [ ] Run a live PR-body smoke with inline before/after evidence
 
 ### Right after that
@@ -293,3 +295,4 @@ Status: `Later`
 - [x] CI summaries now include normalized failure buckets and per-check detail
 - [x] Deterministic remote CI failures now requeue the issue with CI feedback context
 - [x] E2E proof that CI-driven retries update the same PR without duplicates
+- [x] Promotion state now surfaces in service rows and dashboard issue views

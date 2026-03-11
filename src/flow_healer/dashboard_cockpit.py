@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import quote_plus
 
 from .config import AppConfig
-from .service import FlowHealerService
+from .service import FlowHealerService, derive_issue_promotion_state
 from .store import SQLiteStore
 
 
@@ -34,16 +34,23 @@ def queue_payload(config: AppConfig, service: FlowHealerService) -> dict[str, An
         store.bootstrap()
         try:
             issues = store.list_healer_issues(limit=500)
+            latest_attempts_by_issue = {
+                str(issue.get("issue_id") or ""): store.list_healer_attempts(issue_id=str(issue.get("issue_id") or ""), limit=1)
+                for issue in issues
+                if str(issue.get("issue_id") or "")
+            }
         finally:
             store.close()
         for issue in issues:
             issue_id = str(issue.get("issue_id") or "").strip()
+            latest_attempts = latest_attempts_by_issue.get(issue_id) or []
             rows.append(
                 _queue_row_from_issue(
                     issue=issue,
                     repo_name=repo_name,
                     repo_row=repo_row,
                     explanation=explanation_map.get(issue_id),
+                    latest_attempt=latest_attempts[0] if latest_attempts else None,
                 )
             )
     rows.sort(key=_queue_sort_key)
@@ -91,7 +98,13 @@ def issue_detail_payload(
         ),
         {},
     )
-    issue_view = _queue_row_from_issue(issue=issue, repo_name=normalized_repo, repo_row=repo_row, explanation=explanation)
+    issue_view = _queue_row_from_issue(
+        issue=issue,
+        repo_name=normalized_repo,
+        repo_row=repo_row,
+        explanation=explanation,
+        latest_attempt=attempts[0] if attempts else None,
+    )
     issue_view["body"] = str(issue.get("body") or "")
     issue_view["labels"] = list(issue.get("labels") or [])
     issue_view["author"] = str(issue.get("author") or "")
@@ -829,6 +842,7 @@ def _queue_row_from_issue(
     repo_name: str,
     repo_row: dict[str, Any],
     explanation: dict[str, Any] | None,
+    latest_attempt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     issue_id = str(issue.get("issue_id") or "").strip()
     state = str(issue.get("state") or "queued").strip().lower()
@@ -853,6 +867,7 @@ def _queue_row_from_issue(
         "pr_badge": f"#{pr_number}" if pr_number > 0 else "",
         "failure_summary": str(issue.get("last_failure_reason") or "").strip(),
         "failure_class": str(issue.get("last_failure_class") or "").strip(),
+        "promotion_state": derive_issue_promotion_state(issue=issue, latest_attempt=latest_attempt),
         "explanation_summary": str(explanation.get("summary") or "").strip(),
         "recommended_action": str(explanation.get("recommended_action") or "").strip(),
         "repo_trust_state": str((repo_row.get("trust") or {}).get("state") or ""),
