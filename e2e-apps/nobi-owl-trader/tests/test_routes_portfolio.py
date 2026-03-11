@@ -167,6 +167,26 @@ def test_get_positions_with_data(client, setup_test_data, monkeypatch):
     assert position["lastBuyDate"] == setup_test_data["sell_trade"].timestamp
 
 
+def test_portfolio_routes_tolerate_exchange_failures(client, setup_test_data, monkeypatch):
+    """Test summary and positions fall back safely when exchange lookup fails"""
+    monkeypatch.setattr(
+        portfolio_routes,
+        "_get_exchange",
+        lambda: (_ for _ in ()).throw(RuntimeError("exchange unavailable")),
+    )
+
+    summary_response = client.get("/api/portfolio/summary")
+    assert summary_response.status_code == 200
+    assert summary_response.json()["portfolio"]["unrealizedPnl"] == 0.0
+
+    positions_response = client.get("/api/portfolio/positions")
+    assert positions_response.status_code == 200
+    positions = positions_response.json()["positions"]
+    assert len(positions) == 1
+    assert positions[0]["currentPrice"] == 50000.0
+    assert positions[0]["unrealizedPnl"] == 0.0
+
+
 def test_get_performance_metrics_empty(client):
     """Test GET /api/portfolio/metrics with no trades"""
     response = client.get("/api/portfolio/metrics")

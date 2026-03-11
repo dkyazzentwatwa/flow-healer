@@ -50,7 +50,10 @@ def _get_exchange():
 
 def _get_current_prices(symbols: List[str]) -> Dict[str, float]:
     prices = {}
-    exchange = _get_exchange()
+    try:
+        exchange = _get_exchange()
+    except Exception:
+        return prices
     for symbol in symbols:
         try:
             ticker = exchange.fetch_ticker(symbol)
