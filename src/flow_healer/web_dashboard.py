@@ -80,15 +80,24 @@ class DashboardServer:
 
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
+                query = parse_qs(parsed.query)
+                if parsed.path == "/api/queue":
+                    self._write_json(_queue_payload(server.config, server.service))
+                    return
+                if parsed.path == "/api/issue-detail":
+                    repo = (query.get("repo") or [""])[0].strip()
+                    issue_id = (query.get("issue_id") or [""])[0].strip()
+                    self._write_json(_issue_detail_payload(server.config, server.service, repo_name=repo, issue_id=issue_id))
+                    return
                 if parsed.path == "/api/status":
                     self._write_json({"rows": server.service.status_rows(None)})
                     return
                 if parsed.path == "/api/commands":
-                    repo = (parse_qs(parsed.query).get("repo") or [""])[0].strip() or None
+                    repo = (query.get("repo") or [""])[0].strip() or None
                     self._write_json({"rows": server.service.control_command_rows(repo, limit=200)})
                     return
                 if parsed.path == "/api/logs":
-                    lines = _parse_int((parse_qs(parsed.query).get("lines") or [""])[0], default=120, min_value=20, max_value=500)
+                    lines = _parse_int((query.get("lines") or [""])[0], default=120, min_value=20, max_value=500)
                     self._write_json(_collect_recent_logs(server.config, max_lines=lines))
                     return
                 if parsed.path == "/api/activity":
@@ -100,7 +109,6 @@ class DashboardServer:
                 if parsed.path not in {"/", ""}:
                     self.send_error(404, "Not Found")
                     return
-                query = parse_qs(parsed.query)
                 message = (query.get("msg") or [""])[0]
                 self._write_html(_render_dashboard(server.config, server.service, message))
 
@@ -2040,3 +2048,8 @@ def _truncate_text(value: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+from .dashboard_cockpit import issue_detail_payload as _issue_detail_payload
+from .dashboard_cockpit import queue_payload as _queue_payload
+from .dashboard_cockpit import render_dashboard as _render_dashboard

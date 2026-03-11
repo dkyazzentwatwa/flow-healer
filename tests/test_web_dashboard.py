@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from urllib.request import urlopen
 
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
 from flow_healer.service import FlowHealerService
 from flow_healer.web_dashboard import (
+    DashboardServer,
     _collect_activity,
     _collect_recent_logs,
+    _issue_detail_payload,
     _overview_payload,
+    _queue_payload,
     _parse_log_activity_row,
     _render_repo_action_cards,
     _render_dashboard,
@@ -217,6 +222,361 @@ def test_overview_payload_preserves_repo_trust_rows(tmp_path: Path) -> None:
     assert payload["rows"][0]["trust"]["recommended_operator_action"] == "inspect_circuit_breaker"
 
 
+def test_queue_payload_builds_saved_views_and_issue_rows(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="810",
+        repo="owner/repo",
+        title="Queued issue",
+        body="Required code outputs:\n- src/add.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.upsert_healer_issue(
+        issue_id="811",
+        repo="owner/repo",
+        title="Running issue",
+        body="Running body",
+        author="alice",
+        labels=["healer:ready"],
+        priority=2,
+    )
+    store.upsert_healer_issue(
+        issue_id="812",
+        repo="owner/repo",
+        title="Blocked issue",
+        body="Blocked body",
+        author="alice",
+        labels=["healer:ready"],
+        priority=3,
+    )
+    store.upsert_healer_issue(
+        issue_id="813",
+        repo="owner/repo",
+        title="PR issue",
+        body="PR body",
+        author="alice",
+        labels=["healer:ready"],
+        priority=4,
+    )
+    store.set_healer_issue_state(issue_id="811", state="running")
+    store.set_healer_issue_state(
+        issue_id="812",
+        state="blocked",
+        last_failure_class="no_patch",
+        last_failure_reason="Patch generation failed twice.",
+    )
+    store.set_healer_issue_state(issue_id="813", state="pr_open", pr_number=88, pr_state="open")
+    store.close()
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        return [
+            {
+                "repo": "demo",
+                "path": "/tmp/demo",
+                "paused": False,
+                "issues_total": 4,
+                "recent_attempts": [],
+                "issue_explanations": [
+                    {
+                        "issue_id": "812",
+                        "state": "blocked",
+                        "reason_code": "last_attempt_failed",
+                        "summary": "Repeated no-patch failures mean this issue needs operator review.",
+                        "recommended_action": "inspect_issue_contract",
+                        "blocking": True,
+                        "evidence": {},
+                    }
+                ],
+                "trust": {
+                    "state": "degraded",
+                    "score": 62,
+                    "summary": "Repo is runnable but recent failures need attention.",
+                    "why_runnable": "Most issues remain eligible for healing.",
+                    "why_blocked": "",
+                    "recommended_operator_action": "observe_repo",
+                    "dominant_failure_domain": "contract",
+                    "evidence": {},
+                },
+                "policy": {
+                    "outcome": "retry",
+                    "recommendation": "observe_repo",
+                    "summary": "Autonomous healing can continue.",
+                    "reason_code": "continue_autonomous_healing",
+                    "evidence": {},
+                },
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    payload = _queue_payload(config, service)
+
+    assert payload["summary"]["total"] == 4
+    assert payload["summary"]["running"] == 1
+    assert payload["summary"]["blocked"] == 1
+    assert payload["summary"]["pr_open"] == 1
+    assert [view["id"] for view in payload["views"]] == [
+        "all",
+        "queued",
+        "running",
+        "blocked",
+        "pr_open",
+        "needs_review",
+    ]
+    blocked = next(row for row in payload["rows"] if row["issue_id"] == "812")
+    assert blocked["failure_summary"] == "Patch generation failed twice."
+    assert blocked["recommended_action"] == "inspect_issue_contract"
+    assert blocked["repo_trust_state"] == "degraded"
+    pr_open = next(row for row in payload["rows"] if row["issue_id"] == "813")
+    assert pr_open["pr_badge"] == "#88"
+
+
+def test_issue_detail_payload_includes_issue_attempts_and_related_activity(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    state_root = Path(config.service.state_root).expanduser().resolve()
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / "flow-healer.log").write_text(
+        "2026-03-11 09:47:23 ERROR apple_flow.healer_loop: Issue #910 failed in repo demo on healer/issue-910-test PR #411\n",
+        encoding="utf-8",
+    )
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="910",
+        repo="owner/repo",
+        title="Node sandbox regression",
+        body="Required code outputs:\n- e2e-smoke/node/src/add.js\n\nValidation:\n- cd e2e-smoke/node && npm test",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.set_healer_issue_state(
+        issue_id="910",
+        state="blocked",
+        last_failure_class="tests_failed",
+        last_failure_reason="Targeted node validation failed.",
+        feedback_context="Focus on e2e-smoke/node validation.",
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_910_1",
+        issue_id="910",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+        task_kind="code",
+        output_targets=["e2e-smoke/node/src/add.js"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_910_1",
+        state="failed",
+        actual_diff_set=["e2e-smoke/node/src/add.js"],
+        test_summary={"failed_tests": 1, "validation_commands": ["npm test"]},
+        verifier_summary={"status": "failed"},
+        failure_class="tests_failed",
+        failure_reason="Expected 4 to equal 5",
+    )
+    store.close()
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        return [
+            {
+                "repo": "demo",
+                "path": "/tmp/demo",
+                "paused": False,
+                "issues_total": 1,
+                "recent_attempts": [],
+                "issue_explanations": [
+                    {
+                        "issue_id": "910",
+                        "state": "blocked",
+                        "reason_code": "last_attempt_failed",
+                        "summary": "Targeted validation failed on the last attempt.",
+                        "recommended_action": "inspect_issue_contract",
+                        "blocking": True,
+                        "evidence": {},
+                    }
+                ],
+                "trust": {
+                    "state": "degraded",
+                    "score": 51,
+                    "summary": "Repo is runnable but waiting on a fix for the current blocked issue.",
+                    "why_runnable": "Only one issue is blocked.",
+                    "why_blocked": "Issue #910 is blocked on tests.",
+                    "recommended_operator_action": "inspect_issue_contract",
+                    "dominant_failure_domain": "tests",
+                    "evidence": {},
+                },
+                "policy": {
+                    "outcome": "review",
+                    "recommendation": "inspect_issue_contract",
+                    "summary": "Review the blocked issue before retrying.",
+                    "reason_code": "last_attempt_failed",
+                    "evidence": {},
+                },
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    payload = _issue_detail_payload(config, service, repo_name="demo", issue_id="910")
+
+    assert payload["found"] is True
+    assert payload["issue"]["issue_id"] == "910"
+    assert "e2e-smoke/node/src/add.js" in payload["issue"]["body"]
+    assert payload["issue"]["failure_summary"] == "Targeted node validation failed."
+    assert payload["issue"]["recommended_action"] == "inspect_issue_contract"
+    assert len(payload["attempts"]) == 1
+    assert payload["attempts"][0]["attempt_id"] == "ha_910_1"
+    assert payload["attempts"][0]["test_summary"]["validation_commands"] == ["npm test"]
+    assert any(item["issue_id"] == "910" for item in payload["activity"])
+    assert payload["repo"]["trust"]["state"] == "degraded"
+
+
+def test_dashboard_server_serves_queue_endpoint(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="1201",
+        repo="owner/repo",
+        title="Queued issue",
+        body="Required code outputs:\n- src/add.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.close()
+
+    service.cached_status_rows = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        {
+            "repo": "demo",
+            "path": "/tmp/demo",
+            "paused": False,
+            "issues_total": 1,
+            "recent_attempts": [],
+            "issue_explanations": [],
+            "trust": {"state": "ready", "summary": "Ready for healing."},
+            "policy": {"summary": "Continue autonomous healing."},
+        }
+    ]
+
+    class DummyRouter:
+        def execute(self, **kwargs):  # pragma: no cover - GET-only test stub
+            return {"ok": True}
+
+    server = DashboardServer(config=config, service=service, router=DummyRouter(), host="127.0.0.1", port=0)
+    server.start()
+    try:
+        port = server._httpd.server_address[1]  # type: ignore[union-attr]
+        with urlopen(f"http://127.0.0.1:{port}/api/queue", timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+    assert response.status == 200
+    assert payload["summary"]["total"] == 1
+    assert payload["rows"][0]["issue_id"] == "1201"
+    assert payload["views"][0]["id"] == "all"
+
+
+def test_dashboard_server_serves_issue_detail_endpoint(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="1202",
+        repo="owner/repo",
+        title="Blocked issue",
+        body="Validation:\n- pytest",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.set_healer_issue_state(
+        issue_id="1202",
+        state="blocked",
+        last_failure_class="tests_failed",
+        last_failure_reason="Pytest failed.",
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_1202_1",
+        issue_id="1202",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_1202_1",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={"failed_tests": 1},
+        verifier_summary={"status": "failed"},
+        failure_class="tests_failed",
+        failure_reason="Assertion failed",
+    )
+    store.close()
+
+    service.cached_status_rows = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        {
+            "repo": "demo",
+            "path": "/tmp/demo",
+            "paused": False,
+            "issues_total": 1,
+            "recent_attempts": [],
+            "issue_explanations": [
+                {
+                    "issue_id": "1202",
+                    "summary": "Validation failed on the last attempt.",
+                    "recommended_action": "inspect_issue_contract",
+                }
+            ],
+            "trust": {"state": "degraded", "summary": "Repo needs review."},
+            "policy": {"summary": "Inspect before retrying."},
+        }
+    ]
+
+    class DummyRouter:
+        def execute(self, **kwargs):  # pragma: no cover - GET-only test stub
+            return {"ok": True}
+
+    server = DashboardServer(config=config, service=service, router=DummyRouter(), host="127.0.0.1", port=0)
+    server.start()
+    try:
+        port = server._httpd.server_address[1]  # type: ignore[union-attr]
+        with urlopen(f"http://127.0.0.1:{port}/api/issue-detail?repo=demo&issue_id=1202", timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+    assert response.status == 200
+    assert payload["found"] is True
+    assert payload["issue"]["issue_id"] == "1202"
+    assert payload["attempts"][0]["attempt_id"] == "ha_1202_1"
+    assert payload["repo"]["name"] == "demo"
+
+
 def test_parse_log_activity_row_extracts_issue_and_attempt_metadata() -> None:
     row = _parse_log_activity_row(
         "[flow-healer.log] 2026-03-09 09:47:23 INFO apple_flow.healer_loop: Issue #576 attempt hat_d7008df1de failed in repo flow-healer on healer/issue-576-demo PR #580",
@@ -326,21 +686,24 @@ def test_render_dashboard_includes_activity_console_and_inspector(tmp_path: Path
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "Flow Healer Activity Console" in html
-    assert "Activity Table" in html
-    assert "openInspector(item.id)" in html
-    assert "Copy full text" in html
-    assert "/api/activity" not in html
+    assert "Linear-Light Cockpit" in html
+    assert "Issue Queue" in html
+    assert "openIssueDetail(" in html
+    assert "commandPaletteOpen" in html
+    assert "/api/queue" in html
+    assert "/api/issue-detail" in html
 
 
-def test_render_dashboard_uses_dedicated_log_feed_for_logs_tab(tmp_path: Path) -> None:
+def test_render_dashboard_uses_keyboard_navigation_and_palette_shortcuts(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "logEvents: []" in html
-    assert "if (this.kindFilter === 'log')" in html
-    assert "this.logEvents" in html
+    assert "@keydown.window.prevent.slash" in html
+    assert "@keydown.window.arrow-down.prevent" in html
+    assert "@keydown.window.arrow-up.prevent" in html
+    assert "@keydown.window.enter.prevent" in html
+    assert "toggleCommandPalette()" in html
 
 
 def test_render_dashboard_embeds_raw_json_in_initial_data_script(tmp_path: Path) -> None:
@@ -357,160 +720,41 @@ def test_render_dashboard_activity_rows_counter_binds_to_activity(tmp_path: Path
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "x-text='activity.length'" in html
+    assert "x-text='queueRows.length'" in html
 
 
-def test_render_dashboard_includes_repo_trust_surface(tmp_path: Path) -> None:
-    config, service = _make_service(tmp_path)
-
-    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
-        return [
-            {
-                "repo": "demo",
-                "path": "/tmp/demo",
-                "issues_total": 3,
-                "paused": False,
-                "recent_attempts": [],
-                "trust": {
-                    "state": "needs_environment_fix",
-                    "score": 24,
-                    "summary": "Connector and preflight signals show the repo is blocked on environment repair.",
-                    "why_runnable": "",
-                    "why_blocked": "The connector is unavailable in the current runtime.",
-                    "recommended_operator_action": "repair_environment",
-                    "dominant_failure_domain": "infra",
-                    "policy_outcome": "pause",
-                    "policy_recommendation": "repair_environment",
-                    "evidence": {"connector_available": False, "preflight_class": "blocked"},
-                },
-                "policy": {
-                    "outcome": "pause",
-                    "recommendation": "repair_environment",
-                    "reason_code": "environment_blocked",
-                    "summary": "Environment blockers should be fixed before any additional retries.",
-                    "evidence": {},
-                },
-            }
-        ]
-
-    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
-
-    html = _render_dashboard(config, service, notice="")
-
-    assert "Repo Trust" in html
-    assert "Operator recommendation" in html
-    assert "Policy outcome" in html
-    assert "trustBadgeClass(" in html
-    assert "row.trust.summary" in html
-    assert "row.trust.recommended_operator_action" in html
-    assert "row.trust.why_blocked" in html
-    assert "row.policy.summary" in html
-
-
-def test_render_dashboard_includes_issue_why_list(tmp_path: Path) -> None:
-    config, service = _make_service(tmp_path)
-
-    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
-        return [
-            {
-                "repo": "demo",
-                "path": "/tmp/demo",
-                "issues_total": 2,
-                "paused": False,
-                "recent_attempts": [],
-                "issue_explanations": [
-                    {
-                        "issue_id": "101",
-                        "state": "queued",
-                        "reason_code": "eligible",
-                        "summary": "Issue is queued and eligible for autonomous healing.",
-                        "recommended_action": "continue_autonomous_healing",
-                        "blocking": False,
-                        "evidence": {},
-                    }
-                ],
-                "trust": {
-                    "state": "ready",
-                    "score": 100,
-                    "summary": "Repo is ready for autonomous issue execution.",
-                    "why_runnable": "Repo is ready for autonomous issue execution.",
-                    "why_blocked": "",
-                    "recommended_operator_action": "continue_autonomous_healing",
-                    "dominant_failure_domain": "",
-                    "evidence": {},
-                },
-            }
-        ]
-
-    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
-
-    html = _render_dashboard(config, service, notice="")
-
-    assert "Issue Why / Why Not" in html
-    assert "row.issue_explanations" in html
-    assert "formatIssueReasonCode(" in html
-    assert "reasonBadgeClass(" in html
-
-
-def test_render_dashboard_includes_reliability_and_domain_metric_cards(tmp_path: Path) -> None:
+def test_render_dashboard_includes_saved_views_and_secondary_system_health(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "Canary First Pass" in html
-    assert "Canary No-op" in html
-    assert "Canary Wrong Root" in html
-    assert "Canary Mean TTVP" in html
-    assert "Swarm Domain Skips" in html
-    assert "Native Recovery" in html
-    assert "Needs Clarification" in html
-    assert "Failure Domain Infra" in html
-    assert "Failure Domain Contract" in html
-    assert "Retry Playbook Runs" in html
-    assert "Retry Hotspot" in html
-    assert "7d First-pass Delta" in html
-    assert "get canaryFirstPassRate()" in html
-    assert "get nativeRecoveryRate()" in html
-    assert "get retryPlaybookRuns()" in html
-    assert "get retryPlaybookHotspot()" in html
-    assert "get firstPassTrend7d()" in html
-    assert "x-text='activities.length'" not in html
+    assert "Saved Views" in html
+    assert "System Health" in html
+    assert "showSystemHealth" in html
+    assert "queueViews" in html
+    assert "selectView(" in html
 
 
-def test_render_dashboard_includes_gamification_cards_and_getters(tmp_path: Path) -> None:
+def test_render_dashboard_includes_issue_detail_tabs_and_actions(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "Flow Healer Progress" in html
-    assert "Agent Level" in html
-    assert "First-Pass Success" in html
-    assert "Current Success Streak" in html
-    assert "How points work" in html
-    assert "scoreboard.agent_points" in html
-    assert "scoreboard.current_success_streak" in html
+    assert "Issue Detail" in html
+    assert "Overview" in html
+    assert "Attempts" in html
+    assert "Validation" in html
+    assert "Activity" in html
+    assert "Actions" in html
+    assert "triggerAction(" in html
 
 
-def test_render_dashboard_includes_collapsible_telemetry_trends_and_svg_charts(tmp_path: Path) -> None:
+def test_render_dashboard_keeps_legacy_overview_payload_available(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "Telemetry Trends" in html
-    assert "showTelemetryCharts" in html
-    assert "First-pass vs Drift" in html
-    assert "Issue Outcomes" in html
-    assert "<svg" in html
-
-
-def test_render_dashboard_includes_collapsible_infra_ops_deep_dive(tmp_path: Path) -> None:
-    config, service = _make_service(tmp_path)
-
-    html = _render_dashboard(config, service, notice="")
-
-    assert "Infra/Ops Deep Dive" in html
-    assert "showAdvancedMetrics" in html
-    assert "@click='showAdvancedMetrics = !showAdvancedMetrics'" in html
+    assert "fetch('/api/overview'" in html
 
 
 def test_render_dashboard_includes_dark_light_theme_toggle_and_persistence(tmp_path: Path) -> None:
