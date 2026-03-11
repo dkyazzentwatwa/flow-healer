@@ -18,6 +18,20 @@ def test_add_accepts_stringable_values() -> None:
     assert add(DjangoStringable("2"), DjangoStringable("3")) == 5
 
 
+def test_add_accepts_numeric_string_wrappers_with_broken_int_conversion() -> None:
+    class DjangoBoundaryValue:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def __int__(self) -> int:
+            raise ValueError("boundary coercion failed")
+
+        def __str__(self) -> str:
+            return self.value
+
+    assert add(DjangoBoundaryValue("2"), DjangoBoundaryValue("3")) == 5
+
+
 def test_add_rejects_boolean_operands() -> None:
     with pytest.raises(TypeError):
         add(True, 2)
