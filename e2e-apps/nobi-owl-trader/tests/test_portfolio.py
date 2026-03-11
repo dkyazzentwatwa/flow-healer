@@ -450,6 +450,23 @@ class TestPositionUpdates:
         assert position.avg_entry_price == 50000.0
         assert position.side == "long"
 
+    def test_opening_buy_uses_total_cost_when_price_is_missing(self, trade_repo, portfolio_engine):
+        """Test a single-fill position falls back to stored cost basis without a quote."""
+        base_time = int(datetime.now().timestamp())
+
+        trade = create_trade("buy-1", "BTC/USDT", "buy", 1.0, 50000.0, base_time, fee=50.0)
+        trade_repo.create(trade)
+
+        portfolio_engine.update_positions_from_trade(trade)
+
+        position = portfolio_engine.position_repo.get_by_symbol("BTC/USDT")
+        assert position is not None
+        assert position.avg_entry_price == 50000.0
+        assert abs(position.total_cost - 50050.0) < 0.01
+
+        total_value = portfolio_engine.get_portfolio_value(0.0, {})
+        assert abs(total_value - 50050.0) < 0.01
+
     def test_add_to_existing_position(self, trade_repo, portfolio_engine):
         """Test adding to an existing position"""
         base_time = int(datetime.now().timestamp())

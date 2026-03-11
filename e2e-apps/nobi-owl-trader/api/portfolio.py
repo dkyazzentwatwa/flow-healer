@@ -230,7 +230,7 @@ class PortfolioEngine:
 
         for position in positions:
             if position.symbol not in current_prices:
-                position_value += position.avg_entry_price * position.amount
+                position_value += position.total_cost
                 continue
 
             current_price = current_prices[position.symbol]
