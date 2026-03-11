@@ -93,6 +93,7 @@ def test_get_portfolio_summary(client):
     # Check response structure
     assert "totalValue" in portfolio
     assert "cash" in portfolio
+    assert "positionsValue" in portfolio
     assert "unrealizedPnl" in portfolio
     assert "realizedPnl" in portfolio
     assert "timestamp" in portfolio
@@ -100,12 +101,14 @@ def test_get_portfolio_summary(client):
     # Check data types
     assert isinstance(portfolio["totalValue"], (int, float))
     assert isinstance(portfolio["cash"], (int, float))
+    assert isinstance(portfolio["positionsValue"], (int, float))
     assert isinstance(portfolio["unrealizedPnl"], (int, float))
     assert isinstance(portfolio["realizedPnl"], (int, float))
     assert isinstance(portfolio["timestamp"], int)
 
     # With no data, cash balance should be 10000.0
     assert portfolio["cash"] == 10000.0
+    assert portfolio["positionsValue"] == 0.0
 
 
 def test_get_portfolio_summary_with_data(client, setup_test_data, monkeypatch):
@@ -124,6 +127,7 @@ def test_get_portfolio_summary_with_data(client, setup_test_data, monkeypatch):
     # Should have realized P&L from the sell trade
     # Profit = (52000 - 50000) * 0.5 - fees = 1000 - 15 = 985
     assert data["portfolio"]["realizedPnl"] > 0
+    assert data["portfolio"]["positionsValue"] == 25000.0
 
 
 def test_get_positions_empty(client):
@@ -359,6 +363,7 @@ def test_portfolio_summary_sanitizes_non_finite_values(client, monkeypatch):
     portfolio = response.json()["portfolio"]
     assert portfolio["totalValue"] == 0.0
     assert portfolio["cash"] == 0.0
+    assert portfolio["positionsValue"] == 0.0
     assert portfolio["positions"] == 1
     assert portfolio["totalCost"] == 0.0
     assert portfolio["unrealizedPnl"] == 0.0
