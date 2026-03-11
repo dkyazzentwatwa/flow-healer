@@ -105,7 +105,7 @@ def _is_supported_integer_string(value: str) -> bool:
     return all(character.isdecimal() for character in unsigned_value)
 
 
-def _normalize_operand(value: int | str) -> int:
+def _normalize_operand(value: object) -> int:
     """Return a plain integer for supported smoke-test operands."""
     if isinstance(value, bool):
         return _normalize_bool_operand(value)
@@ -119,7 +119,7 @@ def _normalize_operand(value: int | str) -> int:
     if isinstance(value, str):
         return _normalize_string_operand(value)
 
-    raise _operand_type_error()
+    return _normalize_integral_operand(value)
 
 
 def _coerce_operands(left: int | str, right: int | str) -> tuple[int, int]:
