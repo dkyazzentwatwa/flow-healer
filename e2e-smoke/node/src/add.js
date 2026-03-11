@@ -224,10 +224,10 @@ export function add(...operands) {
   }
 
   if (operandCount === 1) {
-    return normalizeZero(normalizeOperand(operands[0]));
+    return normalizeZero(normalizeAddOperand(operands[0]));
   }
 
-  return sumOperands(operands.map(normalizeOperand));
+  return sumOperands(operands.map(normalizeAddOperand));
 }
 
 export default add;

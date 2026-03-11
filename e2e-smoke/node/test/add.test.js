@@ -308,6 +308,17 @@ test('add keeps existing single-value and empty-call behavior', () => {
   assert.equal(add(0n), 0n);
 });
 
+test('add normalizes object operands at the public entrypoint', () => {
+  const numericObject = {
+    valueOf() {
+      return 5;
+    },
+  };
+
+  assert.equal(add(numericObject), 5);
+  assert.equal(add(numericObject, 2), 7);
+});
+
 test('add rejects string-like operands for single-value calls', () => {
   const boxedString = vm.runInNewContext('Object("2")');
 
