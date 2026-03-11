@@ -587,6 +587,104 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
     <section class='mb-6'>
       <div class='mb-3 flex items-center justify-between'>
+        <h2 class='text-sm font-semibold uppercase tracking-[0.24em] text-slate-300'>Repo Trust</h2>
+        <p class='text-xs text-slate-400'>One contract for trust state, score, rationale, and the next operator move.</p>
+      </div>
+      <div class='grid grid-cols-1 gap-4 xl:grid-cols-2'>
+        <template x-for='row in rows' :key='`trust-${{row.repo || "unknown"}}`'>
+          <article class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-5 shadow-glow backdrop-blur'>
+            <div class='flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between'>
+              <div>
+                <div class='text-[11px] uppercase tracking-[0.24em] text-slate-500'>Repo</div>
+                <h3 class='mt-2 text-lg font-semibold text-white' x-text='row.repo || "Unknown repo"'></h3>
+                <p class='mt-2 text-sm text-slate-300' x-text='row.trust && row.trust.summary ? row.trust.summary : "Trust signals have not been computed yet."'></p>
+              </div>
+              <div class='flex flex-wrap items-center gap-2'>
+                <span class='rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='trustBadgeClass(row.trust && row.trust.state ? row.trust.state : "")' x-text='formatTrustState(row.trust && row.trust.state ? row.trust.state : "")'></span>
+                <span class='rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-300'>
+                  Score <span class='font-semibold text-white' x-text='row.trust && Number.isFinite(Number(row.trust.score)) ? Number(row.trust.score) : 0'></span>
+                </span>
+              </div>
+            </div>
+
+            <div class='mt-4 grid grid-cols-1 gap-3 lg:grid-cols-4'>
+              <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Operator recommendation</div>
+                <div class='mt-2 text-sm font-medium text-cyan-100' x-text='row.trust && row.trust.recommended_operator_action ? row.trust.recommended_operator_action : "observe_repo"'></div>
+              </div>
+              <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Policy outcome</div>
+                <div class='mt-2 text-sm font-medium text-amber-100' x-text='row.policy && row.policy.outcome ? row.policy.outcome : (row.trust && row.trust.policy_outcome ? row.trust.policy_outcome : "retry")'></div>
+              </div>
+              <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Dominant failure domain</div>
+                <div class='mt-2 text-sm font-medium text-white' x-text='row.trust && row.trust.dominant_failure_domain ? row.trust.dominant_failure_domain : "none"'></div>
+              </div>
+              <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Open issues</div>
+                <div class='mt-2 text-sm font-medium text-white' x-text='row.issues_total || 0'></div>
+              </div>
+            </div>
+
+            <div class='mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2'>
+              <div class='rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Why blocked</div>
+                <p class='mt-2 text-sm text-slate-200' x-text='row.trust && row.trust.why_blocked ? row.trust.why_blocked : "No active blocker is recorded."'></p>
+              </div>
+              <div class='rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Why runnable</div>
+                <p class='mt-2 text-sm text-slate-200' x-text='row.trust && row.trust.why_runnable ? row.trust.why_runnable : "No runnable rationale is currently exposed."'></p>
+              </div>
+              <div class='rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 lg:col-span-2'>
+                <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500'>Policy summary</div>
+                <p class='mt-2 text-sm text-slate-200' x-text='row.policy && row.policy.summary ? row.policy.summary : "No policy summary is currently exposed."'></p>
+              </div>
+            </div>
+          </article>
+        </template>
+      </div>
+    </section>
+
+    <section class='mb-6'>
+      <div class='mb-3 flex items-center justify-between'>
+        <h2 class='text-sm font-semibold uppercase tracking-[0.24em] text-slate-300'>Issue Why / Why Not</h2>
+        <p class='text-xs text-slate-400'>Per-issue reason codes and next actions derived from current issue state and repo trust.</p>
+      </div>
+      <div class='grid grid-cols-1 gap-4 xl:grid-cols-2'>
+        <template x-for='row in rows' :key='`issue-why-${{row.repo || "unknown"}}`'>
+          <article class='rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-5 shadow-glow backdrop-blur'>
+            <div class='flex items-center justify-between gap-3'>
+              <div>
+                <div class='text-[11px] uppercase tracking-[0.24em] text-slate-500'>Repo</div>
+                <h3 class='mt-2 text-lg font-semibold text-white' x-text='row.repo || "Unknown repo"'></h3>
+              </div>
+              <span class='rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-300'>
+                Items <span class='font-semibold text-white' x-text='(row.issue_explanations || []).length'></span>
+              </span>
+            </div>
+
+            <div class='mt-4 space-y-3' x-show='(row.issue_explanations || []).length'>
+              <template x-for='item in (row.issue_explanations || [])' :key='`issue-expl-${{row.repo || "unknown"}}-${{item.issue_id || item.reason_code || "item"}}`'>
+                <div class='rounded-2xl border border-white/10 bg-slate-950/35 px-4 py-3'>
+                  <div class='flex flex-wrap items-center gap-2'>
+                    <span class='rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-slate-100' x-text='item.issue_id ? `#${{item.issue_id}}` : "Issue"'></span>
+                    <span class='rounded-full border px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em]' :class='reasonBadgeClass(item.reason_code || "")' x-text='formatIssueReasonCode(item.reason_code || "")'></span>
+                    <span class='rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-300' x-text='item.state || "unknown"'></span>
+                  </div>
+                  <p class='mt-3 text-sm text-slate-200' x-text='item.summary || "No issue-level explanation is recorded."'></p>
+                  <div class='mt-3 text-[11px] uppercase tracking-[0.2em] text-slate-500'>Recommended action</div>
+                  <p class='mt-1 text-sm font-medium text-cyan-100' x-text='item.recommended_action || "observe_issue"'></p>
+                </div>
+              </template>
+            </div>
+            <p class='mt-4 text-sm text-slate-400' x-show='!(row.issue_explanations || []).length'>No tracked issues currently need an issue-level explanation.</p>
+          </article>
+        </template>
+      </div>
+    </section>
+
+    <section class='mb-6'>
+      <div class='mb-3 flex items-center justify-between'>
         <h2 class='text-sm font-semibold uppercase tracking-[0.24em] text-slate-300'>Repo Controls</h2>
         <p class='text-xs text-slate-400'>Inline ops stay available, but the main surface now prioritizes investigation.</p>
       </div>
@@ -1017,6 +1115,46 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           if (['running', 'pending'].includes(lower)) return 'border-amber-300/30 bg-amber-400/10 text-amber-100';
           if (['ok', 'completed'].includes(lower)) return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-100';
           return 'border-white/10 bg-white/5 text-slate-200';
+        }},
+
+        trustBadgeClass(state) {{
+          const lower = String(state || '').toLowerCase();
+          if (lower === 'ready') return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-100';
+          if (lower === 'degraded') return 'border-amber-300/30 bg-amber-400/10 text-amber-100';
+          if (lower === 'paused') return 'border-slate-300/30 bg-slate-400/10 text-slate-100';
+          if (lower === 'quarantined') return 'border-rose-300/30 bg-rose-400/10 text-rose-100';
+          if (lower === 'needs_environment_fix') return 'border-orange-300/30 bg-orange-400/10 text-orange-100';
+          if (lower === 'needs_contract_fix') return 'border-fuchsia-300/30 bg-fuchsia-400/10 text-fuchsia-100';
+          return 'border-white/10 bg-white/5 text-slate-200';
+        }},
+
+        reasonBadgeClass(code) {{
+          const lower = String(code || '').toLowerCase();
+          if (['eligible', 'actively_processing', 'resolved', 'pr_open', 'awaiting_pr_approval'].includes(lower)) {{
+            return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-100';
+          }}
+          if (['repo_paused', 'circuit_breaker_open', 'environment_blocked', 'needs_clarification', 'backoff_active', 'last_attempt_failed'].includes(lower)) {{
+            return 'border-amber-300/30 bg-amber-400/10 text-amber-100';
+          }}
+          return 'border-white/10 bg-white/5 text-slate-200';
+        }},
+
+        formatTrustState(state) {{
+          const lower = String(state || '').trim().toLowerCase();
+          if (!lower) return 'Unknown';
+          return lower
+            .split('_')
+            .map((part) => part ? `${{part.charAt(0).toUpperCase()}}${{part.slice(1)}}` : '')
+            .join(' ');
+        }},
+
+        formatIssueReasonCode(code) {{
+          const lower = String(code || '').trim().toLowerCase();
+          if (!lower) return 'Unknown';
+          return lower
+            .split('_')
+            .map((part) => part ? `${{part.charAt(0).toUpperCase()}}${{part.slice(1)}}` : '')
+            .join(' ');
         }},
 
         matchesSignalFilter(item, filterValue) {{

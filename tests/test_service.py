@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 from flow_healer.claude_cli_connector import ClaudeCliConnector
@@ -12,6 +14,537 @@ from flow_healer.kilo_cli_connector import KiloCliConnector
 from flow_healer.local_healer_tracker import LocalHealerTracker
 from flow_healer.service import FlowHealerService
 from flow_healer.store import SQLiteStore
+
+
+def _make_demo_service(tmp_path, **repo_overrides) -> FlowHealerService:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    _init_git_repo(repo_path)
+    state_root = tmp_path / "state"
+    repo_settings = {
+        "repo_name": "demo",
+        "healer_repo_path": str(repo_path),
+        "healer_repo_slug": "owner/repo",
+    }
+    repo_settings.update(repo_overrides)
+    return FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[RelaySettings(**repo_settings)],
+        )
+    )
+
+
+def _cache_preflight_report(
+    runtime,
+    *,
+    gate_mode: str = "local_then_docker",
+    language: str = "node",
+    execution_root: str = "e2e-smoke/node",
+    status: str = "ready",
+    failure_class: str = "",
+    summary: str = "Preflight passed",
+) -> None:
+    runtime.store.set_state(
+        preflight_cache_key(gate_mode=gate_mode, language=language, execution_root=execution_root),
+        json.dumps(
+            {
+                "checked_at": "2026-03-06 20:00:00",
+                "execution_root": execution_root,
+                "failure_class": failure_class,
+                "gate_mode": gate_mode,
+                "language": language,
+                "output_tail": "",
+                "status": status,
+                "summary": summary,
+                "test_summary": {"failed_tests": 0},
+            },
+            sort_keys=True,
+        ),
+    )
+
+
+def _init_git_repo(repo_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "checkout", "-B", "main"], cwd=repo_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "flow-healer-tests@example.com"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Flow Healer Tests"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo_path / "README.md").write_text("demo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_path, check=True, capture_output=True, text=True)
+
+
+def _set_github_token(monkeypatch, service: FlowHealerService) -> None:
+    monkeypatch.setenv(service.config.service.github_token_env, "test-token")
+
+
+def _assert_trust_contract(trust: dict[str, object]) -> None:
+    assert set(trust.keys()) == {
+        "state",
+        "score",
+        "summary",
+        "why_runnable",
+        "why_blocked",
+        "recommended_operator_action",
+        "dominant_failure_domain",
+        "policy_outcome",
+        "policy_recommendation",
+        "evidence",
+    }
+    assert isinstance(trust["score"], int)
+    assert isinstance(trust["summary"], str)
+    assert isinstance(trust["why_runnable"], str)
+    assert isinstance(trust["why_blocked"], str)
+    assert isinstance(trust["recommended_operator_action"], str)
+    assert isinstance(trust["dominant_failure_domain"], str)
+    assert isinstance(trust["policy_outcome"], str)
+    assert isinstance(trust["policy_recommendation"], str)
+    assert isinstance(trust["evidence"], dict)
+
+
+def _assert_policy_contract(policy: dict[str, object]) -> None:
+    assert set(policy.keys()) == {
+        "outcome",
+        "recommendation",
+        "reason_code",
+        "summary",
+        "evidence",
+    }
+    assert isinstance(policy["outcome"], str)
+    assert isinstance(policy["recommendation"], str)
+    assert isinstance(policy["reason_code"], str)
+    assert isinstance(policy["summary"], str)
+    assert isinstance(policy["evidence"], dict)
+
+
+def test_status_rows_report_ready_trust_payload(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+
+    rows = service.status_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "ready"
+    assert trust["score"] == 100
+    assert trust["why_runnable"]
+    assert trust["why_blocked"] == ""
+    assert trust["recommended_operator_action"] == "continue_autonomous_healing"
+    assert trust["dominant_failure_domain"] == ""
+    assert trust["policy_outcome"] == "retry"
+    assert trust["policy_recommendation"] == "continue_autonomous_healing"
+
+
+def test_status_rows_report_paused_trust_payload(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_state("healer_paused", "true")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "paused"
+    assert trust["why_blocked"]
+    assert trust["recommended_operator_action"] == "resume_repo"
+    assert trust["policy_outcome"] == "pause"
+    assert trust["policy_recommendation"] == "resume_repo"
+
+
+def test_status_rows_report_quarantined_trust_payload_when_breaker_open(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(
+        tmp_path,
+        healer_circuit_breaker_window=5,
+        healer_circuit_breaker_failure_rate=0.5,
+        healer_circuit_breaker_cooldown_seconds=300,
+    )
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="1",
+        repo="owner/repo",
+        title="Issue 1",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    for idx in range(5):
+        runtime.store.create_healer_attempt(
+            attempt_id=f"ha_breaker_{idx}",
+            issue_id="1",
+            attempt_no=idx + 1,
+            state="running",
+            prediction_source="path_level",
+            predicted_lock_set=["repo:*"],
+        )
+        runtime.store.finish_healer_attempt(
+            attempt_id=f"ha_breaker_{idx}",
+            state="failed",
+            actual_diff_set=[],
+            test_summary={},
+            verifier_summary={},
+            failure_class="tests_failed",
+            failure_reason="Targeted sandbox validation failed.",
+        )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "quarantined"
+    assert trust["score"] == 0
+    assert trust["why_blocked"]
+    assert trust["recommended_operator_action"] == "inspect_circuit_breaker"
+    assert trust["policy_outcome"] == "quarantine"
+    assert trust["policy_recommendation"] == "inspect_circuit_breaker"
+
+
+def test_status_rows_report_environment_fix_trust_payload_for_blocked_preflight(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path, healer_test_gate_mode="docker_only")
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    _cache_preflight_report(
+        runtime,
+        gate_mode="docker_only",
+        status="failed",
+        failure_class="tool_missing",
+        summary="Preflight requires `pnpm` but it is not available in PATH.",
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "needs_environment_fix"
+    assert trust["why_blocked"]
+    assert trust["recommended_operator_action"] == "repair_environment"
+    assert trust["policy_outcome"] == "pause"
+    assert trust["policy_recommendation"] == "repair_environment"
+
+
+def test_status_rows_report_contract_fix_trust_payload_for_needs_clarification(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="7",
+        repo="owner/repo",
+        title="Issue 7",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.set_healer_issue_state(issue_id="7", state="needs_clarification")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "needs_contract_fix"
+    assert trust["why_blocked"]
+    assert trust["recommended_operator_action"] == "tighten_issue_contract"
+    assert trust["policy_outcome"] == "require_human_fix"
+    assert trust["policy_recommendation"] == "tighten_issue_contract"
+
+
+def test_status_rows_include_why_for_queued_issue_ready_to_run(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="11",
+        repo="owner/repo",
+        title="Issue 11",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.set_healer_issue_state(issue_id="11", state="queued")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    issue_reason = rows[0]["issue_explanations"][0]
+    assert issue_reason["issue_id"] == "11"
+    assert issue_reason["reason_code"] == "eligible"
+    assert issue_reason["blocking"] is False
+    assert issue_reason["recommended_action"] == "continue_autonomous_healing"
+    assert "queued" in issue_reason["summary"].lower()
+
+
+def test_status_rows_include_why_for_needs_clarification_issue(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="12",
+        repo="owner/repo",
+        title="Issue 12",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.set_healer_issue_state(issue_id="12", state="needs_clarification")
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    issue_reason = rows[0]["issue_explanations"][0]
+    assert issue_reason["issue_id"] == "12"
+    assert issue_reason["reason_code"] == "needs_clarification"
+    assert issue_reason["blocking"] is True
+    assert issue_reason["recommended_action"] == "tighten_issue_contract"
+    assert "structured" in issue_reason["summary"].lower()
+
+
+def test_status_rows_surface_pause_policy_for_infra_heavy_repo(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_states(
+        {
+            "healer_failure_domain_total": "8",
+            "healer_failure_domain_infra": "6",
+            "healer_failure_domain_contract": "1",
+            "healer_failure_domain_code": "1",
+            "healer_retry_playbook_total": "8",
+            "healer_retry_playbook_domain_infra": "6",
+            "healer_retry_playbook_domain_contract": "1",
+            "healer_retry_playbook_domain_code": "1",
+            "healer_retry_playbook_last_strategy": "always_requeue_infra",
+            "healer_infra_pause_until": "2099-01-01 00:00:00",
+            "healer_infra_pause_reason": "infra_pause: docker daemon unavailable",
+        }
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    policy = rows[0]["policy"]
+    _assert_policy_contract(policy)
+    assert policy["outcome"] == "pause"
+    assert policy["recommendation"] == "repair_environment"
+    assert policy["reason_code"] == "infra_pause_active"
+    assert rows[0]["trust"]["policy_outcome"] == "pause"
+
+
+def test_status_rows_surface_require_human_fix_for_contract_heavy_repo(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_states(
+        {
+            "healer_failure_domain_total": "10",
+            "healer_failure_domain_contract": "7",
+            "healer_failure_domain_code": "2",
+            "healer_failure_domain_unknown": "1",
+            "healer_retry_playbook_total": "10",
+            "healer_retry_playbook_domain_contract": "7",
+            "healer_retry_playbook_domain_code": "2",
+            "healer_retry_playbook_domain_unknown": "1",
+            "healer_retry_playbook_class_no_patch": "4",
+            "healer_retry_playbook_class_scope_violation": "3",
+            "healer_retry_playbook_last_failure_domain": "contract",
+            "healer_retry_playbook_last_strategy": "adaptive_failure_strategy",
+        }
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    policy = rows[0]["policy"]
+    _assert_policy_contract(policy)
+    assert policy["outcome"] == "require_human_fix"
+    assert policy["recommendation"] == "tighten_issue_contract"
+    assert policy["reason_code"] == "contract_failures_dominate"
+    assert rows[0]["trust"]["policy_recommendation"] == "tighten_issue_contract"
+
+
+def test_status_rows_surface_require_human_fix_for_repeated_no_op_failures(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="91",
+        repo="owner/repo",
+        title="Issue 91",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    for idx, failure_class in enumerate(["no_patch", "no_workspace_change", "empty_diff", "tests_failed"], start=1):
+        attempt_id = f"ha_noop_{idx}"
+        runtime.store.create_healer_attempt(
+            attempt_id=attempt_id,
+            issue_id="91",
+            attempt_no=idx,
+            state="running",
+            prediction_source="path_level",
+            predicted_lock_set=["repo:*"],
+        )
+        runtime.store.finish_healer_attempt(
+            attempt_id=attempt_id,
+            state="failed",
+            actual_diff_set=[],
+            test_summary={},
+            verifier_summary={},
+            failure_class=failure_class,
+            failure_reason=f"{failure_class} failed",
+        )
+    runtime.store.set_states(
+        {
+            "healer_retry_playbook_total": "4",
+            "healer_retry_playbook_domain_contract": "3",
+            "healer_retry_playbook_domain_code": "1",
+            "healer_retry_playbook_class_no_patch": "2",
+            "healer_retry_playbook_class_empty_diff": "1",
+        }
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    policy = rows[0]["policy"]
+    _assert_policy_contract(policy)
+    assert policy["outcome"] == "require_human_fix"
+    assert policy["recommendation"] == "tighten_issue_contract"
+    assert policy["reason_code"] == "no_op_rate_high"
+
+
+def test_status_rows_surface_require_human_fix_for_wrong_root_failures(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="92",
+        repo="owner/repo",
+        title="Issue 92",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    for idx, source in enumerate(["fallback", "unknown", "language_default", "workspace_hint"], start=1):
+        attempt_id = f"ha_root_{idx}"
+        runtime.store.create_healer_attempt(
+            attempt_id=attempt_id,
+            issue_id="92",
+            attempt_no=idx,
+            state="running",
+            prediction_source="path_level",
+            predicted_lock_set=["repo:*"],
+        )
+        runtime.store.finish_healer_attempt(
+            attempt_id=attempt_id,
+            state="failed",
+            actual_diff_set=[],
+            test_summary={"execution_root_source": source},
+            verifier_summary={},
+            failure_class="language_unresolved" if source == "unknown" else "tests_failed",
+            failure_reason=f"{source} execution root failed",
+        )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    policy = rows[0]["policy"]
+    _assert_policy_contract(policy)
+    assert policy["outcome"] == "require_human_fix"
+    assert policy["recommendation"] == "strengthen_execution_root_hints"
+    assert policy["reason_code"] == "wrong_root_rate_high"
+
+
+def test_doctor_rows_report_trust_payload(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path, healer_test_gate_mode="docker_only")
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    _cache_preflight_report(
+        runtime,
+        gate_mode="docker_only",
+        status="failed",
+        failure_class="tool_missing",
+        summary="Preflight requires `pnpm` but it is not available in PATH.",
+    )
+    runtime.store.close()
+
+    rows = service.doctor_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "needs_environment_fix"
+    assert trust["recommended_operator_action"] == "repair_environment"
+
+
+def test_status_rows_do_not_report_ready_when_repo_path_or_token_is_missing(tmp_path, monkeypatch) -> None:
+    missing_repo_path = tmp_path / "missing-repo"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(tmp_path / "state")),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(missing_repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    monkeypatch.delenv(service.config.service.github_token_env, raising=False)
+
+    rows = service.status_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "needs_environment_fix"
+    assert trust["why_blocked"]
+    assert trust["recommended_operator_action"] == "repair_environment"
+
+
+def test_doctor_rows_do_not_report_ready_when_repo_path_or_token_is_missing(tmp_path, monkeypatch) -> None:
+    missing_repo_path = tmp_path / "missing-repo"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(tmp_path / "state")),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(missing_repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    monkeypatch.delenv(service.config.service.github_token_env, raising=False)
+
+    rows = service.doctor_rows("demo")
+
+    trust = rows[0]["trust"]
+    _assert_trust_contract(trust)
+    assert trust["state"] == "needs_environment_fix"
+    assert trust["why_blocked"]
+    assert trust["recommended_operator_action"] == "repair_environment"
 
 
 def test_status_rows_report_circuit_breaker_state(tmp_path) -> None:
@@ -936,3 +1469,50 @@ def test_status_rows_report_issue_outcome_metrics(tmp_path) -> None:
         "success",
         "failure",
     ]
+
+
+def test_status_rows_surface_phased_validation_state_from_recent_attempts(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="301",
+        repo="owner/repo",
+        title="Issue 301",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_301_1",
+        issue_id="301",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_301_1",
+        state="pr_open",
+        actual_diff_set=[],
+        test_summary={
+            "validation_lane": "fast_then_full",
+            "promotion_state": "promotion_ready",
+            "phase_states": {
+                "fast_pass": True,
+                "full_pass": True,
+                "promotion_ready": True,
+                "merge_blocked": False,
+            },
+        },
+        verifier_summary={},
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    attempt = rows[0]["recent_attempts"][0]
+    assert attempt["validation_lane"] == "fast_then_full"
+    assert attempt["promotion_state"] == "promotion_ready"
+    assert attempt["phase_states"]["promotion_ready"] is True

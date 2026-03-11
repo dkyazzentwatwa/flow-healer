@@ -1,4 +1,9 @@
-from flow_healer.healer_task_spec import compile_task_spec, task_spec_to_prompt_block, _is_code_path
+from flow_healer.healer_task_spec import (
+    compile_task_spec,
+    lint_issue_contract,
+    task_spec_to_prompt_block,
+    _is_code_path,
+)
 from flow_healer.language_strategies import UnsupportedLanguageError, ensure_supported_language
 
 
@@ -154,6 +159,65 @@ def test_compile_task_spec_marks_input_spec_only_markdown_as_context_not_target(
     assert spec.output_targets == ()
     assert spec.input_context_paths == ("research-notes.md",)
     assert spec.validation_profile == "code_change"
+
+
+def test_lint_issue_contract_strict_mode_requires_code_outputs_and_validation() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix flaky parser",
+        issue_body="Task kind: fix\nPlease tighten the parser behavior.",
+    )
+
+    lint = lint_issue_contract(
+        issue_title="Fix flaky parser",
+        issue_body="Task kind: fix\nPlease tighten the parser behavior.",
+        task_spec=spec,
+        contract_mode="strict",
+        parse_confidence_threshold=0.3,
+    )
+
+    assert lint.reason_codes == (
+        "missing_required_outputs",
+        "missing_validation",
+    )
+
+
+def test_lint_issue_contract_reports_ambiguous_execution_root_for_multiple_sandboxes() -> None:
+    issue_body = (
+        "Required code outputs:\n"
+        "- e2e-smoke/node/src/app.js\n"
+        "- e2e-smoke/python/app/main.py\n"
+    )
+    spec = compile_task_spec(
+        issue_title="Fix two smoke fixtures",
+        issue_body=issue_body,
+    )
+
+    lint = lint_issue_contract(
+        issue_title="Fix two smoke fixtures",
+        issue_body=issue_body,
+        task_spec=spec,
+        contract_mode="lenient",
+        parse_confidence_threshold=0.3,
+    )
+
+    assert lint.reason_codes == ("ambiguous_execution_root",)
+
+
+def test_lint_issue_contract_does_not_require_validation_for_artifact_only_issue() -> None:
+    spec = compile_task_spec(
+        issue_title="Document the runtime trust states",
+        issue_body="Write docs/runtime-trust-states.md with operator guidance.",
+    )
+
+    lint = lint_issue_contract(
+        issue_title="Document the runtime trust states",
+        issue_body="Write docs/runtime-trust-states.md with operator guidance.",
+        task_spec=spec,
+        contract_mode="strict",
+        parse_confidence_threshold=0.3,
+    )
+
+    assert lint.reason_codes == ()
 
 
 def test_compile_task_spec_honors_task_contract_kind_hint() -> None:

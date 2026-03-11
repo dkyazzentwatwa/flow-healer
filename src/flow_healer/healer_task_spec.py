@@ -22,6 +22,16 @@ class HealerTaskSpec:
     parse_confidence: float = 1.0
 
 
+@dataclass(slots=True, frozen=True)
+class IssueContractLint:
+    reason_codes: tuple[str, ...]
+    suggested_execution_root: str = ""
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.reason_codes
+
+
 _EXPLICIT_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html|go|rs|rb|java|kt|scala|swift|c|cpp|h|hpp|gradle|kts|sql))"
@@ -211,6 +221,41 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         execution_root=inferred_execution_root,
         validation_commands=validation_commands,
         parse_confidence=parse_confidence,
+    )
+
+
+def lint_issue_contract(
+    *,
+    issue_title: str,
+    issue_body: str,
+    task_spec: HealerTaskSpec,
+    contract_mode: str,
+    parse_confidence_threshold: float,
+) -> IssueContractLint:
+    reasons: list[str] = []
+    threshold = max(0.0, min(1.0, float(parse_confidence_threshold)))
+    if float(task_spec.parse_confidence) < threshold:
+        reasons.append("low_confidence")
+
+    requires_code_contract = str(task_spec.validation_profile or "") != "artifact_only"
+    if str(contract_mode or "").strip().lower() == "strict" and requires_code_contract:
+        if not task_spec.output_targets:
+            reasons.append("missing_required_outputs")
+        if not task_spec.validation_commands:
+            reasons.append("missing_validation")
+
+    suggested_execution_root = _suggest_execution_root(task_spec)
+    if (
+        requires_code_contract
+        and not task_spec.execution_root
+        and suggested_execution_root
+        and len(_sandbox_roots_from_targets(task_spec.output_targets)) > 1
+    ):
+        reasons.append("ambiguous_execution_root")
+
+    return IssueContractLint(
+        reason_codes=tuple(reasons),
+        suggested_execution_root=suggested_execution_root,
     )
 
 
@@ -475,10 +520,15 @@ def _infer_execution_root(
         if cd_root:
             return cd_root
 
-    for directory in explicit_directories:
-        normalized = _normalize_known_sandbox_root(directory)
-        if normalized:
-            return normalized
+    explicit_roots = {
+        normalized
+        for directory in explicit_directories
+        if (normalized := _normalize_known_sandbox_root(directory))
+    }
+    if len(explicit_roots) == 1:
+        return next(iter(explicit_roots))
+    if len(explicit_roots) > 1:
+        return ""
 
     sandbox_roots = {
         normalized
@@ -487,6 +537,26 @@ def _infer_execution_root(
     }
     if len(sandbox_roots) == 1:
         return next(iter(sandbox_roots))
+    return ""
+
+
+def _sandbox_roots_from_targets(output_targets: tuple[str, ...]) -> tuple[str, ...]:
+    roots = {
+        normalized
+        for target in output_targets
+        if (normalized := _normalize_known_sandbox_root(target))
+    }
+    return tuple(sorted(roots))
+
+
+def _suggest_execution_root(task_spec: HealerTaskSpec) -> str:
+    if task_spec.execution_root:
+        return str(task_spec.execution_root)
+    roots = _sandbox_roots_from_targets(task_spec.output_targets)
+    if len(roots) == 1:
+        return roots[0]
+    if roots:
+        return roots[0]
     return ""
 
 

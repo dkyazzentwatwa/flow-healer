@@ -1,0 +1,122 @@
+name: 02 Lint Issue Contract
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+      - labeled
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  lint_contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Fetch issue payload
+        id: issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue view "${ISSUE_NUMBER}" --json title,body,labels > issue.json
+          jq -r '.title' issue.json > issue_title.txt
+          jq -r '.body // ""' issue.json > issue_body.md
+          if jq -e '[.labels[].name] | index("healer:ready")' issue.json >/dev/null; then
+            echo "lint_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lint_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Lint issue contract
+        if: steps.issue.outputs.lint_enabled == 'true'
+        id: lint
+        continue-on-error: true
+        run: |
+          python scripts/lint_issue_contract.py \
+            --title "$(cat issue_title.txt)" \
+            --body-file issue_body.md \
+            --contract-mode strict \
+            --parse-confidence-threshold 0.3 \
+            --json-output issue-contract-lint.json \
+            --comment-output issue-contract-comment.md
+
+      - name: Clear remediation comment when issue leaves healer-ready queue
+        if: steps.issue.outputs.lint_enabled != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          marker='<!-- flow-healer-contract-lint -->'
+          comment_id="$(
+            gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+              | jq -r --arg marker "${marker}" '[.[] | select((.body // "") | contains($marker))][0].id // empty'
+          )"
+          if [[ -n "${comment_id}" ]]; then
+            gh api "repos/${REPO}/issues/comments/${comment_id}" --method DELETE >/dev/null
+          fi
+
+      - name: Post remediation comment when invalid
+        if: steps.issue.outputs.lint_enabled == 'true' && steps.lint.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          marker='<!-- flow-healer-contract-lint -->'
+          comment_id="$(
+            gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+              | jq -r --arg marker "${marker}" '[.[] | select((.body // "") | contains($marker))][0].id // empty'
+          )"
+          if [[ -n "${comment_id}" ]]; then
+            gh api "repos/${REPO}/issues/comments/${comment_id}" \
+              --method PATCH \
+              -f body="$(cat issue-contract-comment.md)" >/dev/null
+          else
+            gh issue comment "${ISSUE_NUMBER}" --body-file issue-contract-comment.md >/dev/null
+          fi
+
+      - name: Clear stale remediation comment when valid
+        if: steps.issue.outputs.lint_enabled == 'true' && steps.lint.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          marker='<!-- flow-healer-contract-lint -->'
+          comment_id="$(
+            gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+              | jq -r --arg marker "${marker}" '[.[] | select((.body // "") | contains($marker))][0].id // empty'
+          )"
+          if [[ -n "${comment_id}" ]]; then
+            gh api "repos/${REPO}/issues/comments/${comment_id}" --method DELETE >/dev/null
+          fi
+
+      - name: Upload lint artifacts
+        if: steps.issue.outputs.lint_enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-contract-lint-${{ github.event.issue.number }}
+          path: |
+            issue-contract-lint.json
+            issue-contract-comment.md

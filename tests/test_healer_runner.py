@@ -91,6 +91,92 @@ def test_run_test_gates_runs_local_then_docker(monkeypatch):
     assert summary["local_targeted_exit_code"] == 0
     assert summary["docker_full_exit_code"] == 0
     assert summary["failed_tests"] == 0
+    assert summary["validation_lane"] == "fast_then_full"
+    assert summary["promotion_state"] == "promotion_ready"
+    assert summary["phase_states"] == {
+        "fast_pass": True,
+        "full_pass": True,
+        "promotion_ready": True,
+        "merge_blocked": False,
+    }
+
+
+def test_run_test_gates_marks_full_only_lane_when_no_targeted_tests(monkeypatch, tmp_path):
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        calls.append(("local", command))
+        return {"exit_code": 0, "output_tail": "local ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=[],
+        timeout_seconds=30,
+        mode="local_only",
+        resolved_execution=ResolvedExecution(
+            language_detected="python",
+            language_effective="python",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=tmp_path,
+            strategy=get_strategy("python"),
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [("local", ["pytest", "-q"])]
+    assert summary["validation_lane"] == "full_only"
+    assert summary["promotion_state"] == "promotion_ready"
+    assert summary["phase_states"] == {
+        "fast_pass": False,
+        "full_pass": True,
+        "promotion_ready": True,
+        "merge_blocked": False,
+    }
+
+
+def test_run_test_gates_marks_merge_blocked_when_fast_pass_fails(monkeypatch, tmp_path):
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_local(workspace: Path, command: list[str], timeout_seconds: int, **kwargs):
+        calls.append(("local", command))
+        if command[-1] == "tests/test_demo.py":
+            return {"exit_code": 1, "output_tail": "targeted failed", "gate_status": "failed", "gate_reason": ""}
+        return {"exit_code": 0, "output_tail": "full ok", "gate_status": "passed", "gate_reason": ""}
+
+    monkeypatch.setattr("flow_healer.healer_runner._run_tests_locally", fake_local)
+
+    summary = _run_test_gates(
+        tmp_path,
+        targeted_tests=["tests/test_demo.py"],
+        timeout_seconds=30,
+        mode="local_only",
+        resolved_execution=ResolvedExecution(
+            language_detected="python",
+            language_effective="python",
+            execution_root="",
+            execution_root_source="repo",
+            execution_path=tmp_path,
+            strategy=get_strategy("python"),
+        ),
+        local_gate_policy="auto",
+    )
+
+    assert calls == [
+        ("local", ["pytest", "-q", "tests/test_demo.py"]),
+        ("local", ["pytest", "-q"]),
+    ]
+    assert summary["failed_tests"] == 1
+    assert summary["validation_lane"] == "fast_then_full"
+    assert summary["promotion_state"] == "merge_blocked"
+    assert summary["phase_states"] == {
+        "fast_pass": False,
+        "full_pass": True,
+        "promotion_ready": False,
+        "merge_blocked": True,
+    }
 
 
 def test_run_test_gates_prefers_explicit_validation_commands(monkeypatch, tmp_path):
