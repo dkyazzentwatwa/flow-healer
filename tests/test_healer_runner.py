@@ -3685,7 +3685,11 @@ def test_run_attempt_does_not_require_runtime_for_artifact_requirements_alone(tm
     )
     connector = _RetryConnector([good_patch])
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
-    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 0,
+        "promotion_state": "promotion_ready",
+        "phase_states": {"promotion_ready": True, "merge_blocked": False},
+    }
 
     result = runner.run_attempt(
         issue_id="app-104",
@@ -3747,7 +3751,11 @@ def test_run_attempt_detects_shutdown_generated_artifacts_from_app_runtime(tmp_p
         app_harness=app_harness,  # type: ignore[arg-type]
         auto_clean_generated_artifacts=False,
     )
-    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 0,
+        "promotion_state": "promotion_ready",
+        "phase_states": {"promotion_ready": True, "merge_blocked": False},
+    }
 
     result = runner.run_attempt(
         issue_id="app-105",
@@ -3841,7 +3849,11 @@ def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
         app_harness=app_harness,  # type: ignore[arg-type]
         browser_harness=browser_harness,  # type: ignore[arg-type]
     )
-    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 0,
+        "promotion_state": "promotion_ready",
+        "phase_states": {"promotion_ready": True, "merge_blocked": False},
+    }
 
     result = runner.run_attempt(
         issue_id="app-201",
@@ -3872,6 +3884,11 @@ def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
     assert browser_harness.calls[0]["profile"].headless is True
     assert result.test_summary["browser_evidence_required"] is True
     assert result.test_summary["artifact_proof_ready"] is True
+    assert result.test_summary["promotion_transitions"] == [
+        "failure_artifacts_captured",
+        "resolution_artifacts_captured",
+        "local_validated",
+    ]
     assert result.test_summary["artifact_bundle"]["failure_artifacts"]["video_path"].endswith("before.webm")
     assert result.test_summary["artifact_bundle"]["resolution_artifacts"]["video_path"].endswith("after.webm")
     assert result.test_summary["artifact_links"][0]["label"] == "failure_screenshot"
@@ -4139,6 +4156,7 @@ def test_run_attempt_fails_when_resolution_browser_evidence_is_incomplete(tmp_pa
     assert result.failure_class == "artifacts_missing"
     assert result.test_summary["browser_evidence_required"] is True
     assert result.test_summary["artifact_proof_ready"] is False
+    assert "merge_blocked" in result.test_summary["promotion_transitions"]
 
 
 def test_run_attempt_fails_when_browser_runtime_is_missing(tmp_path):

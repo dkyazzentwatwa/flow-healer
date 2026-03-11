@@ -274,6 +274,7 @@ class FlowHealerService:
                         attempt_row["validation_lane"] = str(test_summary.get("validation_lane") or "")
                         attempt_row["promotion_state"] = str(test_summary.get("promotion_state") or "")
                         attempt_row["phase_states"] = dict(test_summary.get("phase_states") or {})
+                        attempt_row["promotion_transitions"] = list(test_summary.get("promotion_transitions") or [])
                     attempt_row["issue_promotion_state"] = derive_issue_promotion_state(issue=issue, latest_attempt=attempt)
                     attempt_row["diagnosis"] = route.diagnosis
                     attempt_row["failure_family"] = route.failure_family

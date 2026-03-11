@@ -1644,6 +1644,7 @@ def test_status_rows_surface_promotion_state_counts_for_green_pr(tmp_path, monke
         test_summary={
             "promotion_state": "promotion_ready",
             "phase_states": {"promotion_ready": True, "merge_blocked": False},
+            "promotion_transitions": ["local_validated", "pr_open", "ci_green", "promotion_ready"],
         },
         verifier_summary={},
     )
@@ -1659,6 +1660,12 @@ def test_status_rows_surface_promotion_state_counts_for_green_pr(tmp_path, monke
     rows = service.status_rows("demo")
 
     assert rows[0]["promotion_state_counts"]["ci_green"] == 1
+    assert rows[0]["recent_attempts"][0]["promotion_transitions"] == [
+        "local_validated",
+        "pr_open",
+        "ci_green",
+        "promotion_ready",
+    ]
 
 
 def test_status_rows_surface_merge_blocked_when_browser_artifact_proof_is_missing(tmp_path, monkeypatch) -> None:

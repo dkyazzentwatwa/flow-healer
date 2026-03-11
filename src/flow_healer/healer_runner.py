@@ -4071,7 +4071,73 @@ def _with_workspace_status(
     enriched["workspace_status"] = dict(workspace_status or {})
     if failure_fingerprint:
         enriched["failure_fingerprint"] = failure_fingerprint
+    promotion_transitions = _local_promotion_transitions(enriched)
+    if promotion_transitions:
+        enriched["promotion_transitions"] = promotion_transitions
     return enriched
+
+
+def _local_promotion_transitions(summary: dict[str, Any]) -> list[str]:
+    transitions = _normalized_promotion_transitions(summary.get("promotion_transitions"))
+    failure_screenshot_present = _browser_summary_has_phase_screenshot(summary, phase="failure")
+    resolution_screenshot_present = _browser_summary_has_phase_screenshot(summary, phase="resolution")
+    browser_evidence_required = bool(summary.get("browser_evidence_required"))
+    artifact_proof_ready = bool(summary.get("artifact_proof_ready")) or (
+        browser_evidence_required and failure_screenshot_present and resolution_screenshot_present
+    )
+    promotion_state = str(summary.get("promotion_state") or "").strip().lower()
+    phase_states = summary.get("phase_states")
+    phase_state_map = dict(phase_states) if isinstance(phase_states, dict) else {}
+
+    if failure_screenshot_present:
+        _append_promotion_transition(transitions, "failure_artifacts_captured")
+    if resolution_screenshot_present:
+        _append_promotion_transition(transitions, "resolution_artifacts_captured")
+    if (promotion_state == "promotion_ready" or bool(phase_state_map.get("promotion_ready"))) and (
+        not browser_evidence_required or artifact_proof_ready
+    ):
+        _append_promotion_transition(transitions, "local_validated")
+    if (
+        promotion_state == "merge_blocked"
+        or bool(phase_state_map.get("merge_blocked"))
+        or (browser_evidence_required and not artifact_proof_ready)
+    ):
+        _append_promotion_transition(transitions, "merge_blocked")
+    return transitions
+
+
+def _browser_summary_has_phase_screenshot(summary: dict[str, Any], *, phase: str) -> bool:
+    artifact_bundle = summary.get("artifact_bundle")
+    if isinstance(artifact_bundle, dict):
+        phase_payload = artifact_bundle.get(f"{phase}_artifacts")
+        if isinstance(phase_payload, dict) and str(phase_payload.get("screenshot_path") or "").strip():
+            return True
+    artifact_links = summary.get("artifact_links")
+    if not isinstance(artifact_links, list):
+        return False
+    expected_label = f"{phase}_screenshot"
+    return any(
+        isinstance(item, dict) and str(item.get("label") or "").strip().lower() == expected_label
+        for item in artifact_links
+    )
+
+
+def _normalized_promotion_transitions(raw_value: Any) -> list[str]:
+    if not isinstance(raw_value, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_value:
+        label = str(item or "").strip().lower()
+        if not label or label in normalized:
+            continue
+        normalized.append(label)
+    return normalized
+
+
+def _append_promotion_transition(transitions: list[str], label: str) -> None:
+    normalized = str(label or "").strip().lower()
+    if normalized and normalized not in transitions:
+        transitions.append(normalized)
 
 
 def _unstage_paths(workspace: Path, paths: list[str]) -> None:

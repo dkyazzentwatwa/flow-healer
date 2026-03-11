@@ -2380,6 +2380,50 @@ class AutonomousHealerLoop:
             and str(resolution_artifacts.get("screenshot_path") or "").strip()
         )
 
+    def _with_promotion_transitions(
+        self,
+        *,
+        test_summary: dict[str, Any] | None,
+        issue_state: str,
+        pr_number: int,
+        ci_status_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        enriched = dict(test_summary or {})
+        transitions = self._normalized_promotion_transitions(enriched.get("promotion_transitions"))
+        if pr_number > 0 or issue_state in {"pr_open", "pr_pending_approval", "resolved"}:
+            self._append_promotion_transition(transitions, "pr_open")
+        ci_state = self._ci_overall_state(ci_status_summary)
+        if ci_state == "success":
+            self._append_promotion_transition(transitions, "ci_green")
+        local_gate_state = self._local_promotion_gate_state_for_issue(issue_id="", test_summary=enriched)
+        if local_gate_state == "promotion_ready" and (
+            issue_state == "resolved" or (issue_state == "pr_open" and ci_state == "success")
+        ):
+            self._append_promotion_transition(transitions, "promotion_ready")
+        elif local_gate_state == "artifacts_missing" or ci_state == "failure" or issue_state in {"failed", "blocked"}:
+            self._append_promotion_transition(transitions, "merge_blocked")
+        if transitions:
+            enriched["promotion_transitions"] = transitions
+        return enriched
+
+    @staticmethod
+    def _normalized_promotion_transitions(raw_value: Any) -> list[str]:
+        if not isinstance(raw_value, list):
+            return []
+        normalized: list[str] = []
+        for item in raw_value:
+            label = str(item or "").strip().lower()
+            if not label or label in normalized:
+                continue
+            normalized.append(label)
+        return normalized
+
+    @staticmethod
+    def _append_promotion_transition(transitions: list[str], label: str) -> None:
+        normalized = str(label or "").strip().lower()
+        if normalized and normalized not in transitions:
+            transitions.append(normalized)
+
     @staticmethod
     def _ci_overall_state(ci_status_summary: dict[str, Any] | None) -> str:
         if not isinstance(ci_status_summary, dict):
@@ -2927,6 +2971,7 @@ class AutonomousHealerLoop:
         proposer_output_excerpt = ""
         issue_state = "claimed"
         attempt_state = "failed"
+        pr_number = 0
         workspace = None
         run_result: Any = None
 
@@ -3675,6 +3720,12 @@ class AutonomousHealerLoop:
             lease_stop.set()
             lease_thread.join(timeout=1.0)
             if attempt_id:
+                test_summary = self._with_promotion_transitions(
+                    test_summary=test_summary,
+                    issue_state=attempt_state,
+                    pr_number=pr_number,
+                    ci_status_summary=ci_status_summary,
+                )
                 self.store.finish_healer_attempt(
                     attempt_id=attempt_id,
                     state=attempt_state,

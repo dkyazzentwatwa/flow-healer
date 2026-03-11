@@ -2675,6 +2675,54 @@ def test_auto_merge_open_pr_skips_when_browser_artifact_proof_is_missing(tmp_pat
     loop.tracker.merge_pr.assert_not_called()
 
 
+def test_with_promotion_transitions_adds_remote_states_for_green_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    summary = loop._with_promotion_transitions(
+        test_summary={
+            "promotion_state": "promotion_ready",
+            "promotion_transitions": ["local_validated"],
+        },
+        issue_state="pr_open",
+        pr_number=450,
+        ci_status_summary={"overall_state": "success"},
+    )
+
+    assert summary["promotion_transitions"] == [
+        "local_validated",
+        "pr_open",
+        "ci_green",
+        "promotion_ready",
+    ]
+
+
+def test_with_promotion_transitions_marks_merge_blocked_for_missing_browser_artifacts(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    summary = loop._with_promotion_transitions(
+        test_summary={
+            "promotion_state": "promotion_ready",
+            "browser_evidence_required": True,
+            "artifact_proof_ready": False,
+            "promotion_transitions": ["failure_artifacts_captured"],
+        },
+        issue_state="pr_open",
+        pr_number=451,
+        ci_status_summary={"overall_state": "success"},
+    )
+
+    assert summary["promotion_transitions"] == [
+        "failure_artifacts_captured",
+        "pr_open",
+        "ci_green",
+        "merge_blocked",
+    ]
+
+
 def test_auto_merge_open_pr_skips_dirty_pr(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
