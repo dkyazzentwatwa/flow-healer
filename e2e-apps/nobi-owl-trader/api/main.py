@@ -166,6 +166,14 @@ async def root():
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Check API health and connection status"""
+    if engine is None:
+        return HealthResponse(
+            status="starting",
+            exchange="uninitialized",
+            paper_trading=False,
+            timestamp=datetime.utcnow().isoformat(),
+        )
+
     return HealthResponse(
         status="healthy",
         exchange=engine.exchange_name,

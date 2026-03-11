@@ -11,6 +11,7 @@ Tests all portfolio endpoints:
 import pytest
 from fastapi.testclient import TestClient
 from api.main import app
+from api import main as main_module
 from api.database import init_db, close_db
 from api.models import Trade, TradeRepository
 from api.portfolio import PortfolioEngine
@@ -366,6 +367,18 @@ def test_portfolio_summary_sanitizes_non_finite_values(client, monkeypatch):
     assert portfolio["totalPnl"] == 0.0
     assert portfolio["totalPnlPercent"] == 0.0
     assert isinstance(portfolio["timestamp"], int)
+
+
+def test_health_endpoint_handles_uninitialized_engine(client, monkeypatch):
+    """Health endpoint should stay available before the trading engine is ready."""
+    monkeypatch.setattr(main_module, "engine", None)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "starting"
+    assert response.json()["exchange"] == "uninitialized"
+    assert response.json()["paper_trading"] is False
 
 
 def test_all_endpoints_return_json(client):
