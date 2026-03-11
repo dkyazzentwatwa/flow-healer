@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.2";
 import { buildCorsHeaders } from "../_shared/cors.ts";
-import { verifyWidgetToken } from "../_shared/widgetToken.ts";
+import { assertWidgetTokenMatchesContext, extractWidgetToken, verifyWidgetToken } from "../_shared/widgetToken.ts";
 
 const PLAN_LIMITS: Record<string, number | null> = {
   free: 50,
@@ -20,8 +20,13 @@ interface PromptContext {
   faqs: Array<{ question: string; answer: string }>;
 }
 
-async function loadPromptContext(widgetToken: string, supabaseAdmin: ReturnType<typeof createClient>): Promise<PromptContext> {
+async function loadPromptContext(
+  widgetToken: string,
+  businessContext: Record<string, unknown> | null | undefined,
+  supabaseAdmin: ReturnType<typeof createClient>,
+): Promise<PromptContext> {
   const claims = await verifyWidgetToken(widgetToken);
+  assertWidgetTokenMatchesContext(claims, businessContext);
 
   const [{ data: business }, { data: bot }, { data: allServices }, { data: allFaqs }] = await Promise.all([
     supabaseAdmin
@@ -160,21 +165,24 @@ serve(async (req) => {
       { auth: { persistSession: false } },
     );
 
-    const widgetToken = typeof businessContext?.widgetToken === "string" ? businessContext.widgetToken : null;
+    const normalizedBusinessContext = businessContext && typeof businessContext === "object"
+      ? businessContext as Record<string, unknown>
+      : null;
+    const widgetToken = extractWidgetToken(normalizedBusinessContext);
 
     let promptContext: PromptContext = {
       businessId: undefined,
-      name: businessContext?.name,
-      phone: businessContext?.phone,
-      email: businessContext?.email,
-      address: businessContext?.address,
-      systemPrompt: businessContext?.systemPrompt ?? null,
-      services: Array.isArray(businessContext?.services) ? businessContext.services : [],
-      faqs: Array.isArray(businessContext?.faqs) ? businessContext.faqs : [],
+      name: typeof normalizedBusinessContext?.name === "string" ? normalizedBusinessContext.name : undefined,
+      phone: typeof normalizedBusinessContext?.phone === "string" ? normalizedBusinessContext.phone : null,
+      email: typeof normalizedBusinessContext?.email === "string" ? normalizedBusinessContext.email : null,
+      address: typeof normalizedBusinessContext?.address === "string" ? normalizedBusinessContext.address : null,
+      systemPrompt: typeof normalizedBusinessContext?.systemPrompt === "string" ? normalizedBusinessContext.systemPrompt : null,
+      services: Array.isArray(normalizedBusinessContext?.services) ? normalizedBusinessContext.services as PromptContext["services"] : [],
+      faqs: Array.isArray(normalizedBusinessContext?.faqs) ? normalizedBusinessContext.faqs as PromptContext["faqs"] : [],
     };
 
     if (widgetToken) {
-      promptContext = await loadPromptContext(widgetToken, supabaseAdmin);
+      promptContext = await loadPromptContext(widgetToken, normalizedBusinessContext, supabaseAdmin);
     }
 
     if (promptContext.businessId) {

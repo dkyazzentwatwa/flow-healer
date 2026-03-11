@@ -5,6 +5,8 @@ export interface WidgetClaims {
   exp: number;
 }
 
+type WidgetTokenInput = Record<string, unknown> | null | undefined;
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -15,6 +17,48 @@ export function normalizeOptionalWidgetField(value: unknown): string | null {
 
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function getOptionalClaimValue(source: WidgetTokenInput, camelKey: string, snakeKey: string): string | null {
+  if (!source) {
+    return null;
+  }
+
+  return normalizeOptionalWidgetField(source[camelKey]) ?? normalizeOptionalWidgetField(source[snakeKey]);
+}
+
+export function extractWidgetToken(source: unknown): string | null {
+  if (typeof source === "string") {
+    return normalizeOptionalWidgetField(source);
+  }
+
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  return getOptionalClaimValue(source as WidgetTokenInput, "widgetToken", "widget_token");
+}
+
+export function assertWidgetTokenMatchesContext(claims: WidgetClaims, source: unknown): void {
+  if (!source || typeof source !== "object") {
+    return;
+  }
+
+  const context = source as WidgetTokenInput;
+  const widgetKey = getOptionalClaimValue(context, "widgetKey", "widget_key");
+  if (widgetKey && widgetKey !== claims.widget_key) {
+    throw new Error("Widget token does not match widget key");
+  }
+
+  const businessId = getOptionalClaimValue(context, "businessId", "business_id") ?? getOptionalClaimValue(context, "id", "id");
+  if (businessId && businessId !== claims.business_id) {
+    throw new Error("Widget token does not match business");
+  }
+
+  const botId = getOptionalClaimValue(context, "botId", "bot_id");
+  if (botId && botId !== (claims.bot_id ?? null)) {
+    throw new Error("Widget token does not match bot");
+  }
 }
 
 function toBase64Url(bytes: Uint8Array): string {
