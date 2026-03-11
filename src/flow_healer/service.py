@@ -1609,6 +1609,22 @@ def _aggregate_ci_status_summary(issues: list[dict[str, object]]) -> dict[str, o
     return {
         "overall_state": overall_state,
         "tracked_prs": len(summaries),
+        "failure_buckets": sorted(
+            {
+                str(bucket).strip()
+                for summary in summaries
+                for bucket in (summary.get("failure_buckets") or [])
+                if str(bucket).strip()
+            }
+        ),
+        "pending_buckets": sorted(
+            {
+                str(bucket).strip()
+                for summary in summaries
+                for bucket in (summary.get("pending_buckets") or [])
+                if str(bucket).strip()
+            }
+        ),
         "failing_contexts": sorted(
             {
                 str(context).strip()

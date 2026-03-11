@@ -1598,6 +1598,8 @@ def test_status_rows_surface_issue_ci_status_summary(tmp_path, monkeypatch) -> N
         pr_state="open",
         ci_status_summary={
             "overall_state": "failure",
+            "failure_buckets": ["lint"],
+            "pending_buckets": ["deploy_blocked"],
             "failing_contexts": ["CI"],
             "pending_contexts": ["Preview"],
         },
@@ -1607,5 +1609,7 @@ def test_status_rows_surface_issue_ci_status_summary(tmp_path, monkeypatch) -> N
     rows = service.status_rows("demo")
 
     assert rows[0]["ci_status_summary"]["overall_state"] == "failure"
+    assert rows[0]["ci_status_summary"]["failure_buckets"] == ["lint"]
+    assert rows[0]["ci_status_summary"]["pending_buckets"] == ["deploy_blocked"]
     assert rows[0]["ci_status_summary"]["failing_contexts"] == ["CI"]
     assert rows[0]["ci_status_summary"]["pending_contexts"] == ["Preview"]

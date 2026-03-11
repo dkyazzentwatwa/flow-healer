@@ -30,7 +30,7 @@ Last updated: `2026-03-11`
 | Record a second video demonstrating the resolution | Partial | Best-effort only; screenshots are the required proof path. |
 | Open a pull request | Done | Existing PR open/update loop works. |
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
-| Detect and remediate build failures | Partial | Local failures are handled and remote CI state is visible; automatic CI remediation is still missing. |
+| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, and failure buckets are classified; automatic CI remediation is still missing. |
 | Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
 | Merge the change | Partial | Auto-merge now waits for local promotion readiness plus green remote CI, but full promotion-state and judgment routing are still incomplete. |
 
@@ -148,10 +148,10 @@ Status: `Next`
 
 ### CI failure classification
 
-- [ ] Define normalized CI failure buckets: `setup`, `lint`, `typecheck`, `test`, `flake`, `deploy_blocked`, `unknown`
-- [ ] Map GitHub checks/workflows into those buckets
+- [x] Define normalized CI failure buckets: `setup`, `lint`, `typecheck`, `test`, `flake`, `deploy_blocked`, `unknown`
+- [x] Map GitHub checks/workflows into those buckets
 - [ ] Distinguish transient infra failures from deterministic code failures
-- [ ] Preserve raw CI evidence for operator debugging
+- [x] Preserve raw CI evidence for operator debugging
 
 ### CI remediation loop
 
@@ -270,6 +270,7 @@ Status: `Later`
 
 - [x] Implement GitHub check-run / status-check ingestion in `healer_tracker.py`
 - [x] Persist `ci_status_summary` in attempts and status surfaces
+- [x] Classify remote CI failures into normalized buckets
 - [ ] Add CI-aware retry/remediation loop in `healer_loop.py`
 - [ ] Add explicit promotion states beyond the current merge gate
 - [ ] Run a live PR-body smoke with inline before/after evidence
@@ -289,3 +290,4 @@ Status: `Later`
 - [x] Inline GitHub evidence proven live on issue `#913`
 - [x] Remote CI visibility landed across tracker/store/service/dashboard payloads
 - [x] Auto-merge now waits for green remote CI plus local promotion readiness
+- [x] CI summaries now include normalized failure buckets and per-check detail

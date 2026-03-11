@@ -871,10 +871,16 @@ def test_get_pr_ci_status_summary_combines_check_runs_statuses_and_workflows(mon
     assert summary["status_checks"]["pending"] == 1
     assert summary["workflow_runs"]["failure"] == 1
     assert summary["workflow_runs"]["pending"] == 1
+    assert summary["failure_buckets"] == ["lint", "unknown"]
+    assert summary["pending_buckets"] == ["deploy_blocked", "test", "typecheck"]
     assert "lint" in summary["failing_contexts"]
     assert "CI" in summary["failing_contexts"]
     assert "e2e" in summary["pending_contexts"]
     assert "status/typecheck" in summary["pending_contexts"]
+    assert {"source": "check_run", "name": "lint", "state": "failure", "bucket": "lint", "updated_at": "2026-03-11T21:04:00Z"} in summary["failing_entries"]
+    assert {"source": "workflow_run", "name": "CI", "state": "failure", "bucket": "unknown", "updated_at": "2026-03-11T21:06:00Z"} in summary["failing_entries"]
+    assert {"source": "status_check", "name": "status/typecheck", "state": "pending", "bucket": "typecheck", "updated_at": "2026-03-11T21:05:00Z"} in summary["pending_entries"]
+    assert {"source": "workflow_run", "name": "Preview", "state": "pending", "bucket": "deploy_blocked", "updated_at": "2026-03-11T21:06:30Z"} in summary["pending_entries"]
     assert summary["updated_at"] == "2026-03-11T21:06:30Z"
     assert calls == [
         "/repos/owner/repo/pulls/91",

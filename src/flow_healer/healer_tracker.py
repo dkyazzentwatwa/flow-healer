@@ -619,6 +619,20 @@ class GitHubHealerTracker:
             "check_runs": check_runs_summary["counts"],
             "status_checks": status_checks_summary["counts"],
             "workflow_runs": workflow_runs_summary["counts"],
+            "failure_buckets": sorted(
+                {
+                    *check_runs_summary["failure_buckets"],
+                    *status_checks_summary["failure_buckets"],
+                    *workflow_runs_summary["failure_buckets"],
+                }
+            ),
+            "pending_buckets": sorted(
+                {
+                    *check_runs_summary["pending_buckets"],
+                    *status_checks_summary["pending_buckets"],
+                    *workflow_runs_summary["pending_buckets"],
+                }
+            ),
             "failing_contexts": sorted(
                 {
                     *check_runs_summary["failing_contexts"],
@@ -626,12 +640,22 @@ class GitHubHealerTracker:
                     *workflow_runs_summary["failing_contexts"],
                 }
             ),
+            "failing_entries": self._merge_ci_entries(
+                check_runs_summary["failure_entries"],
+                status_checks_summary["failure_entries"],
+                workflow_runs_summary["failure_entries"],
+            ),
             "pending_contexts": sorted(
                 {
                     *check_runs_summary["pending_contexts"],
                     *status_checks_summary["pending_contexts"],
                     *workflow_runs_summary["pending_contexts"],
                 }
+            ),
+            "pending_entries": self._merge_ci_entries(
+                check_runs_summary["pending_entries"],
+                status_checks_summary["pending_entries"],
+                workflow_runs_summary["pending_entries"],
             ),
             "updated_at": self._latest_timestamp(
                 check_runs_summary["updated_at"],
@@ -883,6 +907,7 @@ class GitHubHealerTracker:
             neutral_conclusions={"neutral", "skipped"},
             failure_conclusions={"action_required", "cancelled", "failure", "startup_failure", "timed_out"},
             state_key="",
+            source_label="check_run",
         )
 
     @classmethod
@@ -899,6 +924,7 @@ class GitHubHealerTracker:
             neutral_conclusions=set(),
             failure_conclusions=set(),
             state_key="state",
+            source_label="status_check",
         )
 
     @classmethod
@@ -915,6 +941,7 @@ class GitHubHealerTracker:
             neutral_conclusions={"neutral", "skipped"},
             failure_conclusions={"action_required", "cancelled", "failure", "startup_failure", "timed_out"},
             state_key="",
+            source_label="workflow_run",
         )
 
     @classmethod
@@ -931,16 +958,28 @@ class GitHubHealerTracker:
         neutral_conclusions: set[str],
         failure_conclusions: set[str],
         state_key: str,
+        source_label: str,
     ) -> dict[str, Any]:
         counts = {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0}
         failing_contexts: list[str] = []
         pending_contexts: list[str] = []
+        failure_entries: list[dict[str, str]] = []
+        pending_entries: list[dict[str, str]] = []
+        failure_buckets: set[str] = set()
+        pending_buckets: set[str] = set()
         updated_values: list[str] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             counts["total"] += 1
             name = str(entry.get(name_key) or "").strip() if name_key else ""
+            updated_at = ""
+            for key in updated_at_keys:
+                timestamp = str(entry.get(key) or "").strip()
+                if timestamp:
+                    updated_at = timestamp
+                    updated_values.append(timestamp)
+                    break
             normalized_state = ""
             if state_key:
                 normalized_state = cls._normalize_status_check_state(str(entry.get(state_key) or ""))
@@ -959,25 +998,98 @@ class GitHubHealerTracker:
                 counts["failure"] += 1
                 if name:
                     failing_contexts.append(name)
+                bucket = cls._classify_ci_failure_bucket(name)
+                failure_buckets.add(bucket)
+                failure_entries.append(
+                    {
+                        "source": source_label,
+                        "name": name,
+                        "state": normalized_state,
+                        "bucket": bucket,
+                        "updated_at": updated_at,
+                    }
+                )
             elif normalized_state == "pending":
                 counts["pending"] += 1
                 if name:
                     pending_contexts.append(name)
+                bucket = cls._classify_ci_failure_bucket(name)
+                pending_buckets.add(bucket)
+                pending_entries.append(
+                    {
+                        "source": source_label,
+                        "name": name,
+                        "state": normalized_state,
+                        "bucket": bucket,
+                        "updated_at": updated_at,
+                    }
+                )
             elif normalized_state == "success":
                 counts["success"] += 1
             elif normalized_state == "neutral":
                 counts["neutral"] += 1
-            for key in updated_at_keys:
-                timestamp = str(entry.get(key) or "").strip()
-                if timestamp:
-                    updated_values.append(timestamp)
-                    break
         return {
             "counts": counts,
             "failing_contexts": failing_contexts,
             "pending_contexts": pending_contexts,
+            "failure_entries": failure_entries,
+            "pending_entries": pending_entries,
+            "failure_buckets": sorted(failure_buckets),
+            "pending_buckets": sorted(pending_buckets),
             "updated_at": cls._latest_timestamp(*updated_values),
         }
+
+    @staticmethod
+    def _classify_ci_failure_bucket(name: str) -> str:
+        normalized = re.sub(r"[_/:-]+", " ", str(name or "").strip().lower())
+        if not normalized:
+            return "unknown"
+        if any(token in normalized for token in ("flake", "flaky", "intermittent", "quarantine", "non deterministic", "non-deterministic", "retry")):
+            return "flake"
+        if any(token in normalized for token in ("deploy", "preview", "release", "vercel", "netlify", "render", "cloudflare", "pages")):
+            return "deploy_blocked"
+        if any(token in normalized for token in ("setup", "bootstrap", "install", "dependency", "dependencies", "provision", "container", "docker build", "image build")):
+            return "setup"
+        if any(token in normalized for token in ("typecheck", "type check", "typing", "mypy", "pyright", "tsc")):
+            return "typecheck"
+        if any(token in normalized for token in ("lint", "eslint", "ruff", "flake8", "format", "style")):
+            return "lint"
+        if any(token in normalized for token in ("test", "pytest", "unit", "integration", "e2e", "rspec", "jest", "vitest", "playwright", "mocha", "cypress")):
+            return "test"
+        return "unknown"
+
+    @staticmethod
+    def _merge_ci_entries(*entry_groups: list[dict[str, str]]) -> list[dict[str, str]]:
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+        for group in entry_groups:
+            for entry in group:
+                source = str(entry.get("source") or "").strip()
+                name = str(entry.get("name") or "").strip()
+                state = str(entry.get("state") or "").strip()
+                bucket = str(entry.get("bucket") or "").strip()
+                updated_at = str(entry.get("updated_at") or "").strip()
+                key = (source, name, state, bucket, updated_at)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(
+                    {
+                        "source": source,
+                        "name": name,
+                        "state": state,
+                        "bucket": bucket,
+                        "updated_at": updated_at,
+                    }
+                )
+        return sorted(
+            merged,
+            key=lambda item: (
+                str(item.get("source") or ""),
+                str(item.get("name") or ""),
+                str(item.get("updated_at") or ""),
+            ),
+        )
 
     @staticmethod
     def _normalize_ci_state(

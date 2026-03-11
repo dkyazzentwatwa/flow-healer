@@ -287,8 +287,12 @@ class LocalHealerTracker:
             "check_runs": {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0},
             "status_checks": {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0},
             "workflow_runs": {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0},
+            "failure_buckets": [],
+            "pending_buckets": [],
             "failing_contexts": [],
+            "failing_entries": [],
             "pending_contexts": [],
+            "pending_entries": [],
             "updated_at": str(details.updated_at or ""),
         }
 
