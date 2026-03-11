@@ -4,9 +4,12 @@ from collections.abc import Mapping
 from .service import TodoItem, TodoService
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Body, FastAPI, HTTPException
 except Exception:  # pragma: no cover - lightweight fallback for minimal environments
     from types import SimpleNamespace
+
+    def Body(default: object = None) -> object:
+        return default
 
     class HTTPException(Exception):
         def __init__(self, *, status_code: int, detail: str) -> None:
@@ -102,7 +105,7 @@ def create_app() -> FastAPI:
     def app_list_todos() -> dict[str, object]:
         return list_todos(app_service)
 
-    def app_create_todo(payload: dict[str, object]) -> dict[str, object]:
+    def app_create_todo(payload: object = Body(default=None)) -> dict[str, object]:
         return create_todo(payload, app_service)
 
     def app_complete_todo(todo_id: str) -> dict[str, object]:
