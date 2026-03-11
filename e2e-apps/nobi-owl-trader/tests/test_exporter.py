@@ -59,3 +59,24 @@ def test_export_backtest_csv_skips_empty_trade_and_equity_rows():
     assert "summary,symbol,ETH/USDT" in exported
     assert "trade," not in exported
     assert "equity," not in exported
+
+
+def test_export_backtest_csv_includes_paired_rule_summary_fields_with_missing_rows():
+    exported = export_backtest_csv(
+        {
+            "id": "bt-pair-001",
+            "rule_name": "Momentum Rider + Safety Exit",
+            "symbol": "BTC/USDT",
+            "timeframe": "4h",
+            "entry_rule": "entry-42",
+            "exit_rule": "exit-99",
+            "trades": None,
+            "equity_curve": None,
+        }
+    )
+
+    assert "summary,rule_name,Momentum Rider + Safety Exit" in exported
+    assert "summary,entry_rule,entry-42" in exported
+    assert "summary,exit_rule,exit-99" in exported
+    assert "trade," not in exported
+    assert "equity," not in exported
