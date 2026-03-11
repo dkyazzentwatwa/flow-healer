@@ -2294,6 +2294,8 @@ class AutonomousHealerLoop:
         test_summary: dict[str, Any] | None = None,
         ci_status_summary: dict[str, Any] | None = None,
     ) -> str:
+        if self._judgment_reason_code_for_issue(issue_id=issue_id, test_summary=test_summary):
+            return "judgment_required"
         local_gate_state = self._local_promotion_gate_state_for_issue(
             issue_id=issue_id,
             test_summary=test_summary,
@@ -2380,6 +2382,24 @@ class AutonomousHealerLoop:
             and str(resolution_artifacts.get("screenshot_path") or "").strip()
         )
 
+    def _judgment_reason_code_for_issue(
+        self,
+        *,
+        issue_id: str,
+        test_summary: dict[str, Any] | None = None,
+    ) -> str:
+        if isinstance(test_summary, dict):
+            value = str(test_summary.get("judgment_reason_code") or "").strip()
+            if value:
+                return value
+        if str(issue_id or "").strip():
+            attempts = self.store.list_healer_attempts(issue_id=str(issue_id), limit=1)
+            if attempts:
+                value = str(attempts[0].get("judgment_reason_code") or "").strip()
+                if value:
+                    return value
+        return ""
+
     def _with_promotion_transitions(
         self,
         *,
@@ -2387,6 +2407,7 @@ class AutonomousHealerLoop:
         issue_state: str,
         pr_number: int,
         ci_status_summary: dict[str, Any] | None = None,
+        judgment_reason_code: str = "",
     ) -> dict[str, Any]:
         enriched = dict(test_summary or {})
         transitions = self._normalized_promotion_transitions(enriched.get("promotion_transitions"))
@@ -2396,7 +2417,9 @@ class AutonomousHealerLoop:
         if ci_state == "success":
             self._append_promotion_transition(transitions, "ci_green")
         local_gate_state = self._local_promotion_gate_state_for_issue(issue_id="", test_summary=enriched)
-        if local_gate_state == "promotion_ready" and (
+        if judgment_reason_code.strip():
+            self._append_promotion_transition(transitions, "merge_blocked")
+        elif local_gate_state == "promotion_ready" and (
             issue_state == "resolved" or (issue_state == "pr_open" and ci_state == "success")
         ):
             self._append_promotion_transition(transitions, "promotion_ready")
@@ -3737,11 +3760,16 @@ class AutonomousHealerLoop:
             lease_stop.set()
             lease_thread.join(timeout=1.0)
             if attempt_id:
+                judgment_reason_code = self._resolve_attempt_judgment_reason_code(
+                    test_summary=test_summary,
+                    workspace_status=getattr(run_result, "workspace_status", None),
+                )
                 test_summary = self._with_promotion_transitions(
                     test_summary=test_summary,
                     issue_state=attempt_state,
                     pr_number=pr_number,
                     ci_status_summary=ci_status_summary,
+                    judgment_reason_code=judgment_reason_code,
                 )
                 self.store.finish_healer_attempt(
                     attempt_id=attempt_id,
@@ -3763,10 +3791,7 @@ class AutonomousHealerLoop:
                         workspace_status=getattr(run_result, "workspace_status", None),
                     ),
                     ci_status_summary=ci_status_summary,
-                    judgment_reason_code=self._resolve_attempt_judgment_reason_code(
-                        test_summary=test_summary,
-                        workspace_status=getattr(run_result, "workspace_status", None),
-                    ),
+                    judgment_reason_code=judgment_reason_code,
                     failure_class=failure_class,
                     failure_reason=failure_reason,
                     proposer_output_excerpt=proposer_output_excerpt,

@@ -1712,3 +1712,46 @@ def test_status_rows_surface_merge_blocked_when_browser_artifact_proof_is_missin
     rows = service.status_rows("demo")
 
     assert rows[0]["promotion_state_counts"]["merge_blocked"] == 1
+
+
+def test_status_rows_surface_merge_blocked_when_judgment_is_required(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="306",
+        repo="owner/repo",
+        title="Issue 306",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_306_1",
+        issue_id="306",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_306_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={"promotion_state": "promotion_ready"},
+        verifier_summary={},
+        judgment_reason_code="product_ambiguity",
+    )
+    runtime.store.set_healer_issue_state(
+        issue_id="306",
+        state="pr_open",
+        pr_number=306,
+        pr_state="open",
+        ci_status_summary={"overall_state": "success"},
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    assert rows[0]["promotion_state_counts"]["merge_blocked"] == 1

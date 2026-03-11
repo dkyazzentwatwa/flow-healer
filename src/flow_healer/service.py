@@ -1691,6 +1691,7 @@ def derive_issue_promotion_state(
         for item in artifact_list
         if isinstance(item, dict) and str(item.get("label") or "").strip()
     }
+    judgment_reason_code = str(latest_attempt_row.get("judgment_reason_code") or "").strip()
     browser_evidence_required = _attempt_requires_browser_artifact_proof(
         attempt_summary=attempt_summary,
         artifact_map=artifact_map,
@@ -1705,6 +1706,8 @@ def derive_issue_promotion_state(
     if issue_state == "resolved":
         return "promotion_ready"
     if issue_state in {"failed", "blocked"}:
+        return "merge_blocked"
+    if judgment_reason_code:
         return "merge_blocked"
     if attempt_promotion_state == "merge_blocked" or bool(phase_state_map.get("merge_blocked")):
         return "merge_blocked"
