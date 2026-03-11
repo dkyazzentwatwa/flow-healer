@@ -20,6 +20,21 @@ def test_resolve_trade_signal_uses_strategy_thresholds(score_total, expected_sig
     assert resolve_trade_signal(score_total) == expected_signal
 
 
+@pytest.mark.parametrize(
+    ("score_total", "expected_signal"),
+    [
+        (13.0 - 1e-12, "buy"),
+        (27.0 - 1e-12, "strong_buy"),
+        (-13.0 + 1e-12, "sell"),
+        (-27.0 + 1e-12, "strong_sell"),
+    ],
+)
+def test_resolve_trade_signal_tolerates_floating_point_threshold_noise(
+    score_total, expected_signal
+):
+    assert resolve_trade_signal(score_total) == expected_signal
+
+
 @pytest.mark.parametrize("score_total", [math.nan, math.inf, -math.inf])
 def test_resolve_trade_signal_rejects_non_finite_scores(score_total):
     with pytest.raises(ValueError, match="finite"):

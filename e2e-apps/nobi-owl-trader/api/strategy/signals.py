@@ -9,6 +9,7 @@ STRONG_BUY_THRESHOLD = 27.0
 BUY_THRESHOLD = 13.0
 SELL_THRESHOLD = -13.0
 STRONG_SELL_THRESHOLD = -27.0
+THRESHOLD_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,13 +28,13 @@ def resolve_trade_signal(score_total: float) -> str:
     if not math.isfinite(score_total):
         raise ValueError("score_total must be finite")
 
-    if score_total >= STRONG_BUY_THRESHOLD:
+    if _meets_or_exceeds(score_total, STRONG_BUY_THRESHOLD):
         return "strong_buy"
-    if score_total >= BUY_THRESHOLD:
+    if _meets_or_exceeds(score_total, BUY_THRESHOLD):
         return "buy"
-    if score_total <= STRONG_SELL_THRESHOLD:
+    if _meets_or_falls_below(score_total, STRONG_SELL_THRESHOLD):
         return "strong_sell"
-    if score_total <= SELL_THRESHOLD:
+    if _meets_or_falls_below(score_total, SELL_THRESHOLD):
         return "sell"
     return "hold"
 
@@ -94,3 +95,21 @@ def _coerce_score(value: Any) -> float:
     if not math.isfinite(score):
         raise ValueError("score values must be finite")
     return score
+
+
+def _meets_or_exceeds(score_total: float, threshold: float) -> bool:
+    return score_total >= threshold or math.isclose(
+        score_total,
+        threshold,
+        rel_tol=0.0,
+        abs_tol=THRESHOLD_TOLERANCE,
+    )
+
+
+def _meets_or_falls_below(score_total: float, threshold: float) -> bool:
+    return score_total <= threshold or math.isclose(
+        score_total,
+        threshold,
+        rel_tol=0.0,
+        abs_tol=THRESHOLD_TOLERANCE,
+    )
