@@ -30,7 +30,7 @@ Last updated: `2026-03-11`
 | Record a second video demonstrating the resolution | Partial | Best-effort only; screenshots are the required proof path. |
 | Open a pull request | Done | Existing PR open/update loop works. |
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
-| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, deterministic CI failures now requeue automatically, and failure buckets are classified; same-PR remediation still needs live proof. |
+| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, deterministic CI failures now requeue automatically on the same PR, and failure buckets are classified; live GitHub CI remediation proof is still pending. |
 | Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
 | Merge the change | Partial | Auto-merge now waits for local promotion readiness plus green remote CI, but full promotion-state and judgment routing are still incomplete. |
 
@@ -156,8 +156,8 @@ Status: `Next`
 ### CI remediation loop
 
 - [x] Feed deterministic CI failures back into the retry prompt
-- [ ] Update the same branch and same PR after CI remediation
-- [ ] Prevent duplicate PR creation during CI-driven retries
+- [x] Update the same branch and same PR after CI remediation
+- [x] Prevent duplicate PR creation during CI-driven retries
 - [x] Stop retrying once CI remediation budget is exhausted
 
 ### Promotion state machine
@@ -292,3 +292,4 @@ Status: `Later`
 - [x] Auto-merge now waits for green remote CI plus local promotion readiness
 - [x] CI summaries now include normalized failure buckets and per-check detail
 - [x] Deterministic remote CI failures now requeue the issue with CI feedback context
+- [x] E2E proof that CI-driven retries update the same PR without duplicates

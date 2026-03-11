@@ -219,6 +219,8 @@ class FakeGitHubState:
         self._review_comment_counter = 3000
         self.issues: dict[int, FakeGitHubIssue] = {}
         self.pulls: dict[int, dict[str, Any]] = {}
+        self.ci_payloads_by_head_sha: dict[str, dict[str, Any]] = {}
+        self.pr_update_counts: dict[int, int] = {}
         self.issue_comments: dict[int, list[dict[str, Any]]] = {}
         self.reviews: dict[int, list[dict[str, Any]]] = {}
         self.review_comments: dict[int, list[dict[str, Any]]] = {}
@@ -293,6 +295,40 @@ class FakeGitHubState:
             pr["state"] = "closed"
             pr["merged"] = True
 
+    def ci_payload_for_head_sha(self, head_sha: str) -> dict[str, Any]:
+        normalized_sha = str(head_sha or "").strip()
+        payload = self.ci_payloads_by_head_sha.get(normalized_sha)
+        if isinstance(payload, dict):
+            return payload
+        return {
+            "check_runs": [
+                {
+                    "name": "CI",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "completed_at": "2026-03-11T22:01:00Z",
+                    "head_sha": normalized_sha,
+                }
+            ],
+            "statuses": [
+                {
+                    "context": "Checks / CI",
+                    "state": "success",
+                    "updated_at": "2026-03-11T22:01:00Z",
+                    "sha": normalized_sha,
+                }
+            ],
+            "workflow_runs": [
+                {
+                    "name": "build",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "updated_at": "2026-03-11T22:01:00Z",
+                    "head_sha": normalized_sha,
+                }
+            ],
+        }
+
 
 class FakeGitHubAPI:
     def __init__(self, state: FakeGitHubState) -> None:
@@ -347,44 +383,18 @@ class FakeGitHubAPI:
 
             if parts[3] == "commits" and len(parts) == 6 and parts[5] == "check-runs":
                 head_sha = parts[4]
-                return {
-                    "check_runs": [
-                        {
-                            "name": "CI",
-                            "status": "completed",
-                            "conclusion": "success",
-                            "completed_at": "2026-03-11T22:01:00Z",
-                            "head_sha": head_sha,
-                        }
-                    ]
-                }
+                payload = self.state.ci_payload_for_head_sha(head_sha)
+                return {"check_runs": list(payload.get("check_runs") or [])}
 
             if parts[3] == "commits" and len(parts) == 6 and parts[5] == "status":
                 head_sha = parts[4]
-                return {
-                    "statuses": [
-                        {
-                            "context": "Checks / CI",
-                            "state": "success",
-                            "updated_at": "2026-03-11T22:01:00Z",
-                            "sha": head_sha,
-                        }
-                    ]
-                }
+                payload = self.state.ci_payload_for_head_sha(head_sha)
+                return {"statuses": list(payload.get("statuses") or [])}
 
             if parts[3] == "actions" and len(parts) == 5 and parts[4] == "runs":
                 head_sha = query.get("head_sha", [""])[0]
-                return {
-                    "workflow_runs": [
-                        {
-                            "name": "build",
-                            "status": "completed",
-                            "conclusion": "success",
-                            "updated_at": "2026-03-11T22:01:00Z",
-                            "head_sha": head_sha,
-                        }
-                    ]
-                }
+                payload = self.state.ci_payload_for_head_sha(head_sha)
+                return {"workflow_runs": list(payload.get("workflow_runs") or [])}
 
             if parts[3] == "pulls" and len(parts) == 4:
                 head = query.get("head", [""])[0]
@@ -435,7 +445,7 @@ class FakeGitHubAPI:
                     pr_number = self.state._pr_counter
                     branch = str(payload.get("head") or "")
                     head_label = f"{repo_slug.split('/')[0]}:{branch}" if branch else ""
-                    head_sha = f"sha-{pr_number}"
+                    head_sha = f"sha-{pr_number}-1"
                     pr = {
                         "number": pr_number,
                         "state": "open",
@@ -448,6 +458,7 @@ class FakeGitHubAPI:
                         "head_label": head_label,
                         "updated_at": "2026-03-11T22:00:00Z",
                     }
+                    self.state.pr_update_counts[pr_number] = 1
                     self.state.pulls[pr_number] = pr
                 return pr
 
@@ -475,6 +486,21 @@ class FakeGitHubAPI:
                     return {}
                 issue.state = str(payload.get("state") or issue.state)
                 return self.state.issue_payload(issue)
+            if parts[3] == "pulls" and len(parts) == 5:
+                pr_number = int(parts[4])
+                pr = self.state.pulls.get(pr_number)
+                if pr is None:
+                    return {}
+                with self.state._lock:
+                    update_count = int(self.state.pr_update_counts.get(pr_number) or 1) + 1
+                    self.state.pr_update_counts[pr_number] = update_count
+                    pr["title"] = str(payload.get("title") or pr.get("title") or "")
+                    pr["body"] = str(payload.get("body") or pr.get("body") or "")
+                    pr["base"] = {"ref": str(payload.get("base") or (pr.get("base") or {}).get("ref") or "main")}
+                    head_ref = str((pr.get("head") or {}).get("ref") or "")
+                    pr["head"] = {"ref": head_ref, "sha": f"sha-{pr_number}-{update_count}"}
+                    pr["updated_at"] = f"2026-03-11T22:{update_count:02d}:00Z"
+                return pr
 
         if method == "PUT":
             if parts[3] == "pulls" and len(parts) == 6 and parts[5] == "merge":
@@ -923,6 +949,85 @@ def test_e2e_pr_feedback_requeues_and_updates_existing_pr(tmp_path: Path, monkey
     assert int(issue["last_issue_comment_id"]) > 0
     assert int(issue["last_review_id"]) > 0
     assert int(issue["last_review_comment_id"]) > 0
+    store.close()
+
+
+def test_e2e_ci_failure_requeues_and_updates_existing_pr(tmp_path: Path, monkeypatch, portable_pytest_gates, fake_github) -> None:
+    repo_path = _build_demo_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title="Repair the red CI PR",
+        body="Fix demo.py and keep the existing PR clean.",
+        labels=["healer:ready", "healer:pr-approved"],
+    )
+
+    def second_fix(prompt: str) -> str:
+        assert "[ci_failure_feedback]" in prompt
+        assert "Failure buckets: lint" in prompt
+        assert "lint [lint] via check_run" in prompt
+        return _make_patch(
+            "demo.py",
+            "def add(a: int, b: int) -> int:\n    return a - b\n",
+            "def add(a: int, b: int) -> int:\n    # CI remediation pass\n    return a + b\n",
+        )
+
+    connector = ScriptedConnector(
+        proposer_outputs={
+            str(issue_number): [
+                _make_patch(
+                    "demo.py",
+                    "def add(a: int, b: int) -> int:\n    return a - b\n",
+                    "def add(a: int, b: int) -> int:\n    return a + b\n",
+                ),
+                second_fix,
+            ]
+        },
+    )
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    api = fake_github(state)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        pr_actions_require_approval=True,
+        pr_auto_merge_clean=False,
+    )
+    service.start("demo", once=True)
+
+    assert len(state.pulls) == 1
+    pr_number = next(iter(state.pulls))
+    initial_head_sha = str((state.pulls[pr_number].get("head") or {}).get("sha") or "")
+    state.ci_payloads_by_head_sha[initial_head_sha] = {
+        "check_runs": [
+            {
+                "name": "lint",
+                "status": "completed",
+                "conclusion": "failure",
+                "completed_at": "2026-03-11T22:11:00Z",
+                "head_sha": initial_head_sha,
+            }
+        ],
+        "statuses": [],
+        "workflow_runs": [],
+    }
+
+    service.start("demo", once=True)
+
+    assert len(state.pulls) == 1
+    updated_pr = state.pulls[pr_number]
+    assert str((updated_pr.get("head") or {}).get("sha") or "") != initial_head_sha
+    assert int(state.pr_update_counts[pr_number]) == 2
+
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    issue = store.get_healer_issue(str(issue_number))
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    attempts = store.list_healer_attempts(issue_id=str(issue_number), limit=5)
+    assert [attempt["state"] for attempt in attempts][:2] == ["pr_open", "pr_open"]
+    assert any("Remote CI failed; requeueing the same PR" in comment["body"] for comment in state.issue_comments[issue_number])
     store.close()
 
 
