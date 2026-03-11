@@ -105,12 +105,39 @@ export function ensureBillingOrigin(req: Request): { ok: boolean; corsHeaders: R
   return { ok: isOriginAllowed(req), corsHeaders };
 }
 
+function normalizeAppBaseUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value);
+    url.search = "";
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+export function getBillingSupabaseKey(): string {
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")?.trim();
+  if (anonKey) return anonKey;
+
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim();
+  if (serviceRoleKey) return serviceRoleKey;
+
+  throw new Error("SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY is not set");
+}
+
 export function getAppBaseUrl(req: Request): string {
-  const configured = Deno.env.get("APP_BASE_URL");
+  const configured = normalizeAppBaseUrl(Deno.env.get("APP_BASE_URL")?.trim());
   if (configured) return configured;
 
-  const origin = req.headers.get("origin");
-  if (origin && isOriginAllowed(req)) return origin;
+  const origin = req.headers.get("origin")?.trim();
+  if (origin && isOriginAllowed(req)) {
+    const normalizedOrigin = normalizeAppBaseUrl(origin);
+    if (normalizedOrigin) return normalizedOrigin;
+  }
 
   return "http://localhost:3000";
 }
