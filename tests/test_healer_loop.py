@@ -2621,6 +2621,60 @@ def test_auto_merge_open_pr_skips_when_local_promotion_is_blocked(tmp_path):
     loop.tracker.merge_pr.assert_not_called()
 
 
+def test_auto_merge_open_pr_skips_when_browser_artifact_proof_is_missing(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60133",
+        repo="owner/repo",
+        title="Issue 60133",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60133",
+        state="pr_open",
+        pr_number=232,
+        pr_state="open",
+        ci_status_summary={"overall_state": "success"},
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_60133_1",
+        issue_id="60133",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_60133_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={
+            "promotion_state": "promotion_ready",
+            "browser_evidence_required": True,
+            "artifact_proof_ready": False,
+        },
+        verifier_summary={},
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=232,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/232",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+
+    merged = loop._auto_merge_open_prs()
+
+    assert merged == 0
+    loop.tracker.merge_pr.assert_not_called()
+
+
 def test_auto_merge_open_pr_skips_dirty_pr(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

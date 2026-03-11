@@ -1690,12 +1690,24 @@ def derive_issue_promotion_state(
         for item in artifact_list
         if isinstance(item, dict) and str(item.get("label") or "").strip()
     }
+    browser_evidence_required = _attempt_requires_browser_artifact_proof(
+        attempt_summary=attempt_summary,
+        artifact_map=artifact_map,
+        labels=labels,
+    )
+    artifact_proof_ready = _attempt_browser_artifact_proof_ready(
+        attempt_summary=attempt_summary,
+        artifact_map=artifact_map,
+        labels=labels,
+    )
 
     if issue_state == "resolved":
         return "promotion_ready"
     if issue_state in {"failed", "blocked"}:
         return "merge_blocked"
     if attempt_promotion_state == "merge_blocked" or bool(phase_state_map.get("merge_blocked")):
+        return "merge_blocked"
+    if browser_evidence_required and not artifact_proof_ready and pr_number > 0:
         return "merge_blocked"
     if pr_number > 0:
         if ci_state == "success":
@@ -1712,6 +1724,39 @@ def derive_issue_promotion_state(
     if attempt_promotion_state == "promotion_ready" or bool(phase_state_map.get("promotion_ready")):
         return "local_validated"
     return ""
+
+
+def _attempt_requires_browser_artifact_proof(
+    *,
+    attempt_summary: dict[str, object],
+    artifact_map: dict[str, object],
+    labels: set[str],
+) -> bool:
+    if bool(attempt_summary.get("browser_evidence_required")):
+        return True
+    return bool(labels) or isinstance(artifact_map.get("failure_artifacts"), dict) or isinstance(
+        artifact_map.get("resolution_artifacts"), dict
+    )
+
+
+def _attempt_browser_artifact_proof_ready(
+    *,
+    attempt_summary: dict[str, object],
+    artifact_map: dict[str, object],
+    labels: set[str],
+) -> bool:
+    if bool(attempt_summary.get("artifact_proof_ready")):
+        return True
+    if {"failure_screenshot", "resolution_screenshot"}.issubset(labels):
+        return True
+    failure_artifacts = artifact_map.get("failure_artifacts")
+    resolution_artifacts = artifact_map.get("resolution_artifacts")
+    if not isinstance(failure_artifacts, dict) or not isinstance(resolution_artifacts, dict):
+        return False
+    return bool(
+        str(failure_artifacts.get("screenshot_path") or "").strip()
+        and str(resolution_artifacts.get("screenshot_path") or "").strip()
+    )
 
 
 def _aggregate_promotion_state_counts(

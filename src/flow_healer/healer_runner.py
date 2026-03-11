@@ -4851,6 +4851,19 @@ def _annotate_test_summary_runtime(
         enriched["runtime_summary"] = dict(runtime_summary)
     if task_spec.artifact_requirements:
         enriched["artifact_requirements"] = list(task_spec.artifact_requirements)
+    browser_evidence_required = bool(task_spec.repro_steps) and any(
+        (
+            task_spec.app_target,
+            task_spec.entry_url,
+            task_spec.runtime_profile,
+        )
+    )
+    if browser_evidence_required:
+        enriched["browser_evidence_required"] = True
+        phase_states = enriched.get("phase_states")
+        phase_state_map = dict(phase_states) if isinstance(phase_states, dict) else {}
+        phase_state_map["browser_evidence_required"] = True
+        enriched["phase_states"] = phase_state_map
     return enriched
 
 
@@ -4865,6 +4878,14 @@ def _annotate_test_summary_browser_artifacts(
         enriched["artifact_bundle"] = dict(artifact_bundle)
     if artifact_links:
         enriched["artifact_links"] = [dict(link) for link in artifact_links]
+    if bool(enriched.get("browser_evidence_required")):
+        artifact_proof_ready = bool(artifact_bundle) and _browser_artifacts_ready(artifact_bundle)
+        enriched["artifact_proof_ready"] = artifact_proof_ready
+        phase_states = enriched.get("phase_states")
+        phase_state_map = dict(phase_states) if isinstance(phase_states, dict) else {}
+        phase_state_map["artifact_proof_ready"] = artifact_proof_ready
+        phase_state_map["artifacts_missing"] = not artifact_proof_ready
+        enriched["phase_states"] = phase_state_map
     return enriched
 
 

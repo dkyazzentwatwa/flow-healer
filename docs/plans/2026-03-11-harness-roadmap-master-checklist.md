@@ -32,7 +32,7 @@ Last updated: `2026-03-11`
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
 | Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, deterministic CI failures now requeue automatically on the same PR, failure buckets are classified, and promotion state now surfaces in status views; live GitHub CI remediation proof is still pending. |
 | Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
-| Merge the change | Partial | Auto-merge now waits for local promotion readiness plus green remote CI, and promotion state is visible in status/dashboard views, but the full state machine and judgment routing are still incomplete. |
+| Merge the change | Partial | Auto-merge now waits for local promotion readiness, screenshot proof on browser-backed app runs, and green remote CI, and promotion state is visible in status/dashboard views, but the full state machine and judgment routing are still incomplete. |
 
 ## Coordination
 
@@ -165,13 +165,13 @@ Status: `Partial`
 - [ ] Define stable promotion states: `local_validated`, `failure_artifacts_captured`, `resolution_artifacts_captured`, `pr_open`, `ci_green`, `promotion_ready`, `merge_blocked`
 - [ ] Persist promotion state transitions
 - [x] Surface promotion state in dashboard/service/status output
-- [ ] Require app proof + screenshots + local validation + green CI before promotion
-- [ ] Keep the lighter path for code-only issues where appropriate
+- [x] Require app proof + screenshots + local validation + green CI before promotion
+- [x] Keep the lighter path for code-only issues where appropriate
 
 ### Merge and approval policy
 
 - [x] Gate auto-merge on `promotion_ready`
-- [ ] Block merge when screenshots are missing
+- [x] Block merge when screenshots are missing
 - [x] Block merge while CI is red or pending
 - [ ] Block merge while judgment is required
 - [ ] Verify label-based approval behavior still composes cleanly with promotion states
@@ -274,7 +274,7 @@ Status: `Later`
 - [x] Add the first CI-aware retry/remediation loop in `healer_loop.py`
 - [x] Surface current promotion states in dashboard/service/status views
 - [ ] Persist explicit promotion-state transitions beyond the current merge gate
-- [ ] Require screenshot proof + local validation + green CI before final promotion
+- [x] Require screenshot proof + local validation + green CI before final promotion
 - [ ] Run a live PR-body smoke with inline before/after evidence
 
 ### Right after that
@@ -296,3 +296,4 @@ Status: `Later`
 - [x] Deterministic remote CI failures now requeue the issue with CI feedback context
 - [x] E2E proof that CI-driven retries update the same PR without duplicates
 - [x] Promotion state now surfaces in service rows and dashboard issue views
+- [x] Browser-backed app runs now need screenshot proof before promotion or auto-merge

@@ -2294,8 +2294,12 @@ class AutonomousHealerLoop:
         test_summary: dict[str, Any] | None = None,
         ci_status_summary: dict[str, Any] | None = None,
     ) -> str:
-        if not self._local_promotion_ready_for_issue(issue_id=issue_id, test_summary=test_summary):
-            return "local_validation_pending"
+        local_gate_state = self._local_promotion_gate_state_for_issue(
+            issue_id=issue_id,
+            test_summary=test_summary,
+        )
+        if local_gate_state != "promotion_ready":
+            return local_gate_state
         ci_state = self._ci_overall_state(ci_status_summary)
         if ci_state == "success":
             return "promotion_ready"
@@ -2305,12 +2309,12 @@ class AutonomousHealerLoop:
             return "ci_failed"
         return "ci_unknown"
 
-    def _local_promotion_ready_for_issue(
+    def _local_promotion_gate_state_for_issue(
         self,
         *,
         issue_id: str,
         test_summary: dict[str, Any] | None = None,
-    ) -> bool:
+    ) -> str:
         resolved_test_summary = dict(test_summary or {})
         if not resolved_test_summary and str(issue_id or "").strip():
             attempts = self.store.list_healer_attempts(issue_id=str(issue_id), limit=1)
@@ -2319,11 +2323,62 @@ class AutonomousHealerLoop:
                 if isinstance(latest_summary, dict):
                     resolved_test_summary = dict(latest_summary)
         if not resolved_test_summary:
+            return "local_validation_pending"
+        if str(resolved_test_summary.get("promotion_state") or "").strip().lower() != "promotion_ready":
+            phase_states = resolved_test_summary.get("phase_states")
+            if not (isinstance(phase_states, dict) and phase_states.get("promotion_ready")):
+                return "local_validation_pending"
+        if self._browser_artifact_proof_required(resolved_test_summary) and not self._browser_artifact_proof_ready(
+            resolved_test_summary
+        ):
+            return "artifacts_missing"
+        return "promotion_ready"
+
+    def _browser_artifact_proof_required(self, test_summary: dict[str, Any] | None) -> bool:
+        if not isinstance(test_summary, dict):
             return False
-        if str(resolved_test_summary.get("promotion_state") or "").strip().lower() == "promotion_ready":
+        if bool(test_summary.get("browser_evidence_required")):
             return True
-        phase_states = resolved_test_summary.get("phase_states")
-        return bool(isinstance(phase_states, dict) and phase_states.get("promotion_ready"))
+        artifact_bundle = test_summary.get("artifact_bundle")
+        if isinstance(artifact_bundle, dict) and (
+            isinstance(artifact_bundle.get("failure_artifacts"), dict)
+            or isinstance(artifact_bundle.get("resolution_artifacts"), dict)
+        ):
+            return True
+        artifact_links = self._normalized_artifact_links(test_summary.get("artifact_links"))
+        if not artifact_links:
+            return False
+        labels = {
+            str(link.get("label") or "").strip().lower()
+            for link in artifact_links
+            if str(link.get("label") or "").strip()
+        }
+        return any(label.startswith("failure_") or label.startswith("resolution_") for label in labels)
+
+    def _browser_artifact_proof_ready(self, test_summary: dict[str, Any] | None) -> bool:
+        if not isinstance(test_summary, dict):
+            return False
+        if bool(test_summary.get("artifact_proof_ready")):
+            return True
+        artifact_links = self._normalized_artifact_links(test_summary.get("artifact_links"))
+        labels = {
+            str(link.get("label") or "").strip().lower()
+            for link in artifact_links
+            if str(link.get("label") or "").strip()
+        }
+        if {"failure_screenshot", "resolution_screenshot"}.issubset(labels):
+            return True
+        artifact_bundle = test_summary.get("artifact_bundle")
+        if not isinstance(artifact_bundle, dict):
+            return False
+        failure_artifacts = artifact_bundle.get("failure_artifacts")
+        resolution_artifacts = artifact_bundle.get("resolution_artifacts")
+        if not isinstance(failure_artifacts, dict) or not isinstance(resolution_artifacts, dict):
+            return False
+        return bool(
+            str(failure_artifacts.get("screenshot_path") or "").strip()
+            and str(resolution_artifacts.get("screenshot_path") or "").strip()
+        )
 
     @staticmethod
     def _ci_overall_state(ci_status_summary: dict[str, Any] | None) -> str:

@@ -3870,6 +3870,8 @@ def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
     assert [call["phase"] for call in browser_harness.calls] == ["failure", "resolution"]
     assert browser_harness.calls[0]["profile"].browser == "chromium"
     assert browser_harness.calls[0]["profile"].headless is True
+    assert result.test_summary["browser_evidence_required"] is True
+    assert result.test_summary["artifact_proof_ready"] is True
     assert result.test_summary["artifact_bundle"]["failure_artifacts"]["video_path"].endswith("before.webm")
     assert result.test_summary["artifact_bundle"]["resolution_artifacts"]["video_path"].endswith("after.webm")
     assert result.test_summary["artifact_links"][0]["label"] == "failure_screenshot"
@@ -4135,6 +4137,8 @@ def test_run_attempt_fails_when_resolution_browser_evidence_is_incomplete(tmp_pa
 
     assert result.success is False
     assert result.failure_class == "artifacts_missing"
+    assert result.test_summary["browser_evidence_required"] is True
+    assert result.test_summary["artifact_proof_ready"] is False
 
 
 def test_run_attempt_fails_when_browser_runtime_is_missing(tmp_path):
