@@ -12,15 +12,28 @@ def import_todos(
     todo_service: TodoService | None = None,
 ) -> list[TodoItem]:
     service = TodoService() if todo_service is None else todo_service
+    prepared_items = _prepare_items(payload)
     imported: list[TodoItem] = []
 
-    for entry in _extract_items(payload):
-        created = service.create_todo(_extract_title(entry))
-        if _is_completed(entry):
+    for prepared in prepared_items:
+        created = service.create_todo(prepared["title"])
+        if prepared["completed"]:
             created = service.complete_todo(created.id)
         imported.append(created)
 
     return imported
+
+
+def _prepare_items(payload: object) -> list[dict[str, object]]:
+    prepared: list[dict[str, object]] = []
+    for entry in _extract_items(payload):
+        prepared.append(
+            {
+                "title": _extract_title(entry),
+                "completed": _is_completed(entry),
+            }
+        )
+    return prepared
 
 
 def _extract_items(payload: object) -> list[Mapping[str, object]]:
@@ -56,7 +69,10 @@ def _extract_title(item: Mapping[str, object]) -> str:
     title = item.get("title")
     if not isinstance(title, str):
         raise ValueError("title_required")
-    return title
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("title_required")
+    return normalized
 
 
 def _is_completed(item: Mapping[str, object]) -> bool:

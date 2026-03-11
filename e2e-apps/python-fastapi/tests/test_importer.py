@@ -52,3 +52,18 @@ def test_import_todos_rejects_invalid_item_entries() -> None:
 
     with pytest.raises(ValueError, match="title_required"):
         import_todos([{"title": "   "}])
+
+
+def test_import_todos_does_not_create_partial_results_for_invalid_batch() -> None:
+    service = TodoService()
+
+    with pytest.raises(ValueError, match="title_required"):
+        import_todos(
+            [
+                {"title": "Ship release"},
+                {"title": "   "},
+            ],
+            todo_service=service,
+        )
+
+    assert service.list_todos() == []
