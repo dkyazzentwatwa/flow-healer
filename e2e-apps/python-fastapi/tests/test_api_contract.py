@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.api import complete_todo, create_app, create_todo, health, list_todos
 
@@ -63,6 +64,16 @@ def test_create_todo_rejects_non_text_title_payloads() -> None:
         error = exc_info.value
         assert error.status_code == 400
         assert error.detail == "title_required"
+
+
+def test_create_todo_route_rejects_missing_and_non_object_bodies_with_contract_error() -> None:
+    client = TestClient(create_app())
+
+    for request_kwargs in ({}, {"json": None}, {"json": []}):
+        response = client.post("/todos", **request_kwargs)
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": "title_required"}
 
 
 def test_list_todos_returns_stable_todos_payload() -> None:
