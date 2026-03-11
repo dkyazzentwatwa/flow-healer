@@ -877,8 +877,22 @@ def test_get_pr_ci_status_summary_combines_check_runs_statuses_and_workflows(mon
     assert "CI" in summary["failing_contexts"]
     assert "e2e" in summary["pending_contexts"]
     assert "status/typecheck" in summary["pending_contexts"]
-    assert {"source": "check_run", "name": "lint", "state": "failure", "bucket": "lint", "updated_at": "2026-03-11T21:04:00Z"} in summary["failing_entries"]
-    assert {"source": "workflow_run", "name": "CI", "state": "failure", "bucket": "unknown", "updated_at": "2026-03-11T21:06:00Z"} in summary["failing_entries"]
+    assert {
+        "source": "check_run",
+        "name": "lint",
+        "state": "failure",
+        "bucket": "lint",
+        "failure_kind": "deterministic_code",
+        "updated_at": "2026-03-11T21:04:00Z",
+    } in summary["failing_entries"]
+    assert {
+        "source": "workflow_run",
+        "name": "CI",
+        "state": "failure",
+        "bucket": "unknown",
+        "failure_kind": "unknown",
+        "updated_at": "2026-03-11T21:06:00Z",
+    } in summary["failing_entries"]
     assert {"source": "status_check", "name": "status/typecheck", "state": "pending", "bucket": "typecheck", "updated_at": "2026-03-11T21:05:00Z"} in summary["pending_entries"]
     assert {"source": "workflow_run", "name": "Preview", "state": "pending", "bucket": "deploy_blocked", "updated_at": "2026-03-11T21:06:30Z"} in summary["pending_entries"]
     assert summary["updated_at"] == "2026-03-11T21:06:30Z"
@@ -909,6 +923,73 @@ def test_get_pr_ci_status_summary_returns_empty_when_head_sha_missing(monkeypatc
     monkeypatch.setattr(tracker, "_request_json", fake_request)
 
     assert tracker.get_pr_ci_status_summary(pr_number=91) == {}
+
+
+def test_get_pr_ci_status_summary_distinguishes_transient_infra_failures(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert method == "GET"
+        if path == "/repos/owner/repo/pulls/92":
+            return {
+                "number": 92,
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/92",
+                "mergeable_state": "clean",
+                "user": {"login": "alice"},
+                "head": {"ref": "healer/issue-92", "sha": "def456"},
+                "updated_at": "2026-03-11T22:00:00Z",
+            }
+        if path == "/repos/owner/repo/commits/def456/check-runs?per_page=100":
+            return {
+                "check_runs": [
+                    {
+                        "name": "runner bootstrap timeout",
+                        "status": "completed",
+                        "conclusion": "timed_out",
+                        "completed_at": "2026-03-11T22:01:00Z",
+                    },
+                    {
+                        "name": "lint",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "completed_at": "2026-03-11T22:02:00Z",
+                    },
+                ]
+            }
+        if path == "/repos/owner/repo/commits/def456/status":
+            return {"state": "pending", "statuses": []}
+        if path == "/repos/owner/repo/actions/runs?head_sha=def456&per_page=100":
+            return {"workflow_runs": []}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    summary = tracker.get_pr_ci_status_summary(pr_number=92)
+
+    assert summary["transient_failure_contexts"] == ["runner bootstrap timeout"]
+    assert summary["deterministic_failure_contexts"] == ["lint"]
+    assert summary["transient_failure_entries"] == [
+        {
+            "source": "check_run",
+            "name": "runner bootstrap timeout",
+            "state": "failure",
+            "bucket": "setup",
+            "failure_kind": "transient_infra",
+            "updated_at": "2026-03-11T22:01:00Z",
+        }
+    ]
+    assert summary["deterministic_failure_entries"] == [
+        {
+            "source": "check_run",
+            "name": "lint",
+            "state": "failure",
+            "bucket": "lint",
+            "failure_kind": "deterministic_code",
+            "updated_at": "2026-03-11T22:02:00Z",
+        }
+    ]
 
 
 def test_open_or_update_pr_updates_existing_pull_request_body(monkeypatch):

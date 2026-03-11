@@ -30,7 +30,7 @@ Last updated: `2026-03-11`
 | Record a second video demonstrating the resolution | Partial | Best-effort only; screenshots are the required proof path. |
 | Open a pull request | Done | Existing PR open/update loop works. |
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
-| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, deterministic CI failures now requeue automatically on the same PR, failure buckets are classified, and promotion state now surfaces in status views; live GitHub CI remediation proof is still pending. |
+| Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, transient infra failures are separated from deterministic code failures, deterministic CI failures now requeue automatically on the same PR, failure buckets are classified, and promotion state now surfaces in status views; live GitHub CI remediation proof is still pending. |
 | Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
 | Merge the change | Partial | Auto-merge now waits for local promotion readiness, screenshot proof on browser-backed app runs, and green remote CI, and promotion states are both visible and persisted across attempts, but judgment routing and live end-to-end promotion proof are still incomplete. |
 
@@ -150,7 +150,7 @@ Status: `Partial`
 
 - [x] Define normalized CI failure buckets: `setup`, `lint`, `typecheck`, `test`, `flake`, `deploy_blocked`, `unknown`
 - [x] Map GitHub checks/workflows into those buckets
-- [ ] Distinguish transient infra failures from deterministic code failures
+- [x] Distinguish transient infra failures from deterministic code failures
 - [x] Preserve raw CI evidence for operator debugging
 
 ### CI remediation loop
@@ -299,3 +299,4 @@ Status: `Later`
 - [x] Browser-backed app runs now need screenshot proof before promotion or auto-merge
 - [x] Promotion-state transitions now persist in runner/loop attempt summaries
 - [x] Approval-gated PRs stay out of `promotion_ready` until the human label path resumes them
+- [x] Transient infra CI failures no longer trigger the deterministic repair loop

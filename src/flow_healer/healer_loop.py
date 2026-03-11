@@ -2544,6 +2544,7 @@ class AutonomousHealerLoop:
                 "name": str(entry.get("name") or "").strip(),
                 "state": str(entry.get("state") or "").strip(),
                 "bucket": str(entry.get("bucket") or "").strip(),
+                "failure_kind": str(entry.get("failure_kind") or "").strip(),
                 "updated_at": str(entry.get("updated_at") or "").strip(),
             }
             for entry in (ci_status_summary.get("failing_entries") or [])
@@ -2565,6 +2566,22 @@ class AutonomousHealerLoop:
     def _retriable_ci_failure_buckets(ci_status_summary: dict[str, Any] | None) -> list[str]:
         if not isinstance(ci_status_summary, dict):
             return []
+        failing_entries = [
+            dict(entry)
+            for entry in (ci_status_summary.get("failing_entries") or [])
+            if isinstance(entry, dict)
+        ]
+        if failing_entries:
+            deterministic_buckets = {
+                str(entry.get("bucket") or "").strip()
+                for entry in failing_entries
+                if str(entry.get("bucket") or "").strip()
+                and str(entry.get("failure_kind") or "").strip().lower() != "transient_infra"
+            }
+            if deterministic_buckets:
+                return sorted(bucket for bucket in deterministic_buckets if bucket in _RETRIABLE_CI_FAILURE_BUCKETS)
+            if any(str(entry.get("failure_kind") or "").strip().lower() == "transient_infra" for entry in failing_entries):
+                return []
         buckets = [
             str(bucket).strip()
             for bucket in (ci_status_summary.get("failure_buckets") or [])

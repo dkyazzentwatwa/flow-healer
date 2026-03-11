@@ -640,10 +640,34 @@ class GitHubHealerTracker:
                     *workflow_runs_summary["failing_contexts"],
                 }
             ),
+            "transient_failure_contexts": sorted(
+                {
+                    *check_runs_summary["transient_failure_contexts"],
+                    *status_checks_summary["transient_failure_contexts"],
+                    *workflow_runs_summary["transient_failure_contexts"],
+                }
+            ),
+            "deterministic_failure_contexts": sorted(
+                {
+                    *check_runs_summary["deterministic_failure_contexts"],
+                    *status_checks_summary["deterministic_failure_contexts"],
+                    *workflow_runs_summary["deterministic_failure_contexts"],
+                }
+            ),
             "failing_entries": self._merge_ci_entries(
                 check_runs_summary["failure_entries"],
                 status_checks_summary["failure_entries"],
                 workflow_runs_summary["failure_entries"],
+            ),
+            "transient_failure_entries": self._merge_ci_entries(
+                check_runs_summary["transient_failure_entries"],
+                status_checks_summary["transient_failure_entries"],
+                workflow_runs_summary["transient_failure_entries"],
+            ),
+            "deterministic_failure_entries": self._merge_ci_entries(
+                check_runs_summary["deterministic_failure_entries"],
+                status_checks_summary["deterministic_failure_entries"],
+                workflow_runs_summary["deterministic_failure_entries"],
             ),
             "pending_contexts": sorted(
                 {
@@ -965,6 +989,10 @@ class GitHubHealerTracker:
         pending_contexts: list[str] = []
         failure_entries: list[dict[str, str]] = []
         pending_entries: list[dict[str, str]] = []
+        transient_failure_contexts: list[str] = []
+        deterministic_failure_contexts: list[str] = []
+        transient_failure_entries: list[dict[str, str]] = []
+        deterministic_failure_entries: list[dict[str, str]] = []
         failure_buckets: set[str] = set()
         pending_buckets: set[str] = set()
         updated_values: list[str] = []
@@ -1000,15 +1028,30 @@ class GitHubHealerTracker:
                     failing_contexts.append(name)
                 bucket = cls._classify_ci_failure_bucket(name)
                 failure_buckets.add(bucket)
-                failure_entries.append(
-                    {
-                        "source": source_label,
-                        "name": name,
-                        "state": normalized_state,
-                        "bucket": bucket,
-                        "updated_at": updated_at,
-                    }
+                failure_kind = cls._classify_ci_failure_kind(
+                    name=name,
+                    bucket=bucket,
+                    source_label=source_label,
+                    status=normalized_status if status_key else "",
+                    conclusion=normalized_conclusion if conclusion_key else "",
                 )
+                failure_entry = {
+                    "source": source_label,
+                    "name": name,
+                    "state": normalized_state,
+                    "bucket": bucket,
+                    "failure_kind": failure_kind,
+                    "updated_at": updated_at,
+                }
+                failure_entries.append(failure_entry)
+                if failure_kind == "transient_infra":
+                    if name:
+                        transient_failure_contexts.append(name)
+                    transient_failure_entries.append(dict(failure_entry))
+                elif failure_kind == "deterministic_code":
+                    if name:
+                        deterministic_failure_contexts.append(name)
+                    deterministic_failure_entries.append(dict(failure_entry))
             elif normalized_state == "pending":
                 counts["pending"] += 1
                 if name:
@@ -1034,6 +1077,10 @@ class GitHubHealerTracker:
             "pending_contexts": pending_contexts,
             "failure_entries": failure_entries,
             "pending_entries": pending_entries,
+            "transient_failure_contexts": transient_failure_contexts,
+            "deterministic_failure_contexts": deterministic_failure_contexts,
+            "transient_failure_entries": transient_failure_entries,
+            "deterministic_failure_entries": deterministic_failure_entries,
             "failure_buckets": sorted(failure_buckets),
             "pending_buckets": sorted(pending_buckets),
             "updated_at": cls._latest_timestamp(*updated_values),
@@ -1059,29 +1106,70 @@ class GitHubHealerTracker:
         return "unknown"
 
     @staticmethod
+    def _classify_ci_failure_kind(
+        *,
+        name: str,
+        bucket: str,
+        source_label: str,
+        status: str,
+        conclusion: str,
+    ) -> str:
+        normalized = re.sub(r"[_/:-]+", " ", str(name or "").strip().lower())
+        normalized_status = str(status or "").strip().lower()
+        normalized_conclusion = str(conclusion or "").strip().lower()
+        if normalized_conclusion in {"timed_out", "startup_failure"}:
+            return "transient_infra"
+        if normalized_conclusion == "cancelled" and source_label in {"check_run", "workflow_run"}:
+            return "transient_infra"
+        if normalized_status in {"requested", "waiting"}:
+            return "transient_infra"
+        if any(
+            token in normalized
+            for token in (
+                "artifact upload",
+                "bootstrap timeout",
+                "connection reset",
+                "connection refused",
+                "dns",
+                "network",
+                "rate limit",
+                "runner",
+                "service unavailable",
+                "timed out",
+                "timeout",
+            )
+        ):
+            return "transient_infra"
+        if bucket in {"lint", "setup", "test", "typecheck"}:
+            return "deterministic_code"
+        return "unknown"
+
+    @staticmethod
     def _merge_ci_entries(*entry_groups: list[dict[str, str]]) -> list[dict[str, str]]:
         merged: list[dict[str, str]] = []
-        seen: set[tuple[str, str, str, str, str]] = set()
+        seen: set[tuple[str, str, str, str, str, str]] = set()
         for group in entry_groups:
             for entry in group:
                 source = str(entry.get("source") or "").strip()
                 name = str(entry.get("name") or "").strip()
                 state = str(entry.get("state") or "").strip()
                 bucket = str(entry.get("bucket") or "").strip()
+                failure_kind = str(entry.get("failure_kind") or "").strip()
                 updated_at = str(entry.get("updated_at") or "").strip()
-                key = (source, name, state, bucket, updated_at)
+                key = (source, name, state, bucket, failure_kind, updated_at)
                 if key in seen:
                     continue
                 seen.add(key)
-                merged.append(
-                    {
-                        "source": source,
-                        "name": name,
-                        "state": state,
-                        "bucket": bucket,
-                        "updated_at": updated_at,
-                    }
-                )
+                merged_entry = {
+                    "source": source,
+                    "name": name,
+                    "state": state,
+                    "bucket": bucket,
+                    "updated_at": updated_at,
+                }
+                if failure_kind:
+                    merged_entry["failure_kind"] = failure_kind
+                merged.append(merged_entry)
         return sorted(
             merged,
             key=lambda item: (

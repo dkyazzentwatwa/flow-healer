@@ -5561,6 +5561,66 @@ def test_requeue_ci_failed_pr_skips_non_retriable_buckets(tmp_path):
     assert store.get_state("healer_ci_handled_signal:50448") != ""
 
 
+def test_requeue_ci_failed_pr_skips_transient_infra_failures(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="504481",
+        repo="owner/repo",
+        title="Issue 504481",
+        body="Runner timed out",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.increment_healer_attempt("504481")
+    store.set_healer_issue_state(
+        issue_id="504481",
+        state="pr_open",
+        pr_number=348,
+        pr_state="open",
+        ci_status_summary={
+            "head_sha": "transient123",
+            "overall_state": "failure",
+            "failure_buckets": ["setup"],
+            "transient_failure_contexts": ["runner bootstrap timeout"],
+            "transient_failure_entries": [
+                {
+                    "source": "check_run",
+                    "name": "runner bootstrap timeout",
+                    "state": "failure",
+                    "bucket": "setup",
+                    "failure_kind": "transient_infra",
+                    "updated_at": "2026-03-11T22:06:30Z",
+                }
+            ],
+            "deterministic_failure_entries": [],
+            "failing_entries": [
+                {
+                    "source": "check_run",
+                    "name": "runner bootstrap timeout",
+                    "state": "failure",
+                    "bucket": "setup",
+                    "failure_kind": "transient_infra",
+                    "updated_at": "2026-03-11T22:06:30Z",
+                }
+            ],
+            "updated_at": "2026-03-11T22:06:30Z",
+        },
+    )
+
+    loop = _make_loop(store, healer_retry_budget=3)
+
+    requeued = loop._requeue_ci_failed_prs()
+
+    issue = store.get_healer_issue("504481")
+    assert requeued == 0
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["last_failure_class"] == ""
+    assert store.get_state("healer_ci_handled_signal:504481") != ""
+
+
 def test_requeue_ci_failed_pr_stops_after_retry_budget(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
