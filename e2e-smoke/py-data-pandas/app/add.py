@@ -1,7 +1,8 @@
-from typing import TypeVar
+import pandas as pd
+from typing import Any
 
-AddableT = TypeVar("AddableT")
 
-
-def add(a: AddableT, b: AddableT) -> AddableT:
+def add(a: Any, b: Any) -> Any:
+    if isinstance(a, (pd.Series, pd.DataFrame)):
+        return a.add(b)
     return a + b
