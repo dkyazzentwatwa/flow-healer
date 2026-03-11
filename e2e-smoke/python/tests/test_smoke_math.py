@@ -34,6 +34,13 @@ class IntLikeButNotIntegral:
         return 9
 
 
+class IndexOnlyInt:
+    """Exercise exact integer coercion without Integral ABC registration."""
+
+    def __index__(self) -> int:
+        return 11
+
+
 def _load_smoke_math_module() -> ModuleType:
     spec = spec_from_file_location("smoke_math", SMOKE_MATH_PATH)
     assert spec is not None and spec.loader is not None
@@ -329,6 +336,11 @@ def test_normalize_operand_rounds_float_inputs_deterministically(
 def test_coerce_operands_ignores_overflowing_int_hook_for_integral_subclass() -> None:
     """Integral normalization should not fail because __int__ is unstable."""
     assert _coerce_operands(OverflowingInt(8), "-3") == (8, -3)
+
+
+def test_add_accepts_exact_index_operands_without_integral_registration() -> None:
+    """Index-only operands should be accepted as exact integers."""
+    assert _call_add(IndexOnlyInt(), "4") == 15
 
 
 def test_add3_preserves_identity_across_signed_inputs() -> None:
