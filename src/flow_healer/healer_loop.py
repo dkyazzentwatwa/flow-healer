@@ -505,10 +505,19 @@ class AutonomousHealerLoop:
         details_cache: dict[int, PullRequestDetails | None] = {}
         viewer_login = self.tracker.viewer_login().lower()
         self._reconcile_pr_outcomes(active_prs=active_pr_rows, details_cache=details_cache)
+        active_pr_rows = self._list_active_pr_rows(include_blocked=True)
+        open_pr_rows = [
+            row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
+        ]
         self._auto_approve_open_prs(active_prs=open_pr_rows, details_cache=details_cache, viewer_login=viewer_login)
         merged = self._auto_merge_open_prs(active_prs=open_pr_rows, details_cache=details_cache)
         if merged:
-            self._reconcile_pr_outcomes(details_cache={}, force_refresh=True)
+            details_cache = {}
+            self._reconcile_pr_outcomes(details_cache=details_cache, force_refresh=True)
+            active_pr_rows = self._list_active_pr_rows(include_blocked=True)
+            open_pr_rows = [
+                row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
+            ]
         resumed_approved = self._resume_approved_pending_prs()
         self._ingest_pr_feedback(active_prs=open_pr_rows, details_cache=details_cache, viewer_login=viewer_login)
         self._maybe_reconcile_blocked_issue_labels()
@@ -2194,16 +2203,50 @@ class AutonomousHealerLoop:
             if pr_number <= 0:
                 continue
             details = self._get_pr_details_cached(pr_number=pr_number, cache=details_cache)
-            merged += int(self._maybe_auto_merge_pr(pr_number=pr_number, details=details))
+            merged += int(
+                self._maybe_auto_merge_pr(
+                    pr_number=pr_number,
+                    details=details,
+                    issue_id=str(row.get("issue_id") or ""),
+                    ci_status_summary=row.get("ci_status_summary"),
+                )
+            )
         return merged
 
-    def _maybe_auto_merge_pr(self, *, pr_number: int, details: PullRequestDetails | None = None) -> bool:
+    def _maybe_auto_merge_pr(
+        self,
+        *,
+        pr_number: int,
+        details: PullRequestDetails | None = None,
+        issue_id: str = "",
+        test_summary: dict[str, Any] | None = None,
+        ci_status_summary: dict[str, Any] | None = None,
+    ) -> bool:
         if not getattr(self.settings, "healer_pr_auto_merge_clean", True):
             return False
         details = details if details is not None else self.tracker.get_pr_details(pr_number=pr_number)
         if details is None or details.state != "open":
             return False
         if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
+            return False
+        resolved_ci_status_summary = dict(ci_status_summary or {})
+        if not resolved_ci_status_summary:
+            resolved_ci_status_summary = self._resolve_pr_ci_status_summary(
+                issue_id=issue_id,
+                pr_number=pr_number,
+                head_sha=details.head_sha,
+            )
+        gate_state = self._merge_gate_state_for_issue(
+            issue_id=issue_id,
+            test_summary=test_summary,
+            ci_status_summary=resolved_ci_status_summary,
+        )
+        if gate_state != "promotion_ready":
+            logger.info(
+                "Skipping auto-merge for PR #%d because promotion gate is %s.",
+                pr_number,
+                gate_state,
+            )
             return False
         try:
             return self.tracker.merge_pr(
@@ -2213,6 +2256,69 @@ class AutonomousHealerLoop:
         except Exception as exc:
             logger.warning("Failed to auto-merge PR #%d: %s", pr_number, exc)
             return False
+
+    def _resolve_pr_ci_status_summary(
+        self,
+        *,
+        issue_id: str,
+        pr_number: int,
+        head_sha: str = "",
+    ) -> dict[str, Any]:
+        normalized_issue_id = str(issue_id or "").strip()
+        if pr_number <= 0:
+            return {}
+        summary = self.tracker.get_pr_ci_status_summary(pr_number=pr_number, head_sha=head_sha)
+        normalized_summary = dict(summary) if isinstance(summary, dict) else {}
+        if normalized_issue_id and normalized_summary:
+            self.store.update_issue_pr_ci_status(
+                issue_id=normalized_issue_id,
+                ci_status_summary=normalized_summary,
+            )
+        return normalized_summary
+
+    def _merge_gate_state_for_issue(
+        self,
+        *,
+        issue_id: str,
+        test_summary: dict[str, Any] | None = None,
+        ci_status_summary: dict[str, Any] | None = None,
+    ) -> str:
+        if not self._local_promotion_ready_for_issue(issue_id=issue_id, test_summary=test_summary):
+            return "local_validation_pending"
+        ci_state = self._ci_overall_state(ci_status_summary)
+        if ci_state == "success":
+            return "promotion_ready"
+        if ci_state == "pending":
+            return "ci_pending"
+        if ci_state == "failure":
+            return "ci_failed"
+        return "ci_unknown"
+
+    def _local_promotion_ready_for_issue(
+        self,
+        *,
+        issue_id: str,
+        test_summary: dict[str, Any] | None = None,
+    ) -> bool:
+        resolved_test_summary = dict(test_summary or {})
+        if not resolved_test_summary and str(issue_id or "").strip():
+            attempts = self.store.list_healer_attempts(issue_id=str(issue_id), limit=1)
+            if attempts:
+                latest_summary = attempts[0].get("test_summary")
+                if isinstance(latest_summary, dict):
+                    resolved_test_summary = dict(latest_summary)
+        if not resolved_test_summary:
+            return False
+        if str(resolved_test_summary.get("promotion_state") or "").strip().lower() == "promotion_ready":
+            return True
+        phase_states = resolved_test_summary.get("phase_states")
+        return bool(isinstance(phase_states, dict) and phase_states.get("promotion_ready"))
+
+    @staticmethod
+    def _ci_overall_state(ci_status_summary: dict[str, Any] | None) -> str:
+        if not isinstance(ci_status_summary, dict):
+            return ""
+        return str(ci_status_summary.get("overall_state") or "").strip().lower()
 
     @staticmethod
     def _normalize_repo_path(value: str) -> str:
@@ -2527,6 +2633,7 @@ class AutonomousHealerLoop:
         attempt_id = ""
         actual_diff: list[str] = []
         test_summary: dict[str, object] = {}
+        ci_status_summary: dict[str, object] = {}
         verifier_summary: dict[str, object] = {}
         swarm_summary: dict[str, object] = {}
         failure_class = ""
@@ -3249,7 +3356,18 @@ class AutonomousHealerLoop:
             issue_state = "pr_open"
             attempt_state = "pr_open"
             self._maybe_auto_approve_pr(pr_number=pr.number)
-            self._maybe_auto_merge_pr(pr_number=pr.number)
+            ci_status_summary = dict(
+                self._resolve_pr_ci_status_summary(
+                    issue_id=issue.issue_id,
+                    pr_number=pr.number,
+                )
+            )
+            self._maybe_auto_merge_pr(
+                pr_number=pr.number,
+                issue_id=issue.issue_id,
+                test_summary=test_summary,
+                ci_status_summary=ci_status_summary,
+            )
             logger.info("Issue #%s opened/updated PR #%s", issue.issue_id, pr.number)
             if self.settings.healer_enable_review:
                 try:
@@ -3290,6 +3408,7 @@ class AutonomousHealerLoop:
                         test_summary=test_summary,
                         workspace_status=getattr(run_result, "workspace_status", None),
                     ),
+                    ci_status_summary=ci_status_summary,
                     judgment_reason_code=self._resolve_attempt_judgment_reason_code(
                         test_summary=test_summary,
                         workspace_status=getattr(run_result, "workspace_status", None),

@@ -30,9 +30,9 @@ Last updated: `2026-03-11`
 | Record a second video demonstrating the resolution | Partial | Best-effort only; screenshots are the required proof path. |
 | Open a pull request | Done | Existing PR open/update loop works. |
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
-| Detect and remediate build failures | Partial | Local failures are handled; remote CI/check-run ingestion is still missing. |
+| Detect and remediate build failures | Partial | Local failures are handled and remote CI state is visible; automatic CI remediation is still missing. |
 | Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
-| Merge the change | Partial | Merge plumbing exists, but promotion is not yet gated on full remote CI + judgment logic. |
+| Merge the change | Partial | Auto-merge now waits for local promotion readiness plus green remote CI, but full promotion-state and judgment routing are still incomplete. |
 
 ## Coordination
 
@@ -170,9 +170,9 @@ Status: `Next`
 
 ### Merge and approval policy
 
-- [ ] Gate auto-merge on `promotion_ready`
+- [x] Gate auto-merge on `promotion_ready`
 - [ ] Block merge when screenshots are missing
-- [ ] Block merge while CI is red or pending
+- [x] Block merge while CI is red or pending
 - [ ] Block merge while judgment is required
 - [ ] Verify label-based approval behavior still composes cleanly with promotion states
 
@@ -271,7 +271,7 @@ Status: `Later`
 - [x] Implement GitHub check-run / status-check ingestion in `healer_tracker.py`
 - [x] Persist `ci_status_summary` in attempts and status surfaces
 - [ ] Add CI-aware retry/remediation loop in `healer_loop.py`
-- [ ] Add explicit promotion states and merge gating
+- [ ] Add explicit promotion states beyond the current merge gate
 - [ ] Run a live PR-body smoke with inline before/after evidence
 
 ### Right after that
@@ -288,3 +288,4 @@ Status: `Later`
 - [x] Screenshot-first evidence contract adopted
 - [x] Inline GitHub evidence proven live on issue `#913`
 - [x] Remote CI visibility landed across tracker/store/service/dashboard payloads
+- [x] Auto-merge now waits for green remote CI plus local promotion readiness

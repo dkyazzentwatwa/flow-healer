@@ -2434,7 +2434,28 @@ def test_auto_merge_open_pr_merges_clean_pr(tmp_path):
         labels=["healer:ready"],
         priority=5,
     )
-    store.set_healer_issue_state(issue_id="6013", state="pr_open", pr_number=130, pr_state="open")
+    store.set_healer_issue_state(
+        issue_id="6013",
+        state="pr_open",
+        pr_number=130,
+        pr_state="open",
+        ci_status_summary={"overall_state": "success"},
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_6013_1",
+        issue_id="6013",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_6013_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={"promotion_state": "promotion_ready"},
+        verifier_summary={},
+    )
 
     loop = _make_loop(store)
     loop.tracker.get_pr_details.return_value = PullRequestDetails(
@@ -2450,6 +2471,106 @@ def test_auto_merge_open_pr_merges_clean_pr(tmp_path):
 
     assert merged == 1
     loop.tracker.merge_pr.assert_called_once_with(pr_number=130, merge_method="squash")
+
+
+def test_auto_merge_open_pr_skips_when_ci_is_pending(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60131",
+        repo="owner/repo",
+        title="Issue 60131",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60131",
+        state="pr_open",
+        pr_number=230,
+        pr_state="open",
+        ci_status_summary={"overall_state": "pending", "pending_contexts": ["CI"]},
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_60131_1",
+        issue_id="60131",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_60131_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={"promotion_state": "promotion_ready"},
+        verifier_summary={},
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=230,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/230",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+
+    merged = loop._auto_merge_open_prs()
+
+    assert merged == 0
+    loop.tracker.merge_pr.assert_not_called()
+
+
+def test_auto_merge_open_pr_skips_when_local_promotion_is_blocked(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60132",
+        repo="owner/repo",
+        title="Issue 60132",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60132",
+        state="pr_open",
+        pr_number=231,
+        pr_state="open",
+        ci_status_summary={"overall_state": "success"},
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_60132_1",
+        issue_id="60132",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_60132_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={"promotion_state": "merge_blocked"},
+        verifier_summary={},
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=231,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/231",
+        mergeable_state="clean",
+        author="healer-service",
+    )
+
+    merged = loop._auto_merge_open_prs()
+
+    assert merged == 0
+    loop.tracker.merge_pr.assert_not_called()
 
 
 def test_auto_merge_open_pr_skips_dirty_pr(tmp_path):

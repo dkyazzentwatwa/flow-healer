@@ -345,6 +345,47 @@ class FakeGitHubAPI:
             if parts[3] == "issues" and len(parts) == 6 and parts[5] == "comments":
                 return list(self.state.issue_comments.get(int(parts[4]), []))
 
+            if parts[3] == "commits" and len(parts) == 6 and parts[5] == "check-runs":
+                head_sha = parts[4]
+                return {
+                    "check_runs": [
+                        {
+                            "name": "CI",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "completed_at": "2026-03-11T22:01:00Z",
+                            "head_sha": head_sha,
+                        }
+                    ]
+                }
+
+            if parts[3] == "commits" and len(parts) == 6 and parts[5] == "status":
+                head_sha = parts[4]
+                return {
+                    "statuses": [
+                        {
+                            "context": "Checks / CI",
+                            "state": "success",
+                            "updated_at": "2026-03-11T22:01:00Z",
+                            "sha": head_sha,
+                        }
+                    ]
+                }
+
+            if parts[3] == "actions" and len(parts) == 5 and parts[4] == "runs":
+                head_sha = query.get("head_sha", [""])[0]
+                return {
+                    "workflow_runs": [
+                        {
+                            "name": "build",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "updated_at": "2026-03-11T22:01:00Z",
+                            "head_sha": head_sha,
+                        }
+                    ]
+                }
+
             if parts[3] == "pulls" and len(parts) == 4:
                 head = query.get("head", [""])[0]
                 return [
@@ -394,16 +435,18 @@ class FakeGitHubAPI:
                     pr_number = self.state._pr_counter
                     branch = str(payload.get("head") or "")
                     head_label = f"{repo_slug.split('/')[0]}:{branch}" if branch else ""
+                    head_sha = f"sha-{pr_number}"
                     pr = {
                         "number": pr_number,
                         "state": "open",
                         "html_url": f"https://example.test/{repo_slug}/pull/{pr_number}",
-                        "head": {"ref": branch},
+                        "head": {"ref": branch, "sha": head_sha},
                         "base": {"ref": str(payload.get("base") or "main")},
                         "user": {"login": self.state.viewer_login},
                         "title": str(payload.get("title") or ""),
                         "body": str(payload.get("body") or ""),
                         "head_label": head_label,
+                        "updated_at": "2026-03-11T22:00:00Z",
                     }
                     self.state.pulls[pr_number] = pr
                 return pr
