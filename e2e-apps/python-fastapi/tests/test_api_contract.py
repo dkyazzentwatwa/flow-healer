@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 
 from app.api import complete_todo, create_app, create_todo, health, list_todos
 
+APP_NAME = "Flow Healer Python FastAPI Sandbox"
+
 
 def _expected_todo_payload(
     *,
@@ -44,7 +46,16 @@ def _route_for(app, path: str, method: str):
 
 
 def test_health_returns_ok_status() -> None:
-    assert health() == {"status": "ok"}
+    assert health() == {"status": "ok", "service": {"name": APP_NAME}}
+
+
+def test_health_route_returns_service_metadata_contract() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "service": {"name": APP_NAME}}
 
 
 def test_create_todo_rejects_blank_titles() -> None:
