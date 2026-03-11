@@ -17,6 +17,12 @@ import { industryTemplates, type IndustryTemplate } from "@/data/industryTemplat
 
 const steps = ["Business Profile", "Add a Service", "Add a FAQ", "Embed Widget"];
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return typeof error === "object" && error && "message" in error && typeof error.message === "string"
+    ? error.message
+    : fallback;
+}
+
 const Onboarding = () => {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -93,8 +99,8 @@ const Onboarding = () => {
         return;
       }
       setStep((s) => s + 1);
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      toast({ title: "Error", description: getErrorMessage(e, "Could not save onboarding step"), variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -181,8 +187,12 @@ const Onboarding = () => {
                               );
                               toast({ title: "Template applied!", description: `Added ${t.services.length} services and ${t.faqs.length} FAQs.` });
                               setStep(3);
-                            } catch (e: any) {
-                              toast({ title: "Error", description: e.message, variant: "destructive" });
+                            } catch (e: unknown) {
+                              toast({
+                                title: "Error",
+                                description: getErrorMessage(e, "Could not apply template"),
+                                variant: "destructive",
+                              });
                             } finally {
                               setSaving(false);
                             }

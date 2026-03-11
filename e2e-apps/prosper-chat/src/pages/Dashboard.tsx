@@ -36,6 +36,7 @@ import AdminBusinesses from "@/components/dashboard/admin/AdminBusinesses";
 import AdminUsers from "@/components/dashboard/admin/AdminUsers";
 import BotsPage from "@/components/dashboard/BotsPage";
 import HelpPage from "@/components/dashboard/HelpPage";
+import type { TablesInsert } from "@/integrations/supabase/types";
 
 const navItems = [
   { path: "/dashboard", icon: LayoutDashboard, label: "Overview" },
@@ -57,6 +58,12 @@ const adminNavItems = [
   { path: "/dashboard/admin/businesses", icon: Building2, label: "All Businesses" },
   { path: "/dashboard/admin/users", icon: UserCog, label: "All Users" },
 ];
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  return typeof error === "object" && error && "message" in error && typeof error.message === "string"
+    ? error.message
+    : fallback;
+}
 
 const AppSidebar = () => {
   const location = useLocation();
@@ -108,11 +115,12 @@ const AppSidebar = () => {
         .single();
       if (error) throw error;
 
-      await supabase.from("subscriptions").insert({
+      const subscriptionInsert: TablesInsert<"subscriptions"> = {
         business_id: newBiz.id,
-        plan: "agency" as any,
-        status: "active" as any,
-      });
+        plan: "agency",
+        status: "active",
+      };
+      await supabase.from("subscriptions").insert(subscriptionInsert);
 
       await refetchBusinesses();
       setActiveBusinessId(newBiz.id);
@@ -120,8 +128,10 @@ const AppSidebar = () => {
       setNewBizName("");
       setNewBizEmail("");
       setNewBizPhone("");
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Failed to add business:", e);
+      const message = getErrorMessage(e, "Could not add business");
+      console.error(message);
     } finally {
       setAddingBiz(false);
     }
