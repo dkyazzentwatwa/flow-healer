@@ -96,3 +96,27 @@ def test_refresh_access_token_uses_existing_expiry_when_provider_omits_lifetime(
     assert refreshed.access_token == "updated-access"
     assert refreshed.refresh_token == "refresh-me"
     assert refreshed.expires_at == original_expiry
+
+
+def test_refresh_access_token_uses_provider_expiry_when_available() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    original_expiry = now + timedelta(seconds=15)
+    refreshed_expiry = now + timedelta(minutes=5)
+    bundle = TokenBundle(
+        access_token="current-access",
+        refresh_token="refresh-me",
+        expires_at=original_expiry,
+    )
+
+    refreshed = refresh_access_token(
+        bundle,
+        lambda _refresh_token: {
+            "access_token": "updated-access",
+            "expires_at": refreshed_expiry,
+        },
+        now=now,
+    )
+
+    assert refreshed.access_token == "updated-access"
+    assert refreshed.refresh_token == "refresh-me"
+    assert refreshed.expires_at == refreshed_expiry

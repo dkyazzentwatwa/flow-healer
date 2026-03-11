@@ -37,7 +37,12 @@ def refresh_access_token(
         raise ValueError("access_token_required")
 
     next_refresh_token = _normalize_text(refreshed.get("refresh_token")) or refresh_token
-    expires_at = _resolve_expiry(refreshed.get("expires_in"), current_time, fallback=bundle.expires_at)
+    expires_at = _resolve_expiry(
+        refreshed.get("expires_at"),
+        refreshed.get("expires_in"),
+        current_time,
+        fallback=bundle.expires_at,
+    )
     return TokenBundle(
         access_token=access_token,
         refresh_token=next_refresh_token,
@@ -66,7 +71,18 @@ def _normalize_text(value: object) -> str | None:
     return normalized or None
 
 
-def _resolve_expiry(raw_expires_in: object, now: datetime, *, fallback: datetime) -> datetime:
+def _resolve_expiry(
+    raw_expires_at: object,
+    raw_expires_in: object,
+    now: datetime,
+    *,
+    fallback: datetime,
+) -> datetime:
+    if isinstance(raw_expires_at, datetime):
+        if raw_expires_at.tzinfo is None:
+            return raw_expires_at.replace(tzinfo=UTC)
+        return raw_expires_at
+
     if raw_expires_in is None:
         return fallback
 
