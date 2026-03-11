@@ -6,6 +6,11 @@ from app.repository import InMemoryTodoRepository, ServiceRecord, ServiceReposit
 from app.service import DomainService, TodoService
 
 
+class _FalsyServices(list[ServiceRecord]):
+    def __bool__(self) -> bool:
+        return False
+
+
 def test_repository_list_services_returns_detached_records() -> None:
     repository = ServiceRepository(
         [
@@ -28,6 +33,34 @@ def test_repository_list_services_returns_detached_records() -> None:
     assert len(fresh_services) == 1
     assert fresh_services[0].tags == ["core"]
     assert fresh_services[0].metadata == {"region": "us-west-2"}
+
+
+def test_repository_preserves_detached_records_from_explicit_falsy_input() -> None:
+    original_services = _FalsyServices(
+        [
+            ServiceRecord(
+                service_id="svc-1",
+                name="billing",
+                tags=["core"],
+                metadata={"region": "us-west-2"},
+            )
+        ]
+    )
+
+    repository = ServiceRepository(original_services)
+    original_services[0].tags.append("mutated")
+    original_services[0].metadata["region"] = "eu-central-1"
+
+    stored_services = repository.list_services()
+
+    assert stored_services == [
+        ServiceRecord(
+            service_id="svc-1",
+            name="billing",
+            tags=["core"],
+            metadata={"region": "us-west-2"},
+        )
+    ]
 
 
 def test_repository_add_returns_detached_record() -> None:

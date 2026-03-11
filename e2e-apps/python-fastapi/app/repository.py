@@ -15,7 +15,8 @@ class ServiceRecord:
 
 class ServiceRepository:
     def __init__(self, services: list[ServiceRecord] | None = None) -> None:
-        self._services = [self._clone(service) for service in services or []]
+        source_services = [] if services is None else services
+        self._services = [self._clone(service) for service in source_services]
 
     def add(self, service: ServiceRecord) -> ServiceRecord:
         stored_service = self._clone(service)
