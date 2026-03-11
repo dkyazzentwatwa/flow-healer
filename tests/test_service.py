@@ -880,3 +880,59 @@ def test_status_rows_reuses_cached_snapshot_within_ttl(tmp_path) -> None:
     assert len(first) == 1
     assert len(second) == 1
     assert build_calls == 1
+
+
+def test_status_rows_report_issue_outcome_metrics(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    for issue_id in ("9201", "9202", "9203", "9204"):
+        runtime.store.upsert_healer_issue(
+            issue_id=issue_id,
+            repo="owner/repo",
+            title=f"Issue {issue_id}",
+            body="",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+        )
+
+    runtime.store.set_healer_issue_state(issue_id="9201", state="pr_open")
+    runtime.store.set_healer_issue_state(issue_id="9202", state="resolved")
+    runtime.store.set_healer_issue_state(issue_id="9203", state="failed")
+    runtime.store.set_healer_issue_state(issue_id="9204", state="queued")
+
+    conn = runtime.store._connect()
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 09:00:00", "9201"))
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 08:00:00", "9202"))
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 07:00:00", "9203"))
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 06:00:00", "9204"))
+    conn.commit()
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    outcome_metrics = rows[0]["issue_outcomes"]
+    assert outcome_metrics["success"] == 2
+    assert outcome_metrics["failure"] == 1
+    assert outcome_metrics["active"] == 1
+    assert outcome_metrics["terminal_total"] == 3
+    assert outcome_metrics["current_success_streak"] == 2
+    assert [item["outcome"] for item in outcome_metrics["recent_terminal_outcomes"]] == [
+        "success",
+        "success",
+        "failure",
+    ]

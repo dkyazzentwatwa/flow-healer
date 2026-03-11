@@ -29,6 +29,14 @@ _ISSUE_ID_RE = re.compile(r"issue\s+#(?P<issue_id>\d+)", re.IGNORECASE)
 _PR_ID_RE = re.compile(r"PR\s+#(?P<pr_id>\d+)", re.IGNORECASE)
 _ATTEMPT_ID_RE = re.compile(r"\b(?P<attempt_id>hat_[a-z0-9]+)\b", re.IGNORECASE)
 _BRANCH_RE = re.compile(r"\b(?P<branch>healer/[A-Za-z0-9._/\-]+)\b")
+_POINT_WEIGHTS: tuple[tuple[str, str, int], ...] = (
+    ("issue_successes", "Issue wins", 120),
+    ("issue_failures", "Issue losses", -90),
+    ("first_pass_success_rate", "First-pass success", 400),
+    ("no_op_rate", "No-op rate", -180),
+    ("wrong_root_rate", "Wrong-root rate", -220),
+    ("current_success_streak", "Success streak", 35),
+)
 
 
 class DashboardServer:
@@ -368,48 +376,141 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
         <div>
           <h2 class='text-xl font-semibold text-white'>Flow Healer Progress</h2>
           <p class='mt-1 text-sm text-slate-300'>
-            Educational game mode: points and cash are simulated from live outcomes to make reliability trends easier to learn.
+            Shareable scoreboard mode: every stat is derived from live issue and attempt telemetry, with the scoring formula exposed inline.
           </p>
         </div>
-        <div class='rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] uppercase tracking-[0.24em] text-slate-300'>
-          Simulated & Educational
+        <div class='flex flex-wrap items-center gap-2'>
+          <button
+            type='button'
+            @click='showScoreExplainer = !showScoreExplainer'
+            class='rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.24em] text-cyan-100 transition hover:bg-cyan-400/15'
+          >
+            How points work
+          </button>
+          <div class='rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] uppercase tracking-[0.24em] text-slate-300'>
+            Real telemetry only
+          </div>
         </div>
       </div>
       <div class='mt-4 grid grid-cols-2 gap-4 xl:grid-cols-6'>
         <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
           <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Agent Level</div>
-          <div class='mt-2 text-3xl font-semibold text-white' x-text='agentLevel'></div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='scoreboard.agent_level || 1'></div>
         </div>
         <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
           <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Agent Points</div>
-          <div class='mt-2 text-3xl font-semibold text-white' x-text='agentPoints'></div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='scoreboard.agent_points || 0'></div>
         </div>
         <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
-          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Flow Cash (Simulated)</div>
-          <div class='mt-2 text-3xl font-semibold text-white' x-text='simulatedCashUsd'></div>
-        </div>
-        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
-          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>ROI Multiple</div>
-          <div class='mt-2 text-3xl font-semibold text-white' x-text='roiMultiple'></div>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>First-Pass Success</div>
+          <div class='mt-2 text-3xl font-semibold text-emerald-200' x-text='formatPercent(scoreboard.first_pass_success_rate)'></div>
         </div>
         <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
           <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Win Rate</div>
-          <div class='mt-2 text-3xl font-semibold text-white' x-text='winRate'></div>
+          <div class='mt-2 text-3xl font-semibold text-white' x-text='formatPercent(scoreboard.win_rate)'></div>
         </div>
         <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
-          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Resolved vs Failed</div>
-          <div class='mt-2 text-2xl font-semibold text-white' x-text='`${{resolvedCount}} / ${{failedIssueCount}}`'></div>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Current Success Streak</div>
+          <div class='mt-2 text-3xl font-semibold text-cyan-100' x-text='scoreboard.current_success_streak || 0'></div>
+        </div>
+        <div class='rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
+          <div class='text-[11px] uppercase tracking-[0.2em] text-slate-400'>Issue Wins vs Losses</div>
+          <div class='mt-2 text-2xl font-semibold text-white' x-text='`${{scoreboard.issue_successes || 0}} / ${{scoreboard.issue_failures || 0}}`'></div>
+        </div>
+      </div>
+      <div x-show='showScoreExplainer' x-transition.opacity class='mt-4 rounded-2xl border border-cyan-400/20 bg-cyan-400/5 px-4 py-4'>
+        <div class='flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between'>
+          <div>
+            <h3 class='text-sm font-semibold uppercase tracking-[0.22em] text-cyan-100'>Point Formula</h3>
+            <p class='mt-2 max-w-3xl text-sm text-slate-300' x-text='scoreExplainer.summary || ""'></p>
+          </div>
+          <div class='rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300'>
+            <span x-text='`Samples: ${{(scoreExplainer.samples || {{}}).issues || 0}} issues / ${{(scoreExplainer.samples || {{}}).attempts || 0}} attempts`'></span>
+          </div>
+        </div>
+        <div class='mt-4 grid grid-cols-1 gap-3 lg:grid-cols-3'>
+          <template x-for='row in scoreExplainer.formula_rows || []' :key='row.label'>
+            <div class='rounded-2xl border border-white/10 bg-slate-950/40 px-3 py-3'>
+              <div class='text-[11px] uppercase tracking-[0.2em] text-slate-500' x-text='row.label'></div>
+              <div class='mt-2 text-sm text-slate-100'>
+                <span class='font-semibold' x-text='row.value'></span>
+                <span class='text-slate-400' x-text='` × ${{row.weight}}`'></span>
+              </div>
+              <div class='mt-2 text-xs text-cyan-100' x-text='signedNumber(row.contribution)'></div>
+            </div>
+          </template>
+        </div>
+        <div class='mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2'>
+          <div class='rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-xs text-slate-300' x-text='(scoreExplainer.definitions || {{}}).win_rate || ""'></div>
+          <div class='rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-xs text-slate-300' x-text='(scoreExplainer.definitions || {{}}).streak || ""'></div>
         </div>
       </div>
       <div class='mt-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3'>
         <div class='mb-2 flex items-center justify-between text-xs uppercase tracking-[0.2em] text-slate-400'>
           <span>XP Progress</span>
-          <span x-text='`${{xpInLevel}} / 1000`'></span>
+          <span x-text='`${{scoreboard.xp_in_level || 0}} / 1000`'></span>
         </div>
         <div class='h-4 border border-white/10 bg-slate-950/20'>
-          <div class='h-full bg-cyan-400/40 transition-all duration-500' :style='`width: ${{xpProgressPct}}%`'></div>
+          <div class='h-full bg-cyan-400/40 transition-all duration-500' :style='`width: ${{scoreboard.xp_progress_pct || 0}}%`'></div>
         </div>
-        <p class='mt-2 text-xs text-slate-300' x-text='`${{xpToNext}} XP to next level`'></p>
+        <p class='mt-2 text-xs text-slate-300' x-text='`${{scoreboard.xp_to_next || 1000}} XP to next level`'></p>
+      </div>
+    </section>
+
+    <section class='mb-6 rounded-[28px] border border-white/10 bg-slate-900/70 px-5 py-5 shadow-glow backdrop-blur'>
+      <div class='flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between'>
+        <div>
+          <h2 class='text-xl font-semibold text-white'>Telemetry Trends</h2>
+          <p class='mt-1 text-sm text-slate-300'>Collapsible trend deck built for quick diagnosis and screenshot-ready shareability.</p>
+        </div>
+        <button
+          type='button'
+          @click='showTelemetryCharts = !showTelemetryCharts'
+          class='rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10'
+          x-text='showTelemetryCharts ? "Hide charts" : "Show charts"'
+        ></button>
+      </div>
+      <div x-show='showTelemetryCharts' x-transition.opacity class='mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2'>
+        <div class='rounded-[28px] border border-white/10 bg-slate-950/40 p-4'>
+          <div class='mb-3 flex items-center justify-between gap-3'>
+            <div>
+              <h3 class='text-sm font-semibold uppercase tracking-[0.22em] text-slate-200'>First-pass vs Drift</h3>
+              <p class='mt-1 text-xs text-slate-400'>Green is better. Amber and rose should trend downward.</p>
+            </div>
+            <div class='text-right text-[11px] uppercase tracking-[0.2em] text-slate-500'>30d</div>
+          </div>
+          <svg viewBox='0 0 640 240' class='h-64 w-full rounded-2xl border border-white/10 bg-black/20 p-2'>
+            <polyline fill='none' stroke='#86efac' stroke-width='4' :points='linePoints(chartSeries.reliability || [], "first_pass_success_rate")'></polyline>
+            <polyline fill='none' stroke='#fbbf24' stroke-width='3' :points='linePoints(chartSeries.reliability || [], "no_op_rate")'></polyline>
+            <polyline fill='none' stroke='#f87171' stroke-width='3' :points='linePoints(chartSeries.reliability || [], "wrong_root_rate")'></polyline>
+          </svg>
+          <div class='mt-3 flex flex-wrap gap-2 text-xs'>
+            <span class='rounded-full border border-emerald-300/30 bg-emerald-400/10 px-2 py-1 text-emerald-100'>First-pass success</span>
+            <span class='rounded-full border border-amber-300/30 bg-amber-400/10 px-2 py-1 text-amber-100'>No-op rate</span>
+            <span class='rounded-full border border-rose-300/30 bg-rose-400/10 px-2 py-1 text-rose-100'>Wrong-root rate</span>
+          </div>
+        </div>
+        <div class='rounded-[28px] border border-white/10 bg-slate-950/40 p-4'>
+          <div class='mb-3 flex items-center justify-between gap-3'>
+            <div>
+              <h3 class='text-sm font-semibold uppercase tracking-[0.22em] text-slate-200'>Issue Outcomes</h3>
+              <p class='mt-1 text-xs text-slate-400'>Daily terminal issue outcomes by current observed state.</p>
+            </div>
+            <div class='text-right text-[11px] uppercase tracking-[0.2em] text-slate-500'>Wins / losses</div>
+          </div>
+          <svg viewBox='0 0 640 240' class='h-64 w-full rounded-2xl border border-white/10 bg-black/20 p-2'>
+            <template x-for='bar in stackedBars(chartSeries.issue_outcomes || [])' :key='bar.day'>
+              <g>
+                <rect :x='bar.x' :y='bar.failureY' :width='bar.width' :height='bar.failureHeight' fill='#f87171'></rect>
+                <rect :x='bar.x' :y='bar.successY' :width='bar.width' :height='bar.successHeight' fill='#34d399'></rect>
+              </g>
+            </template>
+          </svg>
+          <div class='mt-3 flex flex-wrap gap-2 text-xs'>
+            <span class='rounded-full border border-emerald-300/30 bg-emerald-400/10 px-2 py-1 text-emerald-100'>Issue wins</span>
+            <span class='rounded-full border border-rose-300/30 bg-rose-400/10 px-2 py-1 text-rose-100'>Issue losses</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -727,7 +828,12 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
         selectedActivitySnapshot: null,
         generatedAt: '',
         logFiles: [],
+        scoreboard: {{}},
+        scoreExplainer: {{ formula_rows: [], samples: {{}}, definitions: {{}} }},
+        chartSeries: {{ reliability: [], issue_outcomes: [] }},
         showAdvancedMetrics: false,
+        showTelemetryCharts: false,
+        showScoreExplainer: false,
         themeMode: 'dark',
         kindTabs: [
           {{ value: 'all', label: 'All activity' }},
@@ -742,77 +848,6 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 
         get pausedRepos() {{
           return this.rows.filter((row) => !!row.paused).length;
-        }},
-
-        get resolvedCount() {{
-          return this.rows.reduce((acc, row) => acc + Number((row.state_counts || {{}}).resolved || 0), 0);
-        }},
-
-        get failedIssueCount() {{
-          return this.rows.reduce((acc, row) => acc + Number((row.state_counts || {{}}).failed || 0), 0);
-        }},
-
-        get avgFirstPassRate() {{
-          const values = this.rows
-            .map((row) => Number((row.reliability_canary || {{}}).first_pass_success_rate || 0))
-            .filter((value) => !Number.isNaN(value));
-          if (!values.length) return 0;
-          return values.reduce((acc, value) => acc + value, 0) / values.length;
-        }},
-
-        get avgNoOpRate() {{
-          const values = this.rows
-            .map((row) => Number((row.reliability_canary || {{}}).no_op_rate || 0))
-            .filter((value) => !Number.isNaN(value));
-          if (!values.length) return 0;
-          return values.reduce((acc, value) => acc + value, 0) / values.length;
-        }},
-
-        get agentPoints() {{
-          const score = Math.round(
-            (this.resolvedCount * 500)
-            - (this.failedIssueCount * 120)
-            + (this.avgFirstPassRate * 1000)
-            - (this.avgNoOpRate * 500)
-          );
-          return Math.max(0, score);
-        }},
-
-        get agentLevel() {{
-          return Math.floor(this.agentPoints / 1000) + 1;
-        }},
-
-        get xpInLevel() {{
-          return this.agentPoints % 1000;
-        }},
-
-        get xpToNext() {{
-          return 1000 - this.xpInLevel;
-        }},
-
-        get xpProgressPct() {{
-          return Math.max(0, Math.min(100, (this.xpInLevel / 1000) * 100));
-        }},
-
-        get simulatedCashValue() {{
-          const value = (this.resolvedCount * 180) - (this.failedIssueCount * 42);
-          return Math.max(0, value);
-        }},
-
-        get simulatedCashUsd() {{
-          return this.formatCurrency(this.simulatedCashValue);
-        }},
-
-        get roiMultiple() {{
-          const baseline = 600;
-          if (baseline <= 0) return '0.00x';
-          return `${{(this.simulatedCashValue / baseline).toFixed(2)}}x`;
-        }},
-
-        get winRate() {{
-          const total = this.resolvedCount + this.failedIssueCount;
-          if (total <= 0) return '0.0%';
-          return `${{((this.resolvedCount / total) * 100).toFixed(1)}}%`;
         }},
 
         get canaryFirstPassRate() {{
@@ -1052,6 +1087,9 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           this.logs = Array.isArray(logsData.lines) ? logsData.lines : [];
           this.logEvents = Array.isArray(logsData.events) ? logsData.events : [];
           this.logFiles = Array.isArray(logsData.files) ? logsData.files : [];
+          this.scoreboard = payload.scoreboard || {{}};
+          this.scoreExplainer = payload.score_explainer || {{ formula_rows: [], samples: {{}}, definitions: {{}} }};
+          this.chartSeries = payload.chart_series || {{ reliability: [], issue_outcomes: [] }};
           this.generatedAt = payload.generated_at || '';
           if (this.selectedActivityId) {{
             const live = this.activity.find((item) => item.id === this.selectedActivityId)
@@ -1101,6 +1139,61 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
           }}).format(rounded);
         }},
 
+        formatPercent(value) {{
+          const numeric = Number(value || 0);
+          if (!Number.isFinite(numeric)) return '0.0%';
+          return `${{(numeric * 100).toFixed(1)}}%`;
+        }},
+
+        signedNumber(value) {{
+          const numeric = Number(value || 0);
+          if (!Number.isFinite(numeric)) return '+0';
+          return `${{numeric >= 0 ? '+' : ''}}${{Math.round(numeric)}}`;
+        }},
+
+        linePoints(series, key) {{
+          const rows = Array.isArray(series) ? series : [];
+          if (!rows.length) return '0,210 640,210';
+          const width = 600;
+          const height = 180;
+          const insetX = 20;
+          const insetY = 20;
+          const spanX = rows.length > 1 ? width / (rows.length - 1) : 0;
+          return rows.map((row, index) => {{
+            const value = Math.max(0, Math.min(1, Number(row[key] || 0)));
+            const x = insetX + (spanX * index);
+            const y = insetY + ((1 - value) * height);
+            return `${{x.toFixed(1)}},${{y.toFixed(1)}}`;
+          }}).join(' ');
+        }},
+
+        stackedBars(series) {{
+          const rows = Array.isArray(series) ? series : [];
+          if (!rows.length) return [];
+          const width = 600;
+          const maxTotal = Math.max(...rows.map((row) => Number(row.total || 0)), 1);
+          const barWidth = Math.max(8, Math.floor(width / Math.max(rows.length, 1)) - 6);
+          return rows.map((row, index) => {{
+            const total = Number(row.total || 0);
+            const success = Number(row.success || 0);
+            const failure = Number(row.failure || 0);
+            const x = 20 + (index * (barWidth + 6));
+            const scaledTotal = total > 0 ? (total / maxTotal) * 180 : 0;
+            const failureHeight = total > 0 ? (failure / total) * scaledTotal : 0;
+            const successHeight = total > 0 ? (success / total) * scaledTotal : 0;
+            const baseline = 210;
+            return {{
+              day: row.day || `${{index}}`,
+              x,
+              width: barWidth,
+              failureHeight,
+              successHeight,
+              failureY: baseline - failureHeight,
+              successY: baseline - failureHeight - successHeight,
+            }};
+          }});
+        }},
+
         contextChips(item) {{
           return [
             item.repo ? {{ label: 'Repo', value: item.repo }} : null,
@@ -1135,6 +1228,7 @@ def _render_dashboard(config: AppConfig, service: FlowHealerService, notice: str
 def _overview_payload(config: AppConfig, service: FlowHealerService) -> dict[str, Any]:
     logs = _collect_recent_logs(config, max_lines=160)
     status_rows = service.cached_status_rows(None)
+    scoreboard = _build_scoreboard(status_rows)
     return {
         "rows": status_rows,
         "commands": service.control_command_rows(None, limit=120),
@@ -1146,7 +1240,221 @@ def _overview_payload(config: AppConfig, service: FlowHealerService) -> dict[str
             limit=_ACTIVITY_LIMIT,
             status_rows=status_rows,
         ),
+        "scoreboard": scoreboard,
+        "score_explainer": _build_score_explainer(scoreboard),
+        "chart_series": _build_chart_series(status_rows),
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _build_scoreboard(status_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    issue_successes = 0
+    issue_failures = 0
+    active_issues = 0
+    recent_terminal_outcomes: list[dict[str, Any]] = []
+    weighted_first_pass_total = 0.0
+    weighted_issue_total = 0
+    weighted_no_op_total = 0.0
+    weighted_wrong_root_total = 0.0
+    weighted_attempt_sample_total = 0
+
+    for row in status_rows:
+        outcomes = row.get("issue_outcomes") or {}
+        issue_successes += int(outcomes.get("success") or 0)
+        issue_failures += int(outcomes.get("failure") or 0)
+        active_issues += int(outcomes.get("active") or 0)
+        recent_terminal_outcomes.extend(outcomes.get("recent_terminal_outcomes") or [])
+
+        canary = row.get("reliability_canary") or {}
+        issue_count = int(canary.get("issue_count") or 0)
+        sample_size = int(canary.get("sample_size") or 0)
+        weighted_issue_total += issue_count
+        weighted_attempt_sample_total += sample_size
+        weighted_first_pass_total += float(canary.get("first_pass_success_rate") or 0.0) * float(issue_count)
+        weighted_no_op_total += float(canary.get("no_op_rate") or 0.0) * float(sample_size)
+        weighted_wrong_root_total += float(canary.get("wrong_root_execution_rate") or 0.0) * float(sample_size)
+
+    recent_terminal_outcomes.sort(
+        key=lambda item: (str(item.get("updated_at") or ""), str(item.get("issue_id") or "")),
+        reverse=True,
+    )
+    current_success_streak = 0
+    for item in recent_terminal_outcomes:
+        if str(item.get("outcome") or "") != "success":
+            break
+        current_success_streak += 1
+
+    terminal_total = issue_successes + issue_failures
+    win_rate = float(issue_successes) / float(max(1, terminal_total)) if terminal_total else 0.0
+    first_pass_success_rate = (
+        weighted_first_pass_total / float(max(1, weighted_issue_total))
+        if weighted_issue_total
+        else 0.0
+    )
+    no_op_rate = (
+        weighted_no_op_total / float(max(1, weighted_attempt_sample_total))
+        if weighted_attempt_sample_total
+        else 0.0
+    )
+    wrong_root_rate = (
+        weighted_wrong_root_total / float(max(1, weighted_attempt_sample_total))
+        if weighted_attempt_sample_total
+        else 0.0
+    )
+    points = _compute_agent_points(
+        issue_successes=issue_successes,
+        issue_failures=issue_failures,
+        first_pass_success_rate=first_pass_success_rate,
+        no_op_rate=no_op_rate,
+        wrong_root_rate=wrong_root_rate,
+        current_success_streak=current_success_streak,
+    )
+    xp_in_level = points % 1000
+    return {
+        "issue_successes": issue_successes,
+        "issue_failures": issue_failures,
+        "active_issues": active_issues,
+        "terminal_total": terminal_total,
+        "win_rate": round(win_rate, 4),
+        "first_pass_success_rate": round(first_pass_success_rate, 4),
+        "no_op_rate": round(no_op_rate, 4),
+        "wrong_root_rate": round(wrong_root_rate, 4),
+        "current_success_streak": current_success_streak,
+        "agent_points": points,
+        "agent_level": int(points / 1000) + 1,
+        "xp_in_level": xp_in_level,
+        "xp_to_next": 1000 - xp_in_level if xp_in_level else 1000,
+        "xp_progress_pct": round((xp_in_level / 1000.0) * 100.0, 2),
+        "sample_issue_count": weighted_issue_total,
+        "sample_attempt_count": weighted_attempt_sample_total,
+        "recent_terminal_outcomes": recent_terminal_outcomes[:25],
+    }
+
+
+def _compute_agent_points(
+    *,
+    issue_successes: int,
+    issue_failures: int,
+    first_pass_success_rate: float,
+    no_op_rate: float,
+    wrong_root_rate: float,
+    current_success_streak: int,
+) -> int:
+    values = {
+        "issue_successes": float(issue_successes),
+        "issue_failures": float(issue_failures),
+        "first_pass_success_rate": float(first_pass_success_rate),
+        "no_op_rate": float(no_op_rate),
+        "wrong_root_rate": float(wrong_root_rate),
+        "current_success_streak": float(current_success_streak),
+    }
+    score = 0.0
+    for key, _label, weight in _POINT_WEIGHTS:
+        score += values.get(key, 0.0) * float(weight)
+    return max(0, int(round(score)))
+
+
+def _build_score_explainer(scoreboard: dict[str, Any]) -> dict[str, Any]:
+    values = {
+        "issue_successes": float(scoreboard.get("issue_successes") or 0),
+        "issue_failures": float(scoreboard.get("issue_failures") or 0),
+        "first_pass_success_rate": float(scoreboard.get("first_pass_success_rate") or 0.0),
+        "no_op_rate": float(scoreboard.get("no_op_rate") or 0.0),
+        "wrong_root_rate": float(scoreboard.get("wrong_root_rate") or 0.0),
+        "current_success_streak": float(scoreboard.get("current_success_streak") or 0),
+    }
+    formula_rows: list[dict[str, Any]] = []
+    for key, label, weight in _POINT_WEIGHTS:
+        raw_value = values[key]
+        display_value = f"{raw_value * 100:.1f}%" if key.endswith("_rate") else str(int(raw_value))
+        formula_rows.append(
+            {
+                "label": label,
+                "weight": weight,
+                "value": display_value,
+                "contribution": int(round(raw_value * float(weight))),
+            }
+        )
+    return {
+        "title": "Agent Points are derived from observed telemetry.",
+        "summary": "The score rewards issue wins and clean first-pass execution, while penalizing losses, no-op churn, and wrong-root drift.",
+        "formula_rows": formula_rows,
+        "samples": {
+            "issues": int(scoreboard.get("sample_issue_count") or 0),
+            "attempts": int(scoreboard.get("sample_attempt_count") or 0),
+        },
+        "definitions": {
+            "win_rate": "Each issue counts once. Wins are pr_open, pr_pending_approval, or resolved. Losses are failed or blocked.",
+            "streak": "Current streak counts consecutive successful terminal issue outcomes from newest to oldest.",
+        },
+    }
+
+
+def _build_chart_series(status_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    reliability_days: dict[str, dict[str, float]] = {}
+    issue_outcome_days: dict[str, dict[str, int]] = {}
+    for row in status_rows:
+        for item in row.get("reliability_daily_rollups") or []:
+            day = str(item.get("day") or "").strip()
+            if not day:
+                continue
+            bucket = reliability_days.setdefault(
+                day,
+                {
+                    "first_pass_weighted": 0.0,
+                    "issue_count": 0.0,
+                    "no_op_weighted": 0.0,
+                    "wrong_root_weighted": 0.0,
+                    "sample_size": 0.0,
+                },
+            )
+            issue_count = float(item.get("issue_count") or 0)
+            sample_size = float(item.get("sample_size") or 0)
+            bucket["issue_count"] += issue_count
+            bucket["sample_size"] += sample_size
+            bucket["first_pass_weighted"] += float(item.get("first_pass_success_rate") or 0.0) * issue_count
+            bucket["no_op_weighted"] += float(item.get("no_op_rate") or 0.0) * sample_size
+            bucket["wrong_root_weighted"] += float(item.get("wrong_root_execution_rate") or 0.0) * sample_size
+
+        outcomes = (row.get("issue_outcomes") or {}).get("daily_terminal_outcomes") or []
+        for item in outcomes:
+            day = str(item.get("day") or "").strip()
+            if not day:
+                continue
+            bucket = issue_outcome_days.setdefault(day, {"success": 0, "failure": 0})
+            bucket["success"] += int(item.get("success") or 0)
+            bucket["failure"] += int(item.get("failure") or 0)
+
+    reliability = []
+    for day in sorted(reliability_days.keys()):
+        bucket = reliability_days[day]
+        issue_count = int(bucket["issue_count"])
+        sample_size = int(bucket["sample_size"])
+        reliability.append(
+            {
+                "day": day,
+                "issue_count": issue_count,
+                "sample_size": sample_size,
+                "first_pass_success_rate": round(bucket["first_pass_weighted"] / float(max(1, issue_count)), 4) if issue_count else 0.0,
+                "no_op_rate": round(bucket["no_op_weighted"] / float(max(1, sample_size)), 4) if sample_size else 0.0,
+                "wrong_root_rate": round(bucket["wrong_root_weighted"] / float(max(1, sample_size)), 4) if sample_size else 0.0,
+            }
+        )
+
+    issue_outcomes = []
+    for day in sorted(issue_outcome_days.keys()):
+        bucket = issue_outcome_days[day]
+        issue_outcomes.append(
+            {
+                "day": day,
+                "success": bucket["success"],
+                "failure": bucket["failure"],
+                "total": bucket["success"] + bucket["failure"],
+            }
+        )
+    return {
+        "reliability": reliability[-30:],
+        "issue_outcomes": issue_outcomes[-30:],
     }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_module():
@@ -36,3 +37,62 @@ def test_is_python_js_only_draft_rejects_non_js_python_validator() -> None:
     )
 
     assert module._is_python_js_only_draft(body) is False
+
+
+def test_is_python_js_only_draft_accepts_generic_node_and_python_roots() -> None:
+    module = _load_module()
+    node_body = (
+        "Required code outputs:\n"
+        "- e2e-smoke/node/src/add.js\n\n"
+        "Validation:\n"
+        "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+    )
+    python_body = (
+        "Required code outputs:\n"
+        "- e2e-smoke/python/smoke_math.py\n\n"
+        "Validation:\n"
+        "- cd e2e-smoke/python && pytest -q\n"
+    )
+
+    assert module._is_python_js_only_draft(node_body) is True
+    assert module._is_python_js_only_draft(python_body) is True
+
+
+def test_validate_drafts_or_die_accepts_mega_final_wave() -> None:
+    module = _load_module()
+    drafts = module.build_issue_drafts(
+        count=30,
+        prefix="Mega final sandbox wave 1",
+        ready_label="healer:ready",
+        extra_labels=("campaign:mega-final", "wave:1"),
+        family="mega-final-wave-1",
+    )
+
+    module.validate_drafts_or_die(drafts)
+
+
+def test_validate_drafts_or_die_rejects_missing_target() -> None:
+    module = _load_module()
+    draft = module.build_issue_drafts(
+        count=1,
+        prefix="Broken wave",
+        ready_label="healer:ready",
+        family="default",
+    )[0]
+    broken = SimpleNamespace(
+        title=draft.title,
+        body=(
+            "Required code outputs:\n"
+            "- e2e-apps/python-fastapi/app/missing.py\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/python-fastapi && pytest -q\n"
+        ),
+        labels=draft.labels,
+    )
+
+    try:
+        module.validate_drafts_or_die([broken])
+    except SystemExit as exc:
+        assert "missing target" in str(exc).lower()
+    else:
+        raise AssertionError("expected SystemExit for invalid draft")

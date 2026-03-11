@@ -61,6 +61,23 @@ describe("normalizeTranscriptMessages", () => {
     ]);
   });
 
+  it("prefers canonical content when both content and text are present", () => {
+    expect(
+      normalizeTranscriptMessages([
+        {
+          role: "assistant",
+          content: " Saved transcript content ",
+          text: "Widget draft text",
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "bot",
+        content: "Saved transcript content",
+      },
+    ]);
+  });
+
   it("returns an empty list for non-array transcript payloads", () => {
     expect(normalizeTranscriptMessages({ role: "user", content: "hello" } as Json)).toEqual([]);
     expect(normalizeTranscriptMessages(null)).toEqual([]);

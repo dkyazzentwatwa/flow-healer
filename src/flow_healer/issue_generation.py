@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Sequence
+
+from .healer_task_spec import compile_task_spec
 
 
 _PROSPER_CHAT_ROOT = "e2e-apps/prosper-chat"
@@ -10,9 +13,9 @@ _PROSPER_CHAT_SQL_PREFIXES = (
     f"{_PROSPER_CHAT_ROOT}/supabase/assertions/",
 )
 _PROSPER_CHAT_BACKEND_PREFIX = f"{_PROSPER_CHAT_ROOT}/supabase/functions/"
-_PROSPER_CHAT_DB_COMMAND = "./scripts/healer_validate.sh db"
-_PROSPER_CHAT_BACKEND_COMMAND = "./scripts/healer_validate.sh backend"
-_PROSPER_CHAT_FULL_COMMAND = "./scripts/healer_validate.sh full"
+_PROSPER_CHAT_DB_COMMAND = f"cd {_PROSPER_CHAT_ROOT} && ./scripts/healer_validate.sh db"
+_PROSPER_CHAT_BACKEND_COMMAND = f"cd {_PROSPER_CHAT_ROOT} && ./scripts/healer_validate.sh backend"
+_PROSPER_CHAT_FULL_COMMAND = f"cd {_PROSPER_CHAT_ROOT} && ./scripts/healer_validate.sh full"
 _SQL_TITLE_HINTS = ("migration", "rls", "policy", "constraint", "trigger", "function", "sql")
 
 
@@ -36,6 +39,8 @@ PROSPER_CHAT_DB_FAMILY = "prosper-chat-db"
 JS_FRAMEWORK_FAMILY = "js-frameworks"
 PYTHON_FRAMEWORK_FAMILY = "python-frameworks"
 PYTHON_DATA_ML_FAMILY = "python-data-ml"
+MEGA_FINAL_WAVE_1_FAMILY = "mega-final-wave-1"
+MEGA_FINAL_WAVE_2_FAMILY = "mega-final-wave-2"
 
 
 def available_issue_families() -> tuple[str, ...]:
@@ -45,6 +50,8 @@ def available_issue_families() -> tuple[str, ...]:
         JS_FRAMEWORK_FAMILY,
         PYTHON_FRAMEWORK_FAMILY,
         PYTHON_DATA_ML_FAMILY,
+        MEGA_FINAL_WAVE_1_FAMILY,
+        MEGA_FINAL_WAVE_2_FAMILY,
     )
 
 
@@ -117,6 +124,10 @@ def get_issue_templates(family: str) -> tuple[IssueTemplate, ...]:
         return _python_framework_templates()
     if normalized_family == PYTHON_DATA_ML_FAMILY:
         return _python_data_ml_templates()
+    if normalized_family == MEGA_FINAL_WAVE_1_FAMILY:
+        return _mega_final_wave_1_templates()
+    if normalized_family == MEGA_FINAL_WAVE_2_FAMILY:
+        return _mega_final_wave_2_templates()
     raise ValueError(
         f"unknown issue family '{family}'. Available families: {', '.join(available_issue_families())}"
     )
@@ -460,6 +471,573 @@ def _python_data_ml_templates() -> tuple[IssueTemplate, ...]:
             ),
             validation_command="cd e2e-smoke/py-ml-sklearn && pytest -q",
         ),
+    )
+
+
+def validate_issue_drafts(drafts: Sequence[IssueDraft], *, repo_root: Path) -> None:
+    normalized_root = Path(repo_root).expanduser().resolve()
+    seen_titles: set[str] = set()
+    seen_targets: set[tuple[str, ...]] = set()
+    for draft in drafts:
+        title = str(draft.title or "").strip()
+        if not title:
+            raise ValueError("Draft validation failed: empty title")
+        lowered_title = title.lower()
+        if lowered_title in seen_titles:
+            raise ValueError(f"Draft validation failed: duplicate title: {title}")
+        seen_titles.add(lowered_title)
+
+        spec = compile_task_spec(issue_title=title, issue_body=draft.body)
+        if not spec.output_targets:
+            raise ValueError(f"Draft validation failed: no parsed output targets for {title}")
+        if not spec.validation_commands:
+            raise ValueError(f"Draft validation failed: no parsed validation command for {title}")
+        if not spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/")):
+            raise ValueError(
+                f"Draft validation failed: unsupported execution root '{spec.execution_root}' for {title}"
+            )
+        normalized_targets = tuple(_normalize_path(target) for target in spec.output_targets)
+        if normalized_targets in seen_targets:
+            raise ValueError(f"Draft validation failed: duplicate target set for {title}")
+        seen_targets.add(normalized_targets)
+        for target in normalized_targets:
+            if not (normalized_root / target).exists():
+                raise ValueError(f"Draft validation failed: missing target path for {title}: {target}")
+        if tuple(_dedupe_labels(draft.labels)) != tuple(draft.labels):
+            raise ValueError(f"Draft validation failed: duplicate labels for {title}")
+
+
+def _mega_final_wave_1_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        _template(
+            kind="Mega final smoke: Node baseline add flow",
+            targets=("e2e-smoke/node/src/add.js", "e2e-smoke/node/test/add.test.js"),
+            validation_command="cd e2e-smoke/node && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Python baseline smoke math",
+            targets=("e2e-smoke/python/smoke_math.py", "e2e-smoke/python/tests/test_smoke_math.py"),
+            validation_command="cd e2e-smoke/python && pytest -q",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Next.js service behavior",
+            targets=("e2e-smoke/js-next/src/add.js", "e2e-smoke/js-next/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-next && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Vue Vite composable behavior",
+            targets=("e2e-smoke/js-vue-vite/src/add.js", "e2e-smoke/js-vue-vite/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-vue-vite && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Remix server helper behavior",
+            targets=("e2e-smoke/js-remix/app/utils/add.server.js", "e2e-smoke/js-remix/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-remix && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Astro component helper behavior",
+            targets=("e2e-smoke/js-astro/src/utils/add.js", "e2e-smoke/js-astro/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-astro && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: SolidStart route helper behavior",
+            targets=("e2e-smoke/js-solidstart/src/lib/add.js", "e2e-smoke/js-solidstart/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-solidstart && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Hono handler behavior",
+            targets=("e2e-smoke/js-hono/src/add.js", "e2e-smoke/js-hono/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-hono && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Adonis service helper behavior",
+            targets=("e2e-smoke/js-adonis/app/services/add.ts", "e2e-smoke/js-adonis/tests/add.spec.ts"),
+            validation_command="cd e2e-smoke/js-adonis && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: FastAPI service behavior",
+            targets=("e2e-smoke/py-fastapi/app/add.py", "e2e-smoke/py-fastapi/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-fastapi && pytest -q",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Django utility behavior",
+            targets=("e2e-smoke/py-django/app/add.py", "e2e-smoke/py-django/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-django && python -m pytest -q",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Flask service behavior",
+            targets=("e2e-smoke/py-flask/app/add.py", "e2e-smoke/py-flask/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-flask && pytest -q",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: pandas transform behavior",
+            targets=("e2e-smoke/py-data-pandas/app/add.py", "e2e-smoke/py-data-pandas/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-data-pandas && pytest -q",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final app: Node Next todo route and service contract",
+            targets=(
+                "e2e-apps/node-next/app/api/todos/route.js",
+                "e2e-apps/node-next/lib/todo-service.js",
+                "e2e-apps/node-next/tests/todo-service.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Node Next export service contract",
+            targets=("e2e-apps/node-next/lib/export-service.js", "e2e-apps/node-next/tests/export-service.test.js"),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Node Next auth session normalization",
+            targets=(
+                "e2e-apps/node-next/app/api/auth/session/route.js",
+                "e2e-apps/node-next/tests/auth-session-route.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Python FastAPI API contract",
+            targets=("e2e-apps/python-fastapi/app/api.py", "e2e-apps/python-fastapi/tests/test_api_contract.py"),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Python FastAPI domain service",
+            targets=("e2e-apps/python-fastapi/app/service.py", "e2e-apps/python-fastapi/tests/test_domain_service.py"),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Python FastAPI importer behavior",
+            targets=("e2e-apps/python-fastapi/app/importer.py", "e2e-apps/python-fastapi/tests/test_importer.py"),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Prosper class merge utilities",
+            targets=("e2e-apps/prosper-chat/src/lib/utils.ts", "e2e-apps/prosper-chat/src/test/utils.test.ts"),
+            validation_command=_PROSPER_CHAT_FULL_COMMAND,
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final backend: Prosper chat widget token helpers",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/functions/chat-widget/index.ts",
+                "e2e-apps/prosper-chat/supabase/functions/_shared/widgetToken.ts",
+            ),
+            validation_command=_PROSPER_CHAT_BACKEND_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final backend: Prosper appointment slot flows",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/functions/check-availability/index.ts",
+                "e2e-apps/prosper-chat/supabase/functions/book-appointment/index.ts",
+            ),
+            validation_command=_PROSPER_CHAT_BACKEND_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Prosper transcript normalization",
+            targets=("e2e-apps/prosper-chat/src/lib/transcript.ts", "e2e-apps/prosper-chat/src/test/transcript.test.ts"),
+            validation_command=_PROSPER_CHAT_FULL_COMMAND,
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Prosper plan billing summary",
+            targets=("e2e-apps/prosper-chat/src/lib/plans.ts", "e2e-apps/prosper-chat/src/test/plans.test.ts"),
+            validation_command=_PROSPER_CHAT_FULL_COMMAND,
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Prosper industry template normalization",
+            targets=(
+                "e2e-apps/prosper-chat/src/data/industryTemplates.ts",
+                "e2e-apps/prosper-chat/src/test/industry-templates.test.ts",
+            ),
+            validation_command=_PROSPER_CHAT_FULL_COMMAND,
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Prosper widget state hydration",
+            targets=(
+                "e2e-apps/prosper-chat/src/contexts/widget-state.ts",
+                "e2e-apps/prosper-chat/src/test/widget-state.test.ts",
+            ),
+            validation_command=_PROSPER_CHAT_FULL_COMMAND,
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final backend: Prosper usage billing normalization",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/functions/_shared/usage-billing.ts",
+                "e2e-apps/prosper-chat/supabase/functions/tests/usage-billing.test.ts",
+            ),
+            validation_command=_PROSPER_CHAT_BACKEND_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final db: Prosper schema core inventory",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/assertions/schema_core.sql",
+                "e2e-apps/prosper-chat/supabase/assertions/manifest.json",
+            ),
+            validation_command=_PROSPER_CHAT_DB_COMMAND,
+            difficulty="easy",
+            source="e2e-apps",
+            extra_labels=("area:db", "kind:migration"),
+        ),
+        _template(
+            kind="Mega final db: Prosper policy core audit",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/assertions/policies_core.sql",
+                "e2e-apps/prosper-chat/supabase/assertions/manifest.json",
+            ),
+            validation_command=_PROSPER_CHAT_DB_COMMAND,
+            difficulty="easy",
+            source="e2e-apps",
+            extra_labels=("area:db", "kind:rls"),
+        ),
+        _template(
+            kind="Mega final app: Nobi trade model persistence",
+            targets=("e2e-apps/nobi-owl-trader/api/models.py", "e2e-apps/nobi-owl-trader/tests/test_models.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="easy",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Nobi database bootstrap",
+            targets=("e2e-apps/nobi-owl-trader/api/database.py", "e2e-apps/nobi-owl-trader/tests/test_database.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="easy",
+            source="e2e-apps",
+        ),
+    )
+
+
+def _mega_final_wave_2_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        _template(
+            kind="Mega final smoke: Python baseline add module",
+            targets=("e2e-smoke/python/app/add.py", "e2e-smoke/python/tests/test_add.py"),
+            validation_command="cd e2e-smoke/python && pytest -q",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Nuxt server helper behavior",
+            targets=("e2e-smoke/js-nuxt/src/add.js", "e2e-smoke/js-nuxt/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-nuxt && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Angular utility behavior",
+            targets=("e2e-smoke/js-angular/src/add.js", "e2e-smoke/js-angular/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-angular && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: SvelteKit module behavior",
+            targets=("e2e-smoke/js-sveltekit/src/add.js", "e2e-smoke/js-sveltekit/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-sveltekit && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Express route helper behavior",
+            targets=("e2e-smoke/js-express/src/add.js", "e2e-smoke/js-express/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-express && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Nest provider behavior",
+            targets=("e2e-smoke/js-nest/src/add.js", "e2e-smoke/js-nest/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-nest && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Qwik utility behavior",
+            targets=("e2e-smoke/js-qwik/src/utils/add.ts", "e2e-smoke/js-qwik/tests/add.test.ts"),
+            validation_command="cd e2e-smoke/js-qwik && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Koa middleware helper behavior",
+            targets=("e2e-smoke/js-koa/src/add.js", "e2e-smoke/js-koa/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-koa && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: RedwoodSDK helper behavior",
+            targets=("e2e-smoke/js-redwoodsdk/web/src/lib/add.ts", "e2e-smoke/js-redwoodsdk/web/tests/add.test.ts"),
+            validation_command="cd e2e-smoke/js-redwoodsdk && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Lit component helper behavior",
+            targets=("e2e-smoke/js-lit/src/add.js", "e2e-smoke/js-lit/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-lit && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: Alpine Vite helper behavior",
+            targets=("e2e-smoke/js-alpine-vite/src/add.js", "e2e-smoke/js-alpine-vite/tests/add.test.js"),
+            validation_command="cd e2e-smoke/js-alpine-vite && npm test -- --passWithNoTests",
+            difficulty="easy",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final smoke: sklearn helper behavior",
+            targets=("e2e-smoke/py-ml-sklearn/app/add.py", "e2e-smoke/py-ml-sklearn/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-ml-sklearn && pytest -q",
+            difficulty="medium",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Mega final app: Node Next todo contract recheck",
+            targets=(
+                "e2e-apps/node-next/app/api/todos/route.js",
+                "e2e-apps/node-next/lib/todo-service.js",
+                "e2e-apps/node-next/tests/todo-service.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Node Next notification digest stability",
+            targets=(
+                "e2e-apps/node-next/lib/notification-digest.js",
+                "e2e-apps/node-next/tests/notification-digest.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Python FastAPI repository detach semantics",
+            targets=(
+                "e2e-apps/python-fastapi/app/repository.py",
+                "e2e-apps/python-fastapi/tests/test_domain_service.py",
+            ),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Python FastAPI reporting summary",
+            targets=(
+                "e2e-apps/python-fastapi/app/reporting.py",
+                "e2e-apps/python-fastapi/tests/test_reporting.py",
+            ),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Python FastAPI token refresh flow",
+            targets=(
+                "e2e-apps/python-fastapi/app/token_service.py",
+                "e2e-apps/python-fastapi/tests/test_token_service.py",
+            ),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final backend: Prosper checkout flow",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/functions/create-checkout/index.ts",
+                "e2e-apps/prosper-chat/supabase/functions/_shared/billing.ts",
+            ),
+            validation_command=_PROSPER_CHAT_BACKEND_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final backend: Prosper customer portal flow",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/functions/customer-portal/index.ts",
+                "e2e-apps/prosper-chat/supabase/functions/_shared/billing.ts",
+            ),
+            validation_command=_PROSPER_CHAT_BACKEND_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final backend: Prosper subscription billing helpers",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/functions/check-subscription/index.ts",
+                "e2e-apps/prosper-chat/supabase/functions/_shared/billing.ts",
+            ),
+            validation_command=_PROSPER_CHAT_BACKEND_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final db: Prosper anon access enforcement",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/migrations/20260302101500_7f8d9de2-cb2b-4f35-b3b8-6d8a8f519e7e.sql",
+                "e2e-apps/prosper-chat/supabase/assertions/anon_access_controls.sql",
+            ),
+            validation_command=_PROSPER_CHAT_DB_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("area:db", "kind:rls"),
+        ),
+        _template(
+            kind="Mega final db: Prosper subscription visibility",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/migrations/20260301204622_64bd8908-fa0d-4f2c-b120-e7990f38b3b5.sql",
+                "e2e-apps/prosper-chat/supabase/assertions/subscription_visibility.sql",
+            ),
+            validation_command=_PROSPER_CHAT_DB_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("area:db", "kind:rls"),
+        ),
+        _template(
+            kind="Mega final db: Prosper appointment overlap",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/migrations/20260302101500_7f8d9de2-cb2b-4f35-b3b8-6d8a8f519e7e.sql",
+                "e2e-apps/prosper-chat/supabase/assertions/appointment_overlap.sql",
+            ),
+            validation_command=_PROSPER_CHAT_DB_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("area:db", "kind:migration"),
+        ),
+        _template(
+            kind="Mega final db: Prosper bot widget integrity",
+            targets=(
+                "e2e-apps/prosper-chat/supabase/migrations/20260301222424_81f2b260-db82-49bf-a1b6-30686117ac83.sql",
+                "e2e-apps/prosper-chat/supabase/assertions/bot_widget_integrity.sql",
+            ),
+            validation_command=_PROSPER_CHAT_DB_COMMAND,
+            difficulty="hard",
+            source="e2e-apps",
+            extra_labels=("area:db", "kind:migration"),
+        ),
+        _template(
+            kind="Mega final app: Nobi risk guardrails",
+            targets=("e2e-apps/nobi-owl-trader/api/risk.py", "e2e-apps/nobi-owl-trader/tests/test_risk.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Nobi portfolio engine",
+            targets=("e2e-apps/nobi-owl-trader/api/portfolio.py", "e2e-apps/nobi-owl-trader/tests/test_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Nobi portfolio routes",
+            targets=(
+                "e2e-apps/nobi-owl-trader/api/routes/portfolio.py",
+                "e2e-apps/nobi-owl-trader/tests/test_routes_portfolio.py",
+            ),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Nobi backtest exporter",
+            targets=(
+                "e2e-apps/nobi-owl-trader/api/backtest/exporter.py",
+                "e2e-apps/nobi-owl-trader/tests/test_exporter.py",
+            ),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Nobi strategy signal thresholds",
+            targets=(
+                "e2e-apps/nobi-owl-trader/api/strategy/signals.py",
+                "e2e-apps/nobi-owl-trader/tests/test_signals.py",
+            ),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Nobi API entry routes",
+            targets=("e2e-apps/nobi-owl-trader/api/main.py", "e2e-apps/nobi-owl-trader/tests/test_routes_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+    )
+
+
+def _template(
+    *,
+    kind: str,
+    targets: tuple[str, ...],
+    validation_command: str,
+    difficulty: str,
+    source: str,
+    extra_labels: Sequence[str] = (),
+) -> IssueTemplate:
+    return IssueTemplate(
+        kind=kind,
+        targets=targets,
+        validation_command=validation_command,
+        labels=tuple(_dedupe_labels((f"difficulty:{difficulty}", f"source:{source}", *extra_labels))),
     )
 
 

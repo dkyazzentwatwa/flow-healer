@@ -354,6 +354,7 @@ class FlowHealerService:
                         "reliability_canary": _reliability_canary_metrics(runtime.store),
                         "reliability_daily_rollups": _reliability_daily_rollups(runtime.store),
                         "reliability_trends": _reliability_trend_metrics(runtime.store),
+                        "issue_outcomes": _issue_outcome_metrics(issues),
                         "recent_attempts": annotated_attempts,
                     }
                 )
@@ -717,6 +718,79 @@ def _codex_native_multi_agent_metrics(store: SQLiteStore) -> dict[str, int]:
         "fallback_to_swarm": _safe_state_int(store, "healer_codex_native_multi_agent_fallback_to_swarm"),
         "skipped_backend": _safe_state_int(store, "healer_codex_native_multi_agent_skipped_backend"),
         "skipped_task_kind": _safe_state_int(store, "healer_codex_native_multi_agent_skipped_task_kind"),
+    }
+
+
+def _issue_outcome_metrics(
+    issues: list[dict[str, object]],
+    *,
+    recent_limit: int = 50,
+) -> dict[str, object]:
+    success_states = {"pr_open", "pr_pending_approval", "resolved"}
+    failure_states = {"failed", "blocked"}
+    success_count = 0
+    failure_count = 0
+    active_count = 0
+    terminal_outcomes: list[dict[str, object]] = []
+    daily_counts: dict[str, dict[str, int]] = {}
+
+    for issue in issues:
+        state = str(issue.get("state") or "").strip().lower()
+        updated_at = str(issue.get("updated_at") or "").strip()
+        issue_id = str(issue.get("issue_id") or "").strip()
+        title = str(issue.get("title") or "").strip()
+        if state in success_states:
+            outcome = "success"
+            success_count += 1
+        elif state in failure_states:
+            outcome = "failure"
+            failure_count += 1
+        else:
+            active_count += 1
+            continue
+
+        terminal_outcomes.append(
+            {
+                "issue_id": issue_id,
+                "title": title,
+                "state": state,
+                "updated_at": updated_at,
+                "outcome": outcome,
+            }
+        )
+        day = updated_at[:10] if len(updated_at) >= 10 else ""
+        if day:
+            bucket = daily_counts.setdefault(day, {"success": 0, "failure": 0})
+            bucket[outcome] += 1
+
+    terminal_outcomes.sort(
+        key=lambda item: (str(item.get("updated_at") or ""), str(item.get("issue_id") or "")),
+        reverse=True,
+    )
+
+    current_success_streak = 0
+    for item in terminal_outcomes:
+        if str(item.get("outcome") or "") != "success":
+            break
+        current_success_streak += 1
+
+    daily_outcomes = [
+        {
+            "day": day,
+            "success": counts["success"],
+            "failure": counts["failure"],
+            "total": counts["success"] + counts["failure"],
+        }
+        for day, counts in sorted(daily_counts.items())
+    ]
+    return {
+        "success": success_count,
+        "failure": failure_count,
+        "active": active_count,
+        "terminal_total": success_count + failure_count,
+        "current_success_streak": current_success_streak,
+        "recent_terminal_outcomes": terminal_outcomes[:max(1, int(recent_limit))],
+        "daily_terminal_outcomes": daily_outcomes,
     }
 
 

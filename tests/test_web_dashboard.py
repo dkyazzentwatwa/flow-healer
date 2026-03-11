@@ -70,9 +70,100 @@ def test_overview_payload_includes_rows_commands_and_logs(tmp_path: Path) -> Non
     assert "commands" in payload
     assert "logs" in payload
     assert "activity" in payload
+    assert "scoreboard" in payload
+    assert "score_explainer" in payload
+    assert "chart_series" in payload
     assert "generated_at" in payload
     assert isinstance(payload["logs"]["lines"], list)
     assert isinstance(payload["activity"], list)
+
+
+def test_overview_payload_includes_real_scoreboard_and_chart_series(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    for issue_id in ("7001", "7002", "7003"):
+        store.upsert_healer_issue(
+            issue_id=issue_id,
+            repo="owner/repo",
+            title=f"Issue {issue_id}",
+            body="body",
+            author="alice",
+            labels=["healer:ready"],
+            priority=1,
+        )
+
+    store.set_healer_issue_state(issue_id="7001", state="pr_open")
+    store.set_healer_issue_state(issue_id="7002", state="failed")
+    store.set_healer_issue_state(issue_id="7003", state="queued")
+    conn = store._connect()
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 09:00:00", "7001"))
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 08:00:00", "7002"))
+    conn.execute("UPDATE healer_issues SET updated_at = ? WHERE issue_id = ?", ("2026-03-10 07:00:00", "7003"))
+
+    store.create_healer_attempt(
+        attempt_id="ha_7001_1",
+        issue_id="7001",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_7001_1",
+        state="pr_open",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "issue"},
+        verifier_summary={},
+    )
+    conn.execute(
+        "UPDATE healer_attempts SET started_at = ?, finished_at = ? WHERE attempt_id = ?",
+        ("2026-03-10 08:50:00", "2026-03-10 09:00:00", "ha_7001_1"),
+    )
+
+    store.create_healer_attempt(
+        attempt_id="ha_7002_1",
+        issue_id="7002",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_7002_1",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={"execution_root_source": "fallback"},
+        verifier_summary={},
+        failure_class="no_patch",
+        failure_reason="no patch",
+    )
+    conn.execute(
+        "UPDATE healer_attempts SET started_at = ?, finished_at = ? WHERE attempt_id = ?",
+        ("2026-03-10 07:50:00", "2026-03-10 08:00:00", "ha_7002_1"),
+    )
+    conn.commit()
+    store.close()
+
+    payload = _overview_payload(config, service)
+
+    scoreboard = payload["scoreboard"]
+    assert scoreboard["issue_successes"] == 1
+    assert scoreboard["issue_failures"] == 1
+    assert scoreboard["active_issues"] == 1
+    assert scoreboard["current_success_streak"] == 1
+    assert scoreboard["win_rate"] == 0.5
+    assert scoreboard["first_pass_success_rate"] == 0.5
+    assert scoreboard["no_op_rate"] == 0.5
+    assert scoreboard["wrong_root_rate"] == 0.5
+    assert scoreboard["agent_points"] > 0
+    assert payload["score_explainer"]["formula_rows"]
+    assert payload["chart_series"]["reliability"]
+    assert payload["chart_series"]["issue_outcomes"]
 
 
 def test_overview_payload_reuses_single_status_snapshot(tmp_path: Path) -> None:
@@ -272,12 +363,23 @@ def test_render_dashboard_includes_gamification_cards_and_getters(tmp_path: Path
 
     assert "Flow Healer Progress" in html
     assert "Agent Level" in html
-    assert "Flow Cash (Simulated)" in html
-    assert "ROI Multiple" in html
-    assert "get agentPoints()" in html
-    assert "get agentLevel()" in html
-    assert "get simulatedCashUsd()" in html
-    assert "get roiMultiple()" in html
+    assert "First-Pass Success" in html
+    assert "Current Success Streak" in html
+    assert "How points work" in html
+    assert "scoreboard.agent_points" in html
+    assert "scoreboard.current_success_streak" in html
+
+
+def test_render_dashboard_includes_collapsible_telemetry_trends_and_svg_charts(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+
+    html = _render_dashboard(config, service, notice="")
+
+    assert "Telemetry Trends" in html
+    assert "showTelemetryCharts" in html
+    assert "First-pass vs Drift" in html
+    assert "Issue Outcomes" in html
+    assert "<svg" in html
 
 
 def test_render_dashboard_includes_collapsible_infra_ops_deep_dive(tmp_path: Path) -> None:

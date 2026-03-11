@@ -20,6 +20,7 @@ from flow_healer.issue_generation import (  # noqa: E402
     DEFAULT_FAMILY,
     available_issue_families,
     build_issue_drafts,
+    validate_issue_drafts,
 )
 
 
@@ -140,7 +141,7 @@ _DISALLOWED_VALIDATION_RE = re.compile(
     re.IGNORECASE,
 )
 _ALLOWED_ROOT_RE = re.compile(
-    r"(?:e2e-smoke/(?:js|node|py|python)-|e2e-apps/(?:node|python)-|e2e-apps/prosper-chat|e2e-apps/nobi-owl-trader)",
+    r"(?:e2e-smoke/(?:node|python)\b|e2e-smoke/(?:js|py)-|e2e-apps/(?:node|python)-|e2e-apps/prosper-chat|e2e-apps/nobi-owl-trader)",
     re.IGNORECASE,
 )
 
@@ -154,6 +155,13 @@ def _is_python_js_only_draft(body: str) -> bool:
         if "/" in path and not _ALLOWED_ROOT_RE.search(path):
             return False
     return True
+
+
+def validate_drafts_or_die(drafts) -> None:
+    try:
+        validate_issue_drafts(drafts, repo_root=REPO_ROOT)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def main() -> int:
@@ -177,6 +185,7 @@ def main() -> int:
                 "Refusing to create mixed-language drafts without --allow-non-python-js. "
                 f"Invalid drafts: {', '.join(invalid)}"
             )
+    validate_drafts_or_die(drafts)
 
     if args.dry_run:
         payload = [
