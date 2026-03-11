@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from .service import TodoItem, TodoService
 
+APP_NAME = "Flow Healer Python FastAPI Sandbox"
+
 try:
     from fastapi import Body, FastAPI, HTTPException
 except Exception:  # pragma: no cover - lightweight fallback for minimal environments
@@ -47,8 +49,8 @@ except Exception:  # pragma: no cover - lightweight fallback for minimal environ
 service = TodoService()
 
 
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    return {"status": "ok", "service": {"name": APP_NAME}}
 
 
 def _service_for(request_service: TodoService | None) -> TodoService:
@@ -99,7 +101,7 @@ def complete_todo(todo_id: str, todo_service: TodoService | None = None) -> dict
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Flow Healer Python FastAPI Sandbox")
+    app = FastAPI(title=APP_NAME)
     app_service = TodoService()
 
     def app_list_todos() -> dict[str, object]:
