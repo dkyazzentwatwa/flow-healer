@@ -85,6 +85,7 @@ _EXECUTION_CONTRACT_FAILURE_CLASSES = {
 }
 _QUARANTINE_NEUTRAL_FAILURE_CLASSES = {"interrupted", "lease_expired"}
 _STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
+_RETRIABLE_CI_FAILURE_BUCKETS = {"lint", "setup", "test", "typecheck"}
 _AGENT_BLOCKED_LABEL = "agent:blocked"
 _OUTCOME_LABEL_DONE_CODE = "healer:done-code"
 _OUTCOME_LABEL_DONE_ARTIFACT = "healer:done-artifact"
@@ -116,6 +117,7 @@ _FAILURE_CLASS_STRATEGY: dict[str, dict[str, object]] = {
     "scope_violation":       {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt edited files outside the declared output targets. Keep the patch strictly scoped."},
     "preflight_failed":      {"backoff_multiplier": 1.0, "feedback_hint": "Environment preflight failed. Wait for the runtime/tooling lane to recover before retrying."},
     "generated_artifact_contamination": {"backoff_multiplier": 1.0, "feedback_hint": "Previous attempt left generated artifacts in the worktree. Clean workspace noise before retrying."},
+    "ci_failed":            {"backoff_multiplier": 0.5, "feedback_hint": "Remote CI failed on the open PR. Fix the failing checks on the existing branch and update the same PR."},
     "infra_pause":          {"backoff_multiplier": 1.0, "feedback_hint": "Infrastructure failed before validation could confirm the patch. Repair the local runtime and wait for the pause window to clear before retrying."},
     "swarm_quarantine":     {"backoff_multiplier": 1.0, "feedback_hint": "Swarm quarantined the attempt because another autonomous edit would be speculative. Clear the blocker before retrying."},
 }
@@ -167,6 +169,10 @@ _FAILURE_USER_HINTS: dict[str, str] = {
     "github_network_error": (
         "GitHub could not be reached over the network. "
         "Retry once connectivity is restored."
+    ),
+    "ci_failed": (
+        "Remote CI failed on the open pull request. "
+        "Use the failing checks to update the existing branch and PR."
     ),
     "tests_failed": (
         "The proposed fix did not pass tests. See test output above for details."
@@ -505,6 +511,11 @@ class AutonomousHealerLoop:
         details_cache: dict[int, PullRequestDetails | None] = {}
         viewer_login = self.tracker.viewer_login().lower()
         self._reconcile_pr_outcomes(active_prs=active_pr_rows, details_cache=details_cache)
+        active_pr_rows = self._list_active_pr_rows(include_blocked=True)
+        open_pr_rows = [
+            row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
+        ]
+        self._requeue_ci_failed_prs(active_prs=open_pr_rows)
         active_pr_rows = self._list_active_pr_rows(include_blocked=True)
         open_pr_rows = [
             row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
@@ -2320,6 +2331,219 @@ class AutonomousHealerLoop:
             return ""
         return str(ci_status_summary.get("overall_state") or "").strip().lower()
 
+    def _requeue_ci_failed_prs(self, active_prs: list[dict[str, object]] | None = None) -> int:
+        active_prs = active_prs or self.store.list_healer_issues(states=["pr_open"], limit=100)
+        requeued = 0
+        for row in active_prs:
+            issue_id = str(row.get("issue_id") or "").strip()
+            pr_number = int(row.get("pr_number") or 0)
+            ci_status_summary = dict(row.get("ci_status_summary") or {})
+            if not issue_id or pr_number <= 0:
+                continue
+            if self._ci_overall_state(ci_status_summary) != "failure":
+                continue
+            signal = self._ci_failure_signal(ci_status_summary)
+            if signal and self.store.get_state(self._ci_handled_signal_key(issue_id)) == signal:
+                continue
+            retriable_buckets = self._retriable_ci_failure_buckets(ci_status_summary)
+            if not retriable_buckets:
+                if signal:
+                    self.store.set_state(self._ci_handled_signal_key(issue_id), signal)
+                continue
+            feedback_context = self._compose_ci_failure_feedback_context(
+                existing_feedback=str(row.get("feedback_context") or "").strip(),
+                ci_status_summary=ci_status_summary,
+                pr_number=pr_number,
+            )
+            failure_reason = self._ci_failure_reason(
+                ci_status_summary=ci_status_summary,
+                pr_number=pr_number,
+            )
+            attempt_no = max(1, int(row.get("attempt_count") or 0))
+            if attempt_no >= int(getattr(self.settings, "healer_retry_budget", 1)):
+                self.store.set_healer_issue_state(
+                    issue_id=issue_id,
+                    state="pr_open",
+                    last_failure_class="ci_retry_exhausted",
+                    last_failure_reason=failure_reason[:500],
+                    clear_lease=True,
+                )
+                if signal:
+                    self.store.set_state(self._ci_handled_signal_key(issue_id), signal)
+                self._sync_outcome_issue_label(issue_id=issue_id, label=_OUTCOME_LABEL_RETRY_EXHAUSTED)
+                self._post_issue_status(
+                    issue_id=issue_id,
+                    body=self._format_flow_status_comment(
+                        "Remote CI retry budget exhausted",
+                        "The open pull request still has deterministic CI failures, but Flow Healer will stop retrying automatically for this CI signal.",
+                        [
+                            f"PR: `#{pr_number}`",
+                            f"Failure buckets: `{', '.join(retriable_buckets)}`",
+                            f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
+                            f"Retry budget: `{self.settings.healer_retry_budget}`",
+                        ],
+                        outro="Review the failing checks or add new guidance before another autonomous retry.",
+                    ),
+                )
+                self._record_retry_playbook_selection(
+                    issue_id=issue_id,
+                    failure_class="ci_failed",
+                    failure_domain="code",
+                    strategy="remote_ci_retry_budget_exhausted",
+                    backoff_seconds=0,
+                    feedback_hint=feedback_context,
+                )
+                continue
+            self.store.set_healer_issue_state(
+                issue_id=issue_id,
+                state="queued",
+                backoff_until="",
+                last_failure_class="ci_failed",
+                last_failure_reason=failure_reason[:500],
+                feedback_context=feedback_context[:500],
+                clear_lease=True,
+            )
+            if signal:
+                self.store.set_state(self._ci_handled_signal_key(issue_id), signal)
+            self._sync_blocked_issue_label(issue_id=issue_id, state="queued")
+            self._sync_outcome_issue_label(issue_id=issue_id, label="")
+            self._post_issue_status(
+                issue_id=issue_id,
+                body=self._format_flow_status_comment(
+                    "Remote CI failed; requeueing the same PR",
+                    "Flow Healer detected deterministic CI failures on the open pull request and is queueing another repair pass on the same branch.",
+                    [
+                        f"PR: `#{pr_number}`",
+                        f"Failure buckets: `{', '.join(retriable_buckets)}`",
+                        f"Reason: {self._clean_comment_text(failure_reason, max_chars=260)}",
+                    ],
+                    outro="The next attempt will reuse the existing PR context instead of opening a duplicate pull request.",
+                ),
+            )
+            self._record_retry_playbook_selection(
+                issue_id=issue_id,
+                failure_class="ci_failed",
+                failure_domain="code",
+                strategy="remote_ci_requeue",
+                backoff_seconds=0,
+                feedback_hint=feedback_context,
+            )
+            requeued += 1
+        return requeued
+
+    @staticmethod
+    def _ci_handled_signal_key(issue_id: str) -> str:
+        return f"healer_ci_handled_signal:{str(issue_id or '').strip()}"
+
+    @staticmethod
+    def _ci_failure_signal(ci_status_summary: dict[str, Any] | None) -> str:
+        if not isinstance(ci_status_summary, dict):
+            return ""
+        entries = [
+            {
+                "source": str(entry.get("source") or "").strip(),
+                "name": str(entry.get("name") or "").strip(),
+                "state": str(entry.get("state") or "").strip(),
+                "bucket": str(entry.get("bucket") or "").strip(),
+                "updated_at": str(entry.get("updated_at") or "").strip(),
+            }
+            for entry in (ci_status_summary.get("failing_entries") or [])
+            if isinstance(entry, dict)
+        ]
+        material = json.dumps(
+            {
+                "head_sha": str(ci_status_summary.get("head_sha") or "").strip(),
+                "updated_at": str(ci_status_summary.get("updated_at") or "").strip(),
+                "failing_entries": entries,
+            },
+            sort_keys=True,
+        )
+        if not material:
+            return ""
+        return hashlib.sha1(material.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def _retriable_ci_failure_buckets(ci_status_summary: dict[str, Any] | None) -> list[str]:
+        if not isinstance(ci_status_summary, dict):
+            return []
+        buckets = [
+            str(bucket).strip()
+            for bucket in (ci_status_summary.get("failure_buckets") or [])
+            if str(bucket).strip()
+        ]
+        return sorted(bucket for bucket in buckets if bucket in _RETRIABLE_CI_FAILURE_BUCKETS)
+
+    def _ci_failure_reason(self, *, ci_status_summary: dict[str, Any], pr_number: int) -> str:
+        buckets = self._retriable_ci_failure_buckets(ci_status_summary)
+        entries = self._ci_failure_entries_preview(ci_status_summary=ci_status_summary)
+        if buckets and entries:
+            return (
+                f"Remote CI failed for PR #{pr_number} in {', '.join(buckets)} checks: "
+                f"{'; '.join(entries)}."
+            )
+        if buckets:
+            return f"Remote CI failed for PR #{pr_number} in {', '.join(buckets)} checks."
+        if entries:
+            return f"Remote CI failed for PR #{pr_number}: {'; '.join(entries)}."
+        return f"Remote CI failed for PR #{pr_number}."
+
+    def _compose_ci_failure_feedback_context(
+        self,
+        *,
+        existing_feedback: str,
+        ci_status_summary: dict[str, Any],
+        pr_number: int,
+    ) -> str:
+        buckets = self._retriable_ci_failure_buckets(ci_status_summary)
+        entries = self._ci_failure_entries_preview(ci_status_summary=ci_status_summary)
+        pending_contexts = [
+            str(context).strip()
+            for context in (ci_status_summary.get("pending_contexts") or [])
+            if str(context).strip()
+        ]
+        parts = [existing_feedback] if existing_feedback else []
+        ci_lines = [
+            "[ci_failure_feedback]",
+            f"Open PR: #{pr_number}",
+            f"Head SHA: {str(ci_status_summary.get('head_sha') or '').strip()}",
+            f"Failure buckets: {', '.join(buckets) if buckets else 'unknown'}",
+        ]
+        if entries:
+            ci_lines.append("Failing checks:")
+            ci_lines.extend(f"- {entry}" for entry in entries)
+        if pending_contexts:
+            ci_lines.append(f"Still pending: {', '.join(pending_contexts)}")
+        ci_lines.append(
+            "Fix the failing remote CI checks on the existing managed branch and update the same pull request."
+        )
+        parts.append("\n".join(ci_lines))
+        return "\n\n".join(part for part in parts if part).strip()
+
+    @staticmethod
+    def _ci_failure_entries_preview(
+        *,
+        ci_status_summary: dict[str, Any],
+        limit: int = 5,
+    ) -> list[str]:
+        preview: list[str] = []
+        for entry in ci_status_summary.get("failing_entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            bucket = str(entry.get("bucket") or "").strip()
+            source = str(entry.get("source") or "").strip()
+            if not name:
+                continue
+            label = name
+            if bucket:
+                label = f"{label} [{bucket}]"
+            if source:
+                label = f"{label} via {source}"
+            preview.append(label)
+            if len(preview) >= max(1, int(limit)):
+                break
+        return preview
+
     @staticmethod
     def _normalize_repo_path(value: str) -> str:
         return _normalize_repo_relative_path(value)
@@ -2460,7 +2684,14 @@ class AutonomousHealerLoop:
             )
             if existing_issue is not None:
                 existing_pr_state = str(existing_issue.get("pr_state") or "").strip().lower()
+                preserve_ci_requeue = (
+                    existing_state == "queued"
+                    and int(existing_issue.get("pr_number") or 0) > 0
+                    and str(existing_issue.get("last_failure_class") or "").strip().lower() == "ci_failed"
+                )
                 if discovered_pr is not None:
+                    if preserve_ci_requeue:
+                        continue
                     self._restore_open_pr_state(
                         issue_id=issue.issue_id,
                         pr_number=discovered_pr.number,

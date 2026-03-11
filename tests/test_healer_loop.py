@@ -1014,6 +1014,54 @@ def test_ingest_ready_issues_restores_pr_open_when_existing_issue_has_open_pr(tm
     loop.tracker.add_issue_reaction.assert_not_called()
 
 
+def test_ingest_ready_issues_preserves_queued_ci_requeue_with_open_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5036",
+        repo="owner/repo",
+        title="Issue 5036",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="5036",
+        state="queued",
+        pr_number=236,
+        pr_state="open",
+        last_failure_class="ci_failed",
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = [
+        HealerIssue(
+            issue_id="5036",
+            repo="owner/repo",
+            title="Issue 5036 refreshed",
+            body="new body",
+            author="alice",
+            labels=["healer:ready"],
+            priority=5,
+            html_url="https://example.test/issues/5036",
+        )
+    ]
+    loop.tracker.find_pr_for_issue.return_value = PullRequestResult(
+        number=236,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/236",
+    )
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("5036")
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["pr_number"] == 236
+    assert issue["pr_state"] == "open"
+
+
 def test_ingest_ready_issues_coalesces_duplicate_scope(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -5285,3 +5333,153 @@ def test_reconcile_pr_outcomes_persists_ci_status_summary_for_open_pr(tmp_path):
     assert issue is not None
     assert issue["ci_status_summary"]["overall_state"] == "pending"
     assert attempt["ci_status_summary"]["pending_contexts"] == ["CI"]
+
+
+def test_requeue_ci_failed_pr_requeues_issue_with_feedback_context(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50447",
+        repo="owner/repo",
+        title="Issue 50447",
+        body="Fix CI failure",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.increment_healer_attempt("50447")
+    store.set_healer_issue_state(
+        issue_id="50447",
+        state="pr_open",
+        pr_number=247,
+        pr_state="open",
+        feedback_context="Existing PR feedback",
+        ci_status_summary={
+            "head_sha": "def456",
+            "overall_state": "failure",
+            "failure_buckets": ["lint", "deploy_blocked"],
+            "failing_entries": [
+                {
+                    "source": "check_run",
+                    "name": "lint",
+                    "state": "failure",
+                    "bucket": "lint",
+                    "updated_at": "2026-03-11T22:05:00Z",
+                }
+            ],
+            "pending_contexts": ["Preview"],
+            "updated_at": "2026-03-11T22:05:00Z",
+        },
+    )
+
+    loop = _make_loop(store, healer_retry_budget=3)
+
+    requeued = loop._requeue_ci_failed_prs()
+
+    issue = store.get_healer_issue("50447")
+    assert requeued == 1
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["pr_number"] == 247
+    assert issue["last_failure_class"] == "ci_failed"
+    assert "Existing PR feedback" in str(issue["feedback_context"] or "")
+    assert "[ci_failure_feedback]" in str(issue["feedback_context"] or "")
+    assert "Failure buckets: lint" in str(issue["feedback_context"] or "")
+    assert "lint [lint] via check_run" in str(issue["feedback_context"] or "")
+    assert store.get_state("healer_ci_handled_signal:50447") != ""
+
+
+def test_requeue_ci_failed_pr_skips_non_retriable_buckets(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50448",
+        repo="owner/repo",
+        title="Issue 50448",
+        body="Preview is red",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.increment_healer_attempt("50448")
+    store.set_healer_issue_state(
+        issue_id="50448",
+        state="pr_open",
+        pr_number=248,
+        pr_state="open",
+        ci_status_summary={
+            "head_sha": "ghi789",
+            "overall_state": "failure",
+            "failure_buckets": ["deploy_blocked"],
+            "failing_entries": [
+                {
+                    "source": "workflow_run",
+                    "name": "Preview",
+                    "state": "failure",
+                    "bucket": "deploy_blocked",
+                    "updated_at": "2026-03-11T22:06:00Z",
+                }
+            ],
+            "updated_at": "2026-03-11T22:06:00Z",
+        },
+    )
+
+    loop = _make_loop(store, healer_retry_budget=3)
+
+    requeued = loop._requeue_ci_failed_prs()
+
+    issue = store.get_healer_issue("50448")
+    assert requeued == 0
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["last_failure_class"] == ""
+    assert store.get_state("healer_ci_handled_signal:50448") != ""
+
+
+def test_requeue_ci_failed_pr_stops_after_retry_budget(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50449",
+        repo="owner/repo",
+        title="Issue 50449",
+        body="Retry budget exhausted",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.increment_healer_attempt("50449")
+    store.increment_healer_attempt("50449")
+    store.set_healer_issue_state(
+        issue_id="50449",
+        state="pr_open",
+        pr_number=249,
+        pr_state="open",
+        ci_status_summary={
+            "head_sha": "jkl012",
+            "overall_state": "failure",
+            "failure_buckets": ["test"],
+            "failing_entries": [
+                {
+                    "source": "check_run",
+                    "name": "pytest",
+                    "state": "failure",
+                    "bucket": "test",
+                    "updated_at": "2026-03-11T22:07:00Z",
+                }
+            ],
+            "updated_at": "2026-03-11T22:07:00Z",
+        },
+    )
+
+    loop = _make_loop(store, healer_retry_budget=2)
+
+    requeued = loop._requeue_ci_failed_prs()
+
+    issue = store.get_healer_issue("50449")
+    assert requeued == 0
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["last_failure_class"] == "ci_retry_exhausted"
+    assert "Remote CI failed for PR #249" in str(issue["last_failure_reason"] or "")
+    assert store.get_state("healer_ci_handled_signal:50449") != ""
