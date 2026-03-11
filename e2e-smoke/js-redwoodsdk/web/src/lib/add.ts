@@ -4,13 +4,17 @@ function add(a: number | string, b: number | string): number {
       const trimmed = value.trim();
 
       if (trimmed === '') {
-        return Number.NaN;
+        throw new TypeError('add expects finite numeric inputs');
       }
 
       return Number(trimmed);
     }
 
-    return Number(value);
+    if (typeof value !== 'number') {
+      throw new TypeError('add expects finite numeric inputs');
+    }
+
+    return value;
   };
 
   const left = normalize(a);
