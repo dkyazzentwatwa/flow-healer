@@ -235,6 +235,17 @@ class TestRealizedPnL:
         pnl = portfolio_engine.calculate_realized_pnl("BTC/USDT")
         assert pnl == 0.0
 
+    def test_short_sell_then_buy_generates_realized_pnl(self, trade_repo, portfolio_engine):
+        """Test FIFO matching for a short position closed by a buy."""
+        base_time = int(datetime.now().timestamp())
+
+        trade_repo.create(create_trade("sell-1", "ETH/USDT", "sell", 10.0, 3000.0, base_time, fee=30.0))
+        trade_repo.create(create_trade("buy-1", "ETH/USDT", "buy", 10.0, 2800.0, base_time + 100, fee=28.0))
+
+        # Expected short P&L: (3000 - 2800) * 10.0 - 30 - 28 = 1942
+        pnl = portfolio_engine.calculate_realized_pnl("ETH/USDT")
+        assert abs(pnl - 1942.0) < 0.01
+
 
 class TestUnrealizedPnL:
     """Test unrealized P&L calculation"""
@@ -420,6 +431,20 @@ class TestPerformanceMetrics:
         assert metrics["total_profit"] > 0
         assert metrics["total_loss"] > 0
         assert metrics["profit_factor"] > 0
+
+    def test_performance_metrics_include_profitable_short_round_trip(self, trade_repo, portfolio_engine):
+        """Test performance metrics count short round trips."""
+        base_time = int(datetime.now().timestamp())
+
+        trade_repo.create(create_trade("sell-1", "ETH/USDT", "sell", 10.0, 3000.0, base_time, fee=30.0))
+        trade_repo.create(create_trade("buy-1", "ETH/USDT", "buy", 10.0, 2800.0, base_time + 100, fee=28.0))
+
+        metrics = portfolio_engine.calculate_performance_metrics()
+
+        assert metrics["total_trades"] == 1
+        assert metrics["winning_trades"] == 1
+        assert metrics["losing_trades"] == 0
+        assert abs(metrics["total_profit"] - 1942.0) < 0.01
 
     def test_performance_metrics_no_trades(self, portfolio_engine):
         """Test performance metrics with no trades"""

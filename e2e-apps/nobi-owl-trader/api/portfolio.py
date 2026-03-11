@@ -116,41 +116,84 @@ class PortfolioEngine:
         for _, sym_trades in symbols_trades.items():
             sorted_trades = sorted(sym_trades, key=lambda t: t.timestamp)
 
-            buys = [t for t in sorted_trades if t.side == "buy"]
-            sells = [t for t in sorted_trades if t.side == "sell"]
+            open_longs: List[Dict[str, float]] = []
+            open_shorts: List[Dict[str, float]] = []
 
-            if not buys or not sells:
-                continue
+            for trade in sorted_trades:
+                remaining_amount = trade.amount
+                trade_fee = trade.fee
 
-            consumed_amounts: Dict[str, float] = {}
+                if trade.side == "buy":
+                    while remaining_amount > 1e-8 and open_shorts:
+                        short_lot = open_shorts[0]
+                        match_amount = min(remaining_amount, short_lot["amount"])
 
-            for sell in sells:
-                remaining_amount = sell.amount
-                for buy in buys:
-                    if remaining_amount <= 0:
-                        break
+                        short_fee_proportion = (
+                            short_lot["fee"] * match_amount / short_lot["amount"]
+                        ) if short_lot["amount"] > 0 else 0.0
+                        buy_fee_proportion = (
+                            trade.fee * match_amount / trade.amount
+                        ) if trade.amount > 0 else 0.0
 
-                    already_consumed = consumed_amounts.get(buy.id, 0.0)
-                    available = buy.amount - already_consumed
-                    if available <= 1e-8:
-                        continue
+                        pnl = (short_lot["price"] - trade.price) * match_amount
+                        pnl -= (short_fee_proportion + buy_fee_proportion)
 
-                    match_amount = min(remaining_amount, available)
+                        matches.append({
+                            "pnl": pnl,
+                            "hold_ms": max(trade.timestamp - short_lot["timestamp"], 0),
+                        })
 
-                    pnl = (sell.price - buy.price) * match_amount
-                    buy_fee_proportion = (buy.fee * match_amount / buy.amount) if buy.amount > 0 else 0
-                    sell_fee_proportion = (sell.fee * match_amount / sell.amount) if sell.amount > 0 else 0
-                    pnl -= (buy_fee_proportion + sell_fee_proportion)
+                        short_lot["amount"] -= match_amount
+                        short_lot["fee"] -= short_fee_proportion
+                        remaining_amount -= match_amount
+                        trade_fee -= buy_fee_proportion
 
-                    hold_ms = max(sell.timestamp - buy.timestamp, 0)
+                        if short_lot["amount"] <= 1e-8:
+                            open_shorts.pop(0)
 
-                    matches.append({
-                        "pnl": pnl,
-                        "hold_ms": hold_ms,
-                    })
+                    if remaining_amount > 1e-8:
+                        open_longs.append({
+                            "amount": remaining_amount,
+                            "price": trade.price,
+                            "timestamp": trade.timestamp,
+                            "fee": max(trade_fee, 0.0),
+                        })
 
-                    consumed_amounts[buy.id] = already_consumed + match_amount
-                    remaining_amount -= match_amount
+                elif trade.side == "sell":
+                    while remaining_amount > 1e-8 and open_longs:
+                        long_lot = open_longs[0]
+                        match_amount = min(remaining_amount, long_lot["amount"])
+
+                        long_fee_proportion = (
+                            long_lot["fee"] * match_amount / long_lot["amount"]
+                        ) if long_lot["amount"] > 0 else 0.0
+                        sell_fee_proportion = (
+                            trade.fee * match_amount / trade.amount
+                        ) if trade.amount > 0 else 0.0
+
+                        pnl = (trade.price - long_lot["price"]) * match_amount
+                        pnl -= (long_fee_proportion + sell_fee_proportion)
+
+                        matches.append({
+                            "pnl": pnl,
+                            "hold_ms": max(trade.timestamp - long_lot["timestamp"], 0),
+                        })
+
+                        long_lot["amount"] -= match_amount
+                        long_lot["fee"] -= long_fee_proportion
+                        remaining_amount -= match_amount
+                        trade_fee -= sell_fee_proportion
+
+                        if long_lot["amount"] <= 1e-8:
+                            open_longs.pop(0)
+
+                    if remaining_amount > 1e-8:
+                        open_shorts.append({
+                            "amount": remaining_amount,
+                            "price": trade.price,
+                            "timestamp": trade.timestamp,
+                            "fee": max(trade_fee, 0.0),
+                        })
 
         return matches
 
