@@ -114,6 +114,7 @@ async def get_portfolio_summary() -> Dict[str, Any]:
         realized_pnl_today = engine.calculate_realized_pnl_from_trades(today_trades)
 
         total_value = _safe_float(engine.get_portfolio_value(cash_balance, current_prices))
+        positions_value = total_value - cash_balance
         total_cost = sum(_safe_float(p.total_cost) for p in positions)
         total_pnl = total_realized_pnl + total_unrealized_pnl
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
@@ -125,6 +126,7 @@ async def get_portfolio_summary() -> Dict[str, Any]:
             "portfolio": {
                 "totalValue": _safe_round(total_value, 2),
                 "cash": _safe_round(cash_balance, 2),
+                "positionsValue": _safe_round(positions_value, 2),
                 "positions": len(positions),
                 "totalCost": _safe_round(total_cost, 2),
                 "unrealizedPnl": _safe_round(total_unrealized_pnl, 2),
