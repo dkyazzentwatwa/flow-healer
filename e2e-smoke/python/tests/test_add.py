@@ -28,11 +28,17 @@ def test_add_keeps_integer_addition_unchanged_for_negative_values() -> None:
     assert module.add(-4, 7) == 3
 
 
+def test_add_accepts_stringified_integer_operands() -> None:
+    module = _load_add_module()
+
+    assert module.add("2", "3") == 5
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     (
         pytest.param(2.5, 3, id="rejects_float_operand"),
-        pytest.param("2", 3, id="rejects_string_operand"),
+        pytest.param("two", 3, id="rejects_non_numeric_string_operand"),
     ),
 )
 def test_add_rejects_non_boolean_non_integer_operands(left: object, right: object) -> None:
