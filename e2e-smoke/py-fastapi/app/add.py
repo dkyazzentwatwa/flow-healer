@@ -5,6 +5,8 @@ def add(a: int | str, b: int | str) -> int:
 
 
 def _coerce_int(value: int | str) -> int:
+    if isinstance(value, bool):
+        raise TypeError("boolean operands are not allowed")
     if isinstance(value, str):
         value = value.strip()
         if not value:
