@@ -3,7 +3,7 @@ def _coerce_int(value: object) -> int:
         raise TypeError("boolean operands are not allowed")
     try:
         return int(value)
-    except TypeError:
+    except (TypeError, ValueError):
         return int(str(value))
 
 
