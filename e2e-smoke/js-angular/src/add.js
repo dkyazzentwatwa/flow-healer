@@ -1,17 +1,28 @@
 function add(a, b) {
-  const left = typeof a === 'string' ? Number(a.trim()) : Number(a);
-  const right = typeof b === 'string' ? Number(b.trim()) : Number(b);
+  const left = toFiniteNumber(a);
+  const right = toFiniteNumber(b);
 
-  if (
-    (typeof a === 'string' && a.trim() === '')
-    || (typeof b === 'string' && b.trim() === '')
-    || !Number.isFinite(left)
-    || !Number.isFinite(right)
-  ) {
+  return left + right;
+}
+
+function toFiniteNumber(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+
+    if (trimmed === '') {
+      throw new TypeError('add expects finite numeric inputs');
+    }
+
+    value = Number(trimmed);
+  } else if (typeof value !== 'number') {
     throw new TypeError('add expects finite numeric inputs');
   }
 
-  return left + right;
+  if (!Number.isFinite(value)) {
+    throw new TypeError('add expects finite numeric inputs');
+  }
+
+  return value;
 }
 
 module.exports = { add };
