@@ -12,3 +12,7 @@ assert.throws(() => add('   ', 1), {
   name: 'TypeError',
   message: 'add expects finite numeric inputs',
 });
+assert.throws(() => add(true, 1), {
+  name: 'TypeError',
+  message: 'add expects finite numeric inputs',
+});
