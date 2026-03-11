@@ -65,9 +65,9 @@ def _write_rows(
     writer: Any,
     field_names: Iterable[str],
     row_type: str,
-    rows: Iterable[Mapping[str, Any]],
+    rows: Iterable[Mapping[str, Any]] | None,
 ) -> None:
-    materialized_rows = list(rows)
+    materialized_rows = list(rows or ())
     if not materialized_rows:
         return
 
