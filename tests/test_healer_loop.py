@@ -2723,6 +2723,29 @@ def test_with_promotion_transitions_marks_merge_blocked_for_missing_browser_arti
     ]
 
 
+def test_with_promotion_transitions_keeps_pending_approval_out_of_promotion_ready(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    summary = loop._with_promotion_transitions(
+        test_summary={
+            "promotion_state": "promotion_ready",
+            "promotion_transitions": ["local_validated"],
+        },
+        issue_state="pr_pending_approval",
+        pr_number=452,
+        ci_status_summary={"overall_state": "success"},
+    )
+
+    assert summary["promotion_transitions"] == [
+        "local_validated",
+        "pr_open",
+        "ci_green",
+    ]
+    assert "promotion_ready" not in summary["promotion_transitions"]
+
+
 def test_auto_merge_open_pr_skips_dirty_pr(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

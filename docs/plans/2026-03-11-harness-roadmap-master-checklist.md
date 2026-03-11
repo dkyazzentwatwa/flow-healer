@@ -174,7 +174,7 @@ Status: `Partial`
 - [x] Block merge when screenshots are missing
 - [x] Block merge while CI is red or pending
 - [ ] Block merge while judgment is required
-- [ ] Verify label-based approval behavior still composes cleanly with promotion states
+- [x] Verify label-based approval behavior still composes cleanly with promotion states
 
 ### Verification
 
@@ -298,3 +298,4 @@ Status: `Later`
 - [x] Promotion state now surfaces in service rows and dashboard issue views
 - [x] Browser-backed app runs now need screenshot proof before promotion or auto-merge
 - [x] Promotion-state transitions now persist in runner/loop attempt summaries
+- [x] Approval-gated PRs stay out of `promotion_ready` until the human label path resumes them
