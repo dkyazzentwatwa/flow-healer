@@ -8,6 +8,10 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ["var(--font-geist-sans)", "system-ui", "sans-serif"],
+        mono: ["var(--font-geist-mono)", "ui-monospace", "SFMono-Regular", "monospace"],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -40,7 +44,7 @@ const config: Config = {
         "2xl": "1.25rem",
       },
       boxShadow: {
-        panel: "0 22px 60px rgba(0, 0, 0, 0.28)",
+        panel: "0 30px 80px rgba(0, 0, 0, 0.34)",
       },
     },
   },

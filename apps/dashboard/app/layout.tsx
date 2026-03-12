@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { GeistMono } from "geist/font/mono";
+import { GeistSans } from "geist/font/sans";
 
 import { ThemeProvider } from "@/components/theme-provider";
 
@@ -6,7 +8,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Flow Healer Dashboard",
-  description: "A Linear-inspired observability shell for Flow Healer.",
+  description: "Vercel-inspired shadcn dashboard for Flow Healer operations.",
 };
 
 export default function RootLayout({
@@ -16,7 +18,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="min-h-screen font-sans">
+      <body className={`${GeistSans.variable} ${GeistMono.variable} min-h-screen font-sans`}>
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
           {children}
         </ThemeProvider>
