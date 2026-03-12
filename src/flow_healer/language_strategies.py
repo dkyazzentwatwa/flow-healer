@@ -4,8 +4,8 @@ import shlex
 from dataclasses import dataclass, field
 
 
-SUPPORTED_LANGUAGES: tuple[str, ...] = ("python", "node")
-REMOVED_LANGUAGES: tuple[str, ...] = ("go", "rust", "java_maven", "java_gradle", "ruby", "swift")
+SUPPORTED_LANGUAGES: tuple[str, ...] = ("python", "node", "swift", "go", "rust", "java_gradle", "ruby")
+REMOVED_LANGUAGES: tuple[str, ...] = ("java_maven",)
 SUPPORTED_LANGUAGE_SET = frozenset(SUPPORTED_LANGUAGES)
 REMOVED_LANGUAGE_SET = frozenset(REMOVED_LANGUAGES)
 
@@ -48,6 +48,56 @@ _STRATEGIES: dict[str, LanguageStrategy] = {
         docker_test_cmd=["npm", "test", "--", "--passWithNoTests"],
         local_test_cmd=["npm", "test", "--", "--passWithNoTests"],
         supports_targeted_paths=False,
+    ),
+    "swift": LanguageStrategy(
+        language="swift",
+        framework="generic",
+        docker_image="",
+        docker_install_cmd="",
+        docker_test_cmd=[],
+        local_test_cmd=["swift", "test"],
+        supports_targeted_paths=False,
+        supports_docker=False,
+    ),
+    "go": LanguageStrategy(
+        language="go",
+        framework="generic",
+        docker_image="",
+        docker_install_cmd="",
+        docker_test_cmd=[],
+        local_test_cmd=["go", "test", "./..."],
+        supports_targeted_paths=False,
+        supports_docker=False,
+    ),
+    "rust": LanguageStrategy(
+        language="rust",
+        framework="generic",
+        docker_image="",
+        docker_install_cmd="",
+        docker_test_cmd=[],
+        local_test_cmd=["cargo", "test"],
+        supports_targeted_paths=False,
+        supports_docker=False,
+    ),
+    "java_gradle": LanguageStrategy(
+        language="java_gradle",
+        framework="generic",
+        docker_image="",
+        docker_install_cmd="",
+        docker_test_cmd=[],
+        local_test_cmd=["./gradlew", "test", "--no-daemon"],
+        supports_targeted_paths=False,
+        supports_docker=False,
+    ),
+    "ruby": LanguageStrategy(
+        language="ruby",
+        framework="generic",
+        docker_image="",
+        docker_install_cmd="",
+        docker_test_cmd=[],
+        local_test_cmd=["bundle", "exec", "rspec"],
+        supports_targeted_paths=True,
+        supports_docker=False,
     ),
     # Conservative fallback preserves the historical Python execution path.
     "unknown": LanguageStrategy(
@@ -150,7 +200,7 @@ def ensure_supported_language(language: str, *, source: str = "configuration") -
     if is_removed_language(normalized):
         raise UnsupportedLanguageError(
             f"Unsupported language '{normalized}' from {source}. "
-            "Flow Healer supports only python and node."
+            f"Flow Healer supports {', '.join(SUPPORTED_LANGUAGES)}."
         )
     return normalized
 

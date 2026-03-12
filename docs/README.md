@@ -20,6 +20,8 @@ flow-healer start --once
 - [installation.md](installation.md): local environment setup and config
 - [usage.md](usage.md): CLI flows and examples
 - [usage.md - Failure Recovery](usage.md#failure-recovery): handling `no_patch` and `verifier_failed` retries
+- [app-target-onboarding.md](app-target-onboarding.md): checklist for adding a new browser-backed app target or runtime profile
+- [fixture-profile-guidance.md](fixture-profile-guidance.md): deterministic fixture and auth-state conventions for app-backed repro flows
 - [architecture.md](architecture.md): control loop and module map
 - [operations.md](operations.md): common maintenance tasks and troubleshooting
 - [operations.md - Failure Recovery](operations.md#failure-recovery): incident response for failed healing attempts
@@ -48,6 +50,6 @@ flow-healer start --repo demo --once
 ## Notes
 
 - Project type: CLI automation service
-- Tech stack: Python 3.11+, SQLite, GitHub, Docker, pytest, Node.js, Swift
+- Tech stack: Python 3.11+, SQLite, GitHub, Docker, pytest, Node.js, Swift, Go, Rust, Ruby, Java
 - Target audience: repository maintainers and contributors
 - Review feedback addressed: this initial docs scaffold is intended as a starting point for iterative refinement.

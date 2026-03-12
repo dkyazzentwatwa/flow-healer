@@ -22,6 +22,11 @@ _CONNECTOR_PROBE_TTL_SECONDS = 300
 _SUPPORTED_SANDBOXES: tuple[tuple[str, str, str], ...] = (
     ("python", "generic", "e2e-smoke/python"),
     ("node", "generic", "e2e-smoke/node"),
+    ("swift", "generic", "e2e-smoke/swift"),
+    ("go", "generic", "e2e-smoke/go"),
+    ("rust", "generic", "e2e-smoke/rust"),
+    ("java_gradle", "generic", "e2e-smoke/java-gradle"),
+    ("ruby", "generic", "e2e-smoke/ruby"),
     ("node", "next", "e2e-smoke/js-next"),
     ("node", "vue_vite", "e2e-smoke/js-vue-vite"),
     ("node", "nuxt", "e2e-smoke/js-nuxt"),
@@ -47,6 +52,8 @@ _SUPPORTED_SANDBOXES: tuple[tuple[str, str, str], ...] = (
     ("node", "next", "e2e-apps/node-next"),
     ("python", "fastapi", "e2e-apps/python-fastapi"),
     ("node", "next", "e2e-apps/prosper-chat"),
+    ("ruby", "rails", "e2e-apps/ruby-rails-web"),
+    ("java_gradle", "spring", "e2e-apps/java-spring-web"),
     ("python", "fastapi", "e2e-apps/nobi-owl-trader"),
 )
 
@@ -416,6 +423,16 @@ def _preflight_validation_commands(*, execution_root: str, language: str, framew
     normalized_root = str(execution_root or "").strip().strip("/")
     if normalized_root == "e2e-apps/prosper-chat":
         return (f"cd {normalized_root} && ./scripts/healer_validate.sh full",)
+    if language == "swift":
+        return (f"cd {normalized_root} && swift test",) if normalized_root else ()
+    if language == "go":
+        return (f"cd {normalized_root} && go test ./...",) if normalized_root else ()
+    if language == "rust":
+        return (f"cd {normalized_root} && cargo test",) if normalized_root else ()
+    if language == "java_gradle":
+        return (f"cd {normalized_root} && ./gradlew test --no-daemon",) if normalized_root else ()
+    if language == "ruby":
+        return (f"cd {normalized_root} && bundle exec rspec",) if normalized_root else ()
     if language == "python":
         return (f"cd {normalized_root} && pytest -q",) if normalized_root else ()
     if language == "node":

@@ -19,6 +19,7 @@ class AppRuntimeProfile:
     env: Mapping[str, str] | None = None
     install_command: tuple[str, ...] = ()
     install_marker_path: str = ""
+    fixture_driver_command: tuple[str, ...] = ()
     readiness_url: str | None = None
     readiness_log_text: str | None = None
     browser: str = ""

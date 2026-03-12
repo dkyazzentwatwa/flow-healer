@@ -3,7 +3,6 @@ from __future__ import annotations
 from flow_healer.language_detector import detect_language, detect_language_details
 from flow_healer.language_strategies import (
     SUPPORTED_LANGUAGES,
-    UnsupportedLanguageError,
     ensure_supported_language,
     get_strategy,
     parse_command,
@@ -64,13 +63,12 @@ def test_all_supported_strategies_have_local_test_cmd() -> None:
         assert strategy.local_test_cmd, f"{lang} strategy has empty local_test_cmd"
 
 
-def test_ensure_supported_language_rejects_removed_languages() -> None:
-    try:
-        ensure_supported_language("ruby", source="test fixture")
-    except UnsupportedLanguageError as exc:
-        assert "supports only python and node" in str(exc)
-    else:
-        raise AssertionError("expected removed languages to be rejected")
+def test_ensure_supported_language_accepts_expanded_reference_languages() -> None:
+    assert ensure_supported_language("ruby", source="test fixture") == "ruby"
+    assert ensure_supported_language("swift", source="test fixture") == "swift"
+    assert ensure_supported_language("go", source="test fixture") == "go"
+    assert ensure_supported_language("rust", source="test fixture") == "rust"
+    assert ensure_supported_language("java_gradle", source="test fixture") == "java_gradle"
 
 
 def test_get_strategy_custom_test_command_enables_pytest_targeting() -> None:
@@ -85,13 +83,27 @@ def test_get_strategy_custom_test_command_enables_pytest_targeting() -> None:
     assert strategy.supports_targeted_paths is True
 
 
-def test_ensure_supported_language_rejects_swift() -> None:
-    try:
-        ensure_supported_language("swift", source="test fixture")
-    except UnsupportedLanguageError as exc:
-        assert "supports only python and node" in str(exc)
-    else:
-        raise AssertionError("expected swift to be rejected")
+def test_get_strategy_uses_expanded_language_defaults() -> None:
+    ruby = get_strategy("ruby")
+    assert ruby.local_test_cmd == ["bundle", "exec", "rspec"]
+    assert ruby.supports_targeted_paths is True
+    assert ruby.supports_docker is False
+
+    swift = get_strategy("swift")
+    assert swift.local_test_cmd == ["swift", "test"]
+    assert swift.supports_docker is False
+
+    go = get_strategy("go")
+    assert go.local_test_cmd == ["go", "test", "./..."]
+    assert go.supports_docker is False
+
+    rust = get_strategy("rust")
+    assert rust.local_test_cmd == ["cargo", "test"]
+    assert rust.supports_docker is False
+
+    java = get_strategy("java_gradle")
+    assert java.local_test_cmd == ["./gradlew", "test", "--no-daemon"]
+    assert java.supports_docker is False
 
 
 def test_get_strategy_uses_node_framework_defaults() -> None:

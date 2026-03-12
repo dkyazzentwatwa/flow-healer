@@ -181,8 +181,11 @@ class HealerRunner:
             command=profile.command,
             cwd=cwd,
             env=profile.env,
+            install_command=tuple(profile.install_command or ()),
+            install_marker_path=str(profile.install_marker_path or ""),
             readiness_url=profile.readiness_url,
             readiness_log_text=profile.readiness_log_text,
+            fixture_driver_command=tuple(profile.fixture_driver_command or ()),
             browser=profile.browser,
             headless=profile.headless,
             viewport=dict(profile.viewport or {}) or None,
@@ -194,6 +197,67 @@ class HealerRunner:
         if not profile.command:
             return None, "app_runtime_profile_invalid", f"Runtime profile '{selected_name}' does not define a start command."
         return profile, "", ""
+
+    def _run_fixture_driver(
+        self,
+        *,
+        profile: AppRuntimeProfile,
+        fixture_profile: str,
+        action: str,
+        extra_args: tuple[str, ...] = (),
+    ) -> None:
+        if not fixture_profile:
+            return
+        command = tuple(profile.fixture_driver_command or ())
+        if not command:
+            return
+
+        env = os.environ.copy()
+        if profile.env:
+            env.update(profile.env)
+        full_command = [*command, action, fixture_profile, *extra_args]
+        result = subprocess.run(
+            full_command,
+            cwd=profile.cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        output_tail = "\n".join((result.stdout or "").splitlines()[-40:])
+        raise RuntimeError(
+            f"{profile.name} fixture driver '{action}' failed "
+            f"(exit code {result.returncode}). Output tail:\n{output_tail}"
+        )
+
+    def _materialize_fixture_auth_state(
+        self,
+        *,
+        profile: AppRuntimeProfile,
+        fixture_profile: str,
+        entry_url: str,
+        browser_artifact_root: Path,
+        phase: str,
+    ) -> str:
+        if not fixture_profile or not profile.fixture_driver_command:
+            return ""
+
+        output_path = (browser_artifact_root / "storage-state" / f"{phase}.json").resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._run_fixture_driver(
+            profile=profile,
+            fixture_profile=fixture_profile,
+            action="auth-state",
+            extra_args=(str(output_path), entry_url),
+        )
+        if not output_path.exists():
+            raise RuntimeError(
+                f"{profile.name} fixture driver did not create auth state at {output_path}"
+            )
+        return str(output_path)
 
     def run_attempt(
         self,
@@ -309,7 +373,19 @@ class HealerRunner:
             pre_fix_session: AppHarnessSession | None = None
             browser_entry_url = task_spec.entry_url or browser_profile.readiness_url or ""
             try:
+                self._run_fixture_driver(
+                    profile=browser_profile,
+                    fixture_profile=task_spec.fixture_profile,
+                    action="prepare",
+                )
                 boot_result, pre_fix_session = self._app_harness.boot(browser_profile)
+                pre_fix_storage_state_path = self._materialize_fixture_auth_state(
+                    profile=browser_profile,
+                    fixture_profile=task_spec.fixture_profile,
+                    entry_url=browser_entry_url,
+                    browser_artifact_root=browser_artifact_root,
+                    phase="failure",
+                )
                 pre_fix_runtime_status = {
                     "status": "ready",
                     "profile": boot_result.profile.name,
@@ -331,6 +407,7 @@ class HealerRunner:
                     artifact_root=browser_artifact_root / "failure",
                     phase="failure",
                     expect_failure=True,
+                    storage_state_path=pre_fix_storage_state_path,
                 )
                 if not failure_journey.passed and failure_journey.expected_failure_observed:
                     confirmatory_failure_journey = self._browser_harness.capture_journey(
@@ -340,6 +417,7 @@ class HealerRunner:
                         artifact_root=browser_artifact_root / "failure-replay",
                         phase="failure-replay",
                         expect_failure=True,
+                        storage_state_path=pre_fix_storage_state_path,
                     )
                     repro_stability = _browser_repro_stability(
                         initial=failure_journey,
@@ -1160,6 +1238,7 @@ class HealerRunner:
 
         app_runtime_session: AppHarnessSession | None = None
         app_runtime_status: dict[str, Any] = {}
+        runtime_storage_state_path = ""
 
         def _stop_app_runtime() -> None:
             nonlocal app_runtime_session
@@ -1178,7 +1257,21 @@ class HealerRunner:
         )
         if runtime_profile is not None:
             try:
+                if browser_evidence_requested:
+                    self._run_fixture_driver(
+                        profile=runtime_profile,
+                        fixture_profile=task_spec.fixture_profile,
+                        action="prepare",
+                    )
                 boot_result, app_runtime_session = self._app_harness.boot(runtime_profile)
+                if browser_evidence_requested:
+                    runtime_storage_state_path = self._materialize_fixture_auth_state(
+                        profile=runtime_profile,
+                        fixture_profile=task_spec.fixture_profile,
+                        entry_url=task_spec.entry_url or runtime_profile.readiness_url or "",
+                        browser_artifact_root=browser_artifact_root,
+                        phase="resolution",
+                    )
             except Exception as exc:
                 app_runtime_status = {
                     "status": "failed",
@@ -1299,6 +1392,7 @@ class HealerRunner:
                     artifact_root=browser_artifact_root / "resolution",
                     phase="resolution",
                     expect_failure=False,
+                    storage_state_path=runtime_storage_state_path,
                 )
             except Exception as exc:
                 test_summary = _annotate_test_summary_browser_artifacts(
@@ -1757,7 +1851,7 @@ class HealerRunner:
         if is_removed_language(effective_language):
             raise UnsupportedLanguageError(
                 f"Unsupported language '{effective_language}'. "
-                "Flow Healer supports only python and node."
+                "Flow Healer does not support java_maven; use java_gradle for Java reference targets."
             )
         if effective_language == "unknown":
             effective_language = ""
@@ -5168,6 +5262,7 @@ def _coerce_app_runtime_profile(*, raw_name: str, raw_profile: Any) -> AppRuntim
             env=dict(raw_profile.env or {}),
             install_command=tuple(getattr(raw_profile, "install_command", ()) or ()),
             install_marker_path=str(getattr(raw_profile, "install_marker_path", "") or ""),
+            fixture_driver_command=tuple(getattr(raw_profile, "fixture_driver_command", ()) or ()),
             readiness_url=raw_profile.readiness_url,
             readiness_log_text=raw_profile.readiness_log_text,
             browser=raw_profile.browser,
@@ -5201,6 +5296,7 @@ def _coerce_app_runtime_profile(*, raw_name: str, raw_profile: Any) -> AppRuntim
         env={str(key): str(value) for key, value in dict(env_value or {}).items()},
         install_command=_normalize_app_runtime_command(raw_profile.get("install_command")),
         install_marker_path=str(raw_profile.get("install_marker_path") or "").strip(),
+        fixture_driver_command=_normalize_app_runtime_command(raw_profile.get("fixture_driver_command")),
         readiness_url=readiness_url,
         readiness_log_text=readiness_log_text,
         browser=str(raw_profile.get("browser") or "").strip(),

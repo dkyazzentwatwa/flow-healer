@@ -655,6 +655,46 @@ def _mega_final_wave_1_templates() -> tuple[IssueTemplate, ...]:
             source="e2e-apps",
         ),
         _template(
+            kind="Mega final app: Ruby Rails session flow",
+            targets=(
+                "e2e-apps/ruby-rails-web/app/controllers/sessions_controller.rb",
+                "e2e-apps/ruby-rails-web/spec/requests/health_spec.rb",
+            ),
+            validation_command="cd e2e-apps/ruby-rails-web && bundle exec rspec",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Ruby Rails dashboard flow",
+            targets=(
+                "e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",
+                "e2e-apps/ruby-rails-web/config/routes.rb",
+            ),
+            validation_command="cd e2e-apps/ruby-rails-web && bundle exec rspec",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Java Spring login flow",
+            targets=(
+                "e2e-apps/java-spring-web/src/main/java/example/web/LoginController.java",
+                "e2e-apps/java-spring-web/src/test/java/example/web/HealthControllerTest.java",
+            ),
+            validation_command="cd e2e-apps/java-spring-web && ./gradlew test --no-daemon",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Mega final app: Java Spring dashboard flow",
+            targets=(
+                "e2e-apps/java-spring-web/src/main/java/example/web/DashboardController.java",
+                "e2e-apps/java-spring-web/src/main/java/example/web/HealthController.java",
+            ),
+            validation_command="cd e2e-apps/java-spring-web && ./gradlew test --no-daemon",
+            difficulty="medium",
+            source="e2e-apps",
+        ),
+        _template(
             kind="Mega final app: Prosper class merge utilities",
             targets=("e2e-apps/prosper-chat/src/lib/utils.ts", "e2e-apps/prosper-chat/src/test/utils.test.ts"),
             validation_command=_PROSPER_CHAT_FULL_COMMAND,

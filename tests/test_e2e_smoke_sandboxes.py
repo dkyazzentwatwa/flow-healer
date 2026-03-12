@@ -134,6 +134,28 @@ def test_all_supported_language_sandboxes_exist() -> None:
             "app/add.py",
             "tests/test_add.py",
         ],
+        "go": [
+            "go.mod",
+            "add.go",
+            "add_test.go",
+        ],
+        "rust": [
+            "Cargo.toml",
+            "src/lib.rs",
+            "tests/add.rs",
+        ],
+        "java-gradle": [
+            "build.gradle",
+            "gradlew",
+            "settings.gradle",
+            "src/main/java/example/Add.java",
+            "src/test/java/example/AddTest.java",
+        ],
+        "ruby": [
+            "Gemfile",
+            "lib/add.rb",
+            "spec/add_spec.rb",
+        ],
         "swift": [
             "Package.swift",
             "Sources/FlowHealerAdd/Add.swift",
@@ -152,6 +174,10 @@ def test_sandbox_layout_matches_supported_language_strategies() -> None:
     expected = {
         "python": "python",
         "node": "node",
+        "go": "go",
+        "rust": "rust",
+        "java-gradle": "java_gradle",
+        "ruby": "ruby",
         "swift": "swift",
     }
 

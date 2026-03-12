@@ -4,7 +4,7 @@ from flow_healer.healer_task_spec import (
     task_spec_to_prompt_block,
     _is_code_path,
 )
-from flow_healer.language_strategies import UnsupportedLanguageError, ensure_supported_language
+from flow_healer.language_strategies import ensure_supported_language
 
 
 def test_compile_task_spec_defaults_research_issue_to_docs_artifact() -> None:
@@ -441,19 +441,14 @@ def test_compile_task_spec_infers_swift_execution_root_and_validation_command() 
     assert spec.validation_commands == ("cd e2e-smoke/swift && swift test",)
 
 
-def test_compile_task_spec_swift_inference_routes_to_unsupported_language_path() -> None:
+def test_compile_task_spec_swift_inference_routes_to_supported_language_path() -> None:
     spec = compile_task_spec(
         issue_title="Swift sandbox regression",
         issue_body="Validation: cd e2e-smoke/swift && swift test",
     )
 
     assert spec.language == "swift"
-    try:
-        ensure_supported_language(spec.language, source="issue instructions")
-    except UnsupportedLanguageError as exc:
-        assert "supports only python and node" in str(exc)
-    else:
-        raise AssertionError("expected swift issue language to be rejected")
+    assert ensure_supported_language(spec.language, source="issue instructions") == "swift"
 
 
 def test_task_spec_prompt_block_includes_execution_root_and_validation_commands() -> None:
@@ -561,6 +556,40 @@ def test_compile_task_spec_infers_node_execution_root_for_e2e_apps() -> None:
         "e2e-apps/node-next/lib/todo-service.js",
     )
     assert spec.validation_commands == ("cd e2e-apps/node-next && npm test",)
+
+
+def test_compile_task_spec_infers_ruby_execution_root_for_e2e_apps() -> None:
+    spec = compile_task_spec(
+        issue_title="Rails sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/ruby-rails-web/app/controllers/sessions_controller.rb\n"
+            "- e2e-apps/ruby-rails-web/spec/requests/health_spec.rb\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/ruby-rails-web && bundle exec rspec\n"
+        ),
+    )
+
+    assert spec.language == "ruby"
+    assert spec.execution_root == "e2e-apps/ruby-rails-web"
+    assert spec.validation_commands == ("cd e2e-apps/ruby-rails-web && bundle exec rspec",)
+
+
+def test_compile_task_spec_infers_java_gradle_execution_root_for_e2e_apps() -> None:
+    spec = compile_task_spec(
+        issue_title="Spring sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/java-spring-web/src/main/java/example/web/LoginController.java\n"
+            "- e2e-apps/java-spring-web/src/test/java/example/web/HealthControllerTest.java\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/java-spring-web && ./gradlew test --no-daemon\n"
+        ),
+    )
+
+    assert spec.language == "java_gradle"
+    assert spec.execution_root == "e2e-apps/java-spring-web"
+    assert spec.validation_commands == ("cd e2e-apps/java-spring-web && ./gradlew test --no-daemon",)
 
 
 def test_compile_task_spec_infers_python_execution_root_for_e2e_apps() -> None:

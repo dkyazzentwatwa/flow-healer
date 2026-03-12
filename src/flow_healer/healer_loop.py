@@ -6573,6 +6573,7 @@ def _coerce_loop_runtime_profile(*, raw_name: str, raw_profile: object, repo_pat
         env={str(key): str(value) for key, value in dict(env_value or {}).items()},
         install_command=_normalize_runtime_profile_command(raw_profile.get("install_command")),
         install_marker_path=str(raw_profile.get("install_marker_path") or "").strip(),
+        fixture_driver_command=_normalize_runtime_profile_command(raw_profile.get("fixture_driver_command")),
         readiness_url=str(raw_profile.get("readiness_url") or raw_profile.get("ready_url") or "").strip() or None,
         readiness_log_text=str(raw_profile.get("readiness_log_text") or raw_profile.get("ready_log_text") or "").strip() or None,
         browser=str(raw_profile.get("browser") or "").strip(),

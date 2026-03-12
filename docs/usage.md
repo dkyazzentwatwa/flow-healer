@@ -116,11 +116,11 @@ repos:
     install_command: ""
 ~~~
 
-- `language`: pin strategy (`python`, `node`, `swift`) or leave empty for auto-detect.
+- `language`: pin strategy (`python`, `node`, `swift`, `go`, `rust`, `ruby`, `java_gradle`) or leave empty for auto-detect.
 - `local_gate_policy`: `auto`, `force`, or `skip`.
 - `docker_image`, `test_command`, `install_command`: optional strategy overrides.
 
-The issue parser can still recognize validation commands and sandbox roots for additional ecosystems such as Ruby, Rust, Go, and Java so unsupported-language issues fail explicitly with the right diagnosis. Automatic execution support remains limited to `python`, `node`, and `swift`.
+The issue parser and local validation lane now support additional reference ecosystems such as Ruby, Rust, Go, Swift, and Gradle-based Java. Docker-backed execution still only applies to Python and Node.js in this tranche.
 
 ### test_gate_mode Options
 
@@ -143,7 +143,7 @@ repos:
     # Docker image and test command are auto-selected based on language
 ~~~
 
-Swift does not support `docker_only`; use `local_only` or `local_then_docker` for Swift repos.
+Swift, Go, Rust, Ruby, and Gradle-based Java do not support `docker_only`; use `local_only` or `local_then_docker` for those repos.
 
 ### Custom Docker Image
 

@@ -260,17 +260,18 @@ Notes:
 - Canary dashboard surface remains covered in `tests/test_service.py` and `tests/test_web_dashboard.py`.
 - Browser-session cleanup now tracks and prunes stale browser-session roots alongside app-runtime cleanup, with coverage in `tests/test_healer_reconciler.py`, `tests/test_healer_reconciler_resource_audit.py`, `tests/test_service.py`, and `tests/test_web_dashboard.py`.
 - Live GitHub harness canary proof landed on March 11, 2026 / March 12, 2026 UTC for runtime profile `node-next-web`, publishing screenshot + console + network logs to `flow-healer/evidence/issue-canary-node-next-web/canary-20260312041820` on branch `flow-healer-artifacts`.
+- Multi-stack browser-evidence coverage now also runs through focused canary/unit coverage for `node-next-web`, `ruby-rails-web`, and `java-spring-web` in `tests/test_healer_loop.py`, plus fixture-auth coverage in `tests/test_healer_runner.py`.
 
 ## App Coverage Expansion
 
-Status: `Later`
+Status: `Complete`
 
 - [x] Establish `e2e-apps/node-next` as the reference sandbox
-- [ ] Add a second reference app target
-- [ ] Document how to onboard a new app target/runtime profile
-- [ ] Add fixture-profile guidance for deterministic repro data
-- [ ] Support richer auth/session flows where needed
-- [ ] Validate the browser-evidence lane across more than one stack
+- [x] Add a second reference app target
+- [x] Document how to onboard a new app target/runtime profile
+- [x] Add fixture-profile guidance for deterministic repro data
+- [x] Support richer auth/session flows where needed
+- [x] Validate the browser-evidence lane across more than one stack
 
 ## Open Decisions
 

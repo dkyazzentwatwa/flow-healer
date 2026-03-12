@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import importlib.util
 import json
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ class LocalBrowserHarness:
         artifact_root: Path,
         phase: str,
         expect_failure: bool,
+        storage_state_path: str = "",
     ) -> BrowserJourneyResult:
         steps = _coerce_repro_steps(repro_steps)
         phase_root = Path(artifact_root) / phase
@@ -66,6 +68,7 @@ class LocalBrowserHarness:
             entry_url=entry_url,
             artifact_root=artifact_root,
             phase=phase,
+            storage_state_path=storage_state_path,
         )
         transcript: list[dict[str, object]] = []
         passed = True
@@ -136,14 +139,24 @@ class LocalBrowserHarness:
         entry_url: str,
         artifact_root: Path,
         phase: str,
+        storage_state_path: str = "",
     ) -> Any:
         if self._session_factory is not None:
+            if _session_factory_accepts_storage_state(self._session_factory):
+                return self._session_factory(
+                    profile,
+                    entry_url,
+                    artifact_root,
+                    phase,
+                    storage_state_path=storage_state_path,
+                )
             return self._session_factory(profile, entry_url, artifact_root, phase)
         return _PlaywrightBrowserSession(
             profile=profile,
             entry_url=entry_url,
             artifact_root=artifact_root,
             phase=phase,
+            storage_state_path=storage_state_path,
         )
 
     def _run_step(
@@ -228,6 +241,7 @@ class _PlaywrightBrowserSession:
         entry_url: str,
         artifact_root: Path,
         phase: str,
+        storage_state_path: str = "",
     ) -> None:
         from playwright.sync_api import sync_playwright
 
@@ -249,6 +263,8 @@ class _PlaywrightBrowserSession:
             "record_video_dir": str((self._artifact_root / self._phase / "video").resolve()),
             "base_url": self._entry_url or None,
         }
+        if storage_state_path:
+            context_kwargs["storage_state"] = storage_state_path
         context_kwargs = {key: value for key, value in context_kwargs.items() if value is not None}
         device_name = str(profile.device or "").strip()
         if device_name:
@@ -455,6 +471,20 @@ def _resolve_url(entry_url: str, path_or_url: str) -> str:
         return raw
     base_for_join = base if base.endswith("/") else f"{base}/"
     return urljoin(base_for_join, raw.lstrip("/"))
+
+
+def _session_factory_accepts_storage_state(factory: Callable[..., Any]) -> bool:
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError):
+        return False
+
+    for parameter in parameters:
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "storage_state_path":
+            return True
+    return False
 
 
 def _format_step(step: BrowserStep) -> str:

@@ -7,6 +7,9 @@ from flow_healer.healer_preflight import (
     PreflightReport,
     _probe_monorepo_layout,
     _probe_node_toolchain,
+    _preflight_validation_commands,
+    execution_root_for_language,
+    list_cached_preflight_reports,
     preflight_readiness_assessment,
     summarize_preflight_readiness,
 )
@@ -139,3 +142,60 @@ def test_summarize_preflight_readiness_with_blocked_and_missing_reports() -> Non
     assert summary["unknown"] == 1
     assert summary["overall_class"] == "blocked"
     assert summary["blocking_execution_roots"] == ["e2e-smoke/python"]
+
+
+def test_preflight_validation_commands_cover_new_languages_and_app_targets() -> None:
+    assert _preflight_validation_commands(
+        execution_root="e2e-smoke/swift",
+        language="swift",
+    ) == ("cd e2e-smoke/swift && swift test",)
+    assert _preflight_validation_commands(
+        execution_root="e2e-smoke/go",
+        language="go",
+    ) == ("cd e2e-smoke/go && go test ./...",)
+    assert _preflight_validation_commands(
+        execution_root="e2e-smoke/rust",
+        language="rust",
+    ) == ("cd e2e-smoke/rust && cargo test",)
+    assert _preflight_validation_commands(
+        execution_root="e2e-smoke/java-gradle",
+        language="java_gradle",
+    ) == ("cd e2e-smoke/java-gradle && ./gradlew test --no-daemon",)
+    assert _preflight_validation_commands(
+        execution_root="e2e-smoke/ruby",
+        language="ruby",
+    ) == ("cd e2e-smoke/ruby && bundle exec rspec",)
+    assert _preflight_validation_commands(
+        execution_root="e2e-apps/ruby-rails-web",
+        language="ruby",
+        framework="rails",
+    ) == ("cd e2e-apps/ruby-rails-web && bundle exec rspec",)
+    assert _preflight_validation_commands(
+        execution_root="e2e-apps/java-spring-web",
+        language="java_gradle",
+        framework="spring",
+    ) == ("cd e2e-apps/java-spring-web && ./gradlew test --no-daemon",)
+
+
+def test_execution_root_for_language_returns_new_smoke_roots() -> None:
+    assert execution_root_for_language("swift") == "e2e-smoke/swift"
+    assert execution_root_for_language("go") == "e2e-smoke/go"
+    assert execution_root_for_language("rust") == "e2e-smoke/rust"
+    assert execution_root_for_language("java_gradle") == "e2e-smoke/java-gradle"
+    assert execution_root_for_language("ruby") == "e2e-smoke/ruby"
+
+
+def test_cached_preflight_reports_include_new_smoke_and_app_targets(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+
+    reports = list_cached_preflight_reports(store=store, gate_mode="local_only")
+    execution_roots = {report.execution_root for report in reports}
+
+    assert "e2e-smoke/swift" in execution_roots
+    assert "e2e-smoke/go" in execution_roots
+    assert "e2e-smoke/rust" in execution_roots
+    assert "e2e-smoke/java-gradle" in execution_roots
+    assert "e2e-smoke/ruby" in execution_roots
+    assert "e2e-apps/ruby-rails-web" in execution_roots
+    assert "e2e-apps/java-spring-web" in execution_roots

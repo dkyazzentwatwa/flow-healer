@@ -195,6 +195,17 @@ def test_app_runtime_profile_supports_browser_configuration_fields(tmp_path: Pat
     assert profile.device == "Desktop Chrome"
 
 
+def test_app_runtime_profile_supports_fixture_driver_command(tmp_path: Path) -> None:
+    profile = AppRuntimeProfile(
+        name="browser-app",
+        command=(sys.executable, "-u", "app.py"),
+        cwd=tmp_path,
+        fixture_driver_command=(sys.executable, "scripts/fixture_driver.py"),
+    )
+
+    assert profile.fixture_driver_command == (sys.executable, "scripts/fixture_driver.py")
+
+
 def test_bootstrap_dependencies_runs_npm_ci_when_node_modules_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

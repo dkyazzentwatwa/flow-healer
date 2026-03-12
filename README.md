@@ -92,14 +92,19 @@ With `pr_auto_approve_clean` and `pr_auto_merge_clean` enabled, the service can 
 
 ## Supported Languages
 
-Flow Healer currently provides first-class automated execution for Python and Node.js.
+Flow Healer currently provides first-class local execution for Python, Node.js, Swift, Go, Rust, Ruby, and Gradle-based Java reference targets.
 
 | Language | Default strategy | Typical validation |
 | --- | --- | --- |
 | Python | local or Docker | `pytest -q` |
 | Node.js | local or Docker | `npm test -- --passWithNoTests` |
+| Swift | local only | `swift test` |
+| Go | local only | `go test ./...` |
+| Rust | local only | `cargo test` |
+| Ruby | local only | `bundle exec rspec` |
+| Java (Gradle) | local only | `./gradlew test --no-daemon` |
 
-The issue parser still recognizes validation commands and sandbox path hints for additional ecosystems like Swift, Ruby, Rust, Go, and Java. That improves routing and diagnostics, but guarded auto-execution support is limited to Python and Node.js.
+`java_maven` remains intentionally unsupported in this tranche; use Gradle for Java reference lanes.
 
 ## Framework Expansion
 
@@ -107,6 +112,8 @@ The issue parser and preflight layer now support framework-aware routing and smo
 
 - JS smoke sandboxes: `next`, `vue-vite`, `nuxt`, `angular`, `sveltekit`, `express`, `nest`
 - Python smoke sandboxes: `fastapi`, `django`, `flask`, `pandas`, `sklearn`
+- Additional language-reference sandboxes: `swift`, `go`, `rust`, `ruby`, `java-gradle`
+- Browser-backed reference apps beyond `node-next`: `ruby-rails-web`, `java-spring-web`
 - Node preflight toolchain checks: `pnpm`, `yarn`, `bun`
 - Monorepo markers detected during preflight: `pnpm-workspace.yaml`, `nx.json`, `turbo.json`, `package.json#workspaces`
 - New issue families for generation: `js-frameworks`, `python-frameworks`, `python-data-ml`

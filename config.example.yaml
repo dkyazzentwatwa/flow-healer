@@ -109,11 +109,9 @@ repos:
     # - skip  -> always skip local gate
     local_gate_policy: auto
     # Language/runtime strategy:
-    # Supported: python | node | swift
-    # The issue parser can still recognize additional validation commands and
-    # sandbox path hints so unsupported-language issues fail explicitly instead
-    # of being misrouted, but execution support is limited to the three
-    # languages above.
+    # Supported: python | node | swift | go | rust | java_gradle | ruby
+    # Java remains Gradle-only in this tranche (`java_maven` is unsupported).
+    # Swift/Go/Rust/Gradle Java/Ruby run through local validation lanes only.
     # Leave blank to auto-detect from repo marker files.
     language: ""
     # Optional overrides for the resolved language strategy.
@@ -132,6 +130,24 @@ repos:
         viewport:
           width: 1280
           height: 800
+      - name: ruby-rails-web
+        start_command: ruby server.rb
+        working_directory: e2e-apps/ruby-rails-web
+        ready_url: http://127.0.0.1:3101/healthz
+        browser: chromium
+        headless: true
+        fixture_driver_command:
+          - ruby
+          - scripts/fixture_driver.rb
+      - name: java-spring-web
+        start_command: ./gradlew bootRun
+        working_directory: e2e-apps/java-spring-web
+        ready_url: http://127.0.0.1:3201/healthz
+        browser: chromium
+        headless: true
+        fixture_driver_command:
+          - python3
+          - scripts/fixture_driver.py
     auto_clean_generated_artifacts: true
     failure_fingerprint_quarantine_threshold: 2
     max_diff_files: 8

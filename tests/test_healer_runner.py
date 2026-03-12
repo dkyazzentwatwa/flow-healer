@@ -25,7 +25,7 @@ from flow_healer.healer_runner import (
     _task_execution_instructions,
     )
 from flow_healer.protocols import ConnectorTurnResult
-from flow_healer.language_strategies import LanguageStrategy, UnsupportedLanguageError, get_strategy
+from flow_healer.language_strategies import LanguageStrategy, get_strategy
 from flow_healer.healer_task_spec import HealerTaskSpec, compile_task_spec
 
 
@@ -2280,55 +2280,41 @@ def test_apply_unified_diff_patch_returns_error_when_workspace_is_missing(tmp_pa
     assert not missing_workspace.exists()
 
 
-def test_run_attempt_rejects_unsupported_issue_language(tmp_path):
+def test_run_attempt_accepts_expanded_issue_language(tmp_path):
     connector = _RetryConnector(["not a patch"] * 5)
     runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
-    workspace = tmp_path / "repo"
-    workspace.mkdir()
+    resolved = runner.resolve_execution(
+        workspace=tmp_path,
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="swift",
+        ),
+    )
 
-    try:
-        runner.run_attempt(
-            issue_id="200",
-            issue_title="Fix handler",
-            issue_body="Fix the handler in Add.swift",
-            task_spec=HealerTaskSpec(
-                task_kind="fix",
-                output_mode="patch",
-                output_targets=(),
-                tool_policy="repo_only",
-                validation_profile="code_change",
-                language="swift",
-            ),
-            workspace=workspace,
-            max_diff_files=5,
-            max_diff_lines=20,
-            max_failed_tests_allowed=0,
-            targeted_tests=[],
-        )
-    except UnsupportedLanguageError as exc:
-        assert "supports only python and node" in str(exc)
-    else:
-        raise AssertionError("expected swift issue language to be rejected")
+    assert resolved.language_effective == "swift"
+    assert resolved.strategy.local_test_cmd == ["swift", "test"]
 
 
-def test_resolve_execution_rejects_removed_language(tmp_path):
+def test_resolve_execution_accepts_expanded_language_override(tmp_path):
     runner = HealerRunner(connector=None, timeout_seconds=30, language="ruby")  # type: ignore[arg-type]
 
-    try:
-        runner.resolve_execution(
-            workspace=tmp_path,
-            task_spec=HealerTaskSpec(
-                task_kind="fix",
-                output_mode="patch",
-                output_targets=(),
-                tool_policy="repo_only",
-                validation_profile="code_change",
-            ),
-        )
-    except UnsupportedLanguageError as exc:
-        assert "supports only python and node" in str(exc)
-    else:
-        raise AssertionError("expected removed language override to be rejected")
+    resolved = runner.resolve_execution(
+        workspace=tmp_path,
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+    )
+
+    assert resolved.language_effective == "ruby"
+    assert resolved.strategy.local_test_cmd == ["bundle", "exec", "rspec"]
 
 
 def test_run_attempt_includes_path_fenced_fallback_guidance(tmp_path):
@@ -3453,6 +3439,7 @@ class _FakeBrowserHarness:
         artifact_root: Path,
         phase: str,
         expect_failure: bool,
+        storage_state_path: str = "",
     ):
         self.calls.append(
             {
@@ -3462,6 +3449,7 @@ class _FakeBrowserHarness:
                 "artifact_root": artifact_root,
                 "phase": phase,
                 "expect_failure": expect_failure,
+                "storage_state_path": storage_state_path,
             }
         )
         result = self.results.pop(0)
@@ -3494,6 +3482,7 @@ class _ExplodingBrowserHarness(_FakeBrowserHarness):
         artifact_root: Path,
         phase: str,
         expect_failure: bool,
+        storage_state_path: str = "",
     ):
         self.calls.append(
             {
@@ -3503,6 +3492,7 @@ class _ExplodingBrowserHarness(_FakeBrowserHarness):
                 "artifact_root": artifact_root,
                 "phase": phase,
                 "expect_failure": expect_failure,
+                "storage_state_path": storage_state_path,
             }
         )
         if phase == self.phase:
@@ -3514,6 +3504,7 @@ class _ExplodingBrowserHarness(_FakeBrowserHarness):
             artifact_root=artifact_root,
             phase=phase,
             expect_failure=expect_failure,
+            storage_state_path=storage_state_path,
         )
 
 
@@ -4016,6 +4007,150 @@ def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
     assert result.test_summary["artifact_bundle"]["failure_artifacts"]["video_path"].endswith("before.webm")
     assert result.test_summary["artifact_bundle"]["resolution_artifacts"]["video_path"].endswith("after.webm")
     assert result.test_summary["artifact_links"][0]["label"] == "failure_screenshot"
+
+
+def test_run_attempt_uses_fixture_driver_for_prepare_and_auth_state(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    driver_log = tmp_path / "fixture-driver.log"
+    driver_script = workspace / "fixture_driver.py"
+    driver_script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import sys",
+                "from pathlib import Path",
+                "",
+                "log_path = Path(sys.argv[1])",
+                "action = sys.argv[2]",
+                "fixture = sys.argv[3]",
+                "log_path.parent.mkdir(parents=True, exist_ok=True)",
+                "log_path.open('a', encoding='utf-8').write(f'{action}:{fixture}\\n')",
+                "if action == 'auth-state':",
+                "    output_path = Path(sys.argv[4])",
+                "    output_path.parent.mkdir(parents=True, exist_ok=True)",
+                "    output_path.write_text(json.dumps({'cookies': [], 'origins': []}), encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path=str(tmp_path / "before-replay.webm"),
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "after.png"),
+                video_path=str(tmp_path / "after.webm"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+                "fixture_driver_command": [sys.executable, str(driver_script), str(driver_log)],
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 0,
+        "promotion_state": "promotion_ready",
+        "phase_states": {"promotion_ready": True, "merge_blocked": False},
+    }
+
+    result = runner.run_attempt(
+        issue_id="app-201a",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            fixture_profile="seeded-admin",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert driver_log.read_text(encoding="utf-8").splitlines() == [
+        "prepare:seeded-admin",
+        "auth-state:seeded-admin",
+        "prepare:seeded-admin",
+        "auth-state:seeded-admin",
+    ]
+    assert all(call["storage_state_path"] for call in browser_harness.calls)
 
 
 def test_run_attempt_fails_when_browser_bug_is_not_reproduced_before_fix(tmp_path):

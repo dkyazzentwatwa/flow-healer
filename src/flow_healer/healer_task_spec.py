@@ -136,6 +136,8 @@ _LANGUAGE_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-apps/python-fastapi", "python"),
     ("e2e-apps/prosper-chat", "node"),
     ("e2e-apps/nobi-owl-trader", "python"),
+    ("e2e-apps/ruby-rails-web", "ruby"),
+    ("e2e-apps/java-spring-web", "java_gradle"),
 )
 
 _FRAMEWORK_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -185,6 +187,8 @@ _FRAMEWORK_PATH_HINTS: tuple[tuple[str, str], ...] = (
     ("e2e-apps/python-fastapi", "fastapi"),
     ("e2e-apps/prosper-chat", "next"),
     ("e2e-apps/nobi-owl-trader", "fastapi"),
+    ("e2e-apps/ruby-rails-web", "rails"),
+    ("e2e-apps/java-spring-web", "spring"),
 )
 
 

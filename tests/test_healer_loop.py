@@ -5023,6 +5023,162 @@ def test_maybe_run_harness_canaries_coerces_dict_backed_profiles(tmp_path, monke
     assert store.get_state("healer_app_runtime_canary_last_success_at:web")
 
 
+def test_maybe_run_harness_canaries_covers_multiple_reference_app_profiles(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+
+    def _profile(name: str, port: int) -> AppRuntimeProfile:
+        return AppRuntimeProfile(
+            name=name,
+            command=("npm", "run", "dev"),
+            cwd=tmp_path,
+            readiness_url=f"http://127.0.0.1:{port}/healthz",
+        )
+
+    loop = _make_loop(
+        store,
+        healer_app_runtime_profiles={
+            "node-next-web": _profile("node-next-web", 3000),
+            "ruby-rails-web": _profile("ruby-rails-web", 3101),
+            "java-spring-web": _profile("java-spring-web", 3201),
+        },
+        healer_harness_canary_interval_seconds=300,
+    )
+
+    class _FakeCanarySession:
+        def stop(self) -> int:
+            return 0
+
+    class _FakeCanaryAppHarness:
+        def boot(self, runtime_profile):
+            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+
+    class _FakeCanaryBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, artifact_root, phase, profile, entry_url, **_kwargs):
+            phase_root = artifact_root / phase
+            phase_root.mkdir(parents=True, exist_ok=True)
+            screenshot = phase_root / f"{profile.name}-{phase}.png"
+            console = phase_root / f"{profile.name}-{phase}-console.log"
+            network = phase_root / f"{profile.name}-{phase}-network.jsonl"
+            screenshot.write_text("png", encoding="utf-8")
+            console.write_text(entry_url, encoding="utf-8")
+            network.write_text("{}\n", encoding="utf-8")
+            return BrowserJourneyResult(
+                phase=phase,
+                passed=True,
+                expected_failure_observed=False,
+                final_url=entry_url,
+                screenshot_path=str(screenshot),
+                console_log_path=str(console),
+                network_log_path=str(network),
+            )
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+    loop.tracker.publish_artifact_files = MagicMock(return_value=[{"label": "canary"}])
+
+    summary = loop._maybe_run_harness_canaries(force=True)
+
+    assert summary == {"profiles": 3, "passed": 3, "failed": 0}
+    assert store.get_state("healer_app_runtime_canary_last_success_at:node-next-web")
+    assert store.get_state("healer_app_runtime_canary_last_success_at:ruby-rails-web")
+    assert store.get_state("healer_app_runtime_canary_last_success_at:java-spring-web")
+    assert loop.tracker.publish_artifact_files.call_count == 3
+
+
+def test_maybe_run_harness_canaries_validates_multiple_browser_stacks(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    repo_path = tmp_path / "repo"
+    runtime_roots = {
+        "node-next-web": repo_path / "node-next",
+        "ruby-rails-web": repo_path / "ruby-rails",
+        "java-spring-web": repo_path / "java-spring",
+    }
+    for runtime_root in runtime_roots.values():
+        runtime_root.mkdir(parents=True)
+
+    loop = _make_loop(
+        store,
+        healer_repo_path=str(repo_path),
+        healer_app_runtime_profiles={
+            "node-next-web": {
+                "name": "node-next-web",
+                "start_command": "npm run dev",
+                "working_directory": "node-next",
+                "ready_url": "http://127.0.0.1:3000/",
+                "browser": "chromium",
+                "headless": True,
+            },
+            "ruby-rails-web": {
+                "name": "ruby-rails-web",
+                "start_command": "ruby server.rb",
+                "working_directory": "ruby-rails",
+                "ready_url": "http://127.0.0.1:3101/healthz",
+                "browser": "chromium",
+                "headless": True,
+            },
+            "java-spring-web": {
+                "name": "java-spring-web",
+                "start_command": "./gradlew bootRun",
+                "working_directory": "java-spring",
+                "ready_url": "http://127.0.0.1:3201/healthz",
+                "browser": "chromium",
+                "headless": True,
+            },
+        },
+        healer_harness_canary_interval_seconds=300,
+    )
+
+    class _FakeCanarySession:
+        def stop(self) -> int:
+            return 0
+
+    class _FakeCanaryAppHarness:
+        def boot(self, runtime_profile):
+            assert isinstance(runtime_profile, AppRuntimeProfile)
+            assert runtime_profile.cwd == runtime_roots[runtime_profile.name].resolve()
+            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+
+    class _FakeCanaryBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, profile, entry_url, repro_steps, artifact_root, phase, expect_failure):
+            phase_root = Path(artifact_root) / phase
+            phase_root.mkdir(parents=True, exist_ok=True)
+            screenshot = phase_root / f"{profile.name}.png"
+            console = phase_root / f"{profile.name}-console.log"
+            network = phase_root / f"{profile.name}-network.jsonl"
+            screenshot.write_text("png", encoding="utf-8")
+            console.write_text("console", encoding="utf-8")
+            network.write_text("network", encoding="utf-8")
+            return BrowserJourneyResult(
+                phase=phase,
+                passed=True,
+                expected_failure_observed=False,
+                final_url=entry_url,
+                screenshot_path=str(screenshot),
+                console_log_path=str(console),
+                network_log_path=str(network),
+            )
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+    loop.tracker.publish_artifact_files = MagicMock(return_value=[{"label": "canary"}])
+
+    summary = loop._maybe_run_harness_canaries(force=True)
+
+    assert summary == {"profiles": 3, "passed": 3, "failed": 0}
+    assert store.get_state("healer_app_runtime_canary_last_success_at:node-next-web")
+    assert store.get_state("healer_app_runtime_canary_last_success_at:ruby-rails-web")
+    assert store.get_state("healer_app_runtime_canary_last_success_at:java-spring-web")
+    assert loop.tracker.publish_artifact_files.call_count == 3
+
+
 def test_tick_once_defers_helper_recycle_when_idle_only_and_active_issue_exists(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

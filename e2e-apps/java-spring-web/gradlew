@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+MAIN_CLASSES="$ROOT/build/classes/main"
+TEST_CLASSES="$ROOT/build/classes/test"
+
+print_version() {
+  echo "flow-healer-java-gradlew 0.1"
+}
+
+require_java() {
+  if ! command -v java >/dev/null 2>&1 || ! command -v javac >/dev/null 2>&1; then
+    echo "Java runtime and javac are required for this reference app." >&2
+    exit 127
+  fi
+}
+
+compile_main() {
+  require_java
+  rm -rf "$MAIN_CLASSES"
+  mkdir -p "$MAIN_CLASSES"
+  find "$ROOT/src/main/java" -name '*.java' -print0 | xargs -0 javac -d "$MAIN_CLASSES"
+}
+
+compile_tests() {
+  require_java
+  rm -rf "$TEST_CLASSES"
+  mkdir -p "$TEST_CLASSES"
+  find "$ROOT/src/test/java" -name '*.java' -print0 | xargs -0 javac -cp "$MAIN_CLASSES" -d "$TEST_CLASSES"
+}
+
+run_tests() {
+  find "$ROOT/src/test/java" -name '*Test.java' | sort | while IFS= read -r source_file; do
+    class_name=$(printf '%s\n' "$source_file" | sed "s|$ROOT/src/test/java/||" | sed 's|/|.|g' | sed 's|\.java$||')
+    java -cp "$MAIN_CLASSES:$TEST_CLASSES" "$class_name"
+  done
+}
+
+task=""
+for arg in "$@"; do
+  case "$arg" in
+    -v|--version)
+      print_version
+      exit 0
+      ;;
+    -*)
+      ;;
+    *)
+      task="$arg"
+      break
+      ;;
+  esac
+done
+
+case "$task" in
+  test)
+    compile_main
+    compile_tests
+    run_tests
+    ;;
+  bootRun)
+    compile_main
+    exec java -cp "$MAIN_CLASSES" example.Application
+    ;;
+  "")
+    echo "Usage: ./gradlew <test|bootRun> [options]" >&2
+    exit 1
+    ;;
+  *)
+    echo "Unsupported task for this reference app: $task" >&2
+    exit 1
+    ;;
+esac

@@ -171,7 +171,7 @@ def test_load_normalizes_invalid_issue_contract_mode_and_threshold(tmp_path) -> 
     assert relay.healer_parse_confidence_threshold == 1.0
 
 
-def test_load_rejects_removed_language_override(tmp_path) -> None:
+def test_load_accepts_expanded_language_override(tmp_path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "\n".join(
@@ -186,8 +186,9 @@ def test_load_rejects_removed_language_override(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="supports only python and node"):
-        AppConfig.load(config_path)
+    config = AppConfig.load(config_path)
+
+    assert config.repos[0].healer_language == "ruby"
 
 
 def test_load_normalizes_connector_backend(tmp_path) -> None:
@@ -651,6 +652,36 @@ def test_load_reads_app_runtime_profile_settings_from_list(tmp_path: Path) -> No
             "browser": "webkit",
             "device": "iPhone 15",
         },
+    }
+
+
+def test_load_reads_fixture_driver_command_for_app_runtime_profiles(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    healer_app_runtime_profiles:\n"
+            "      desktop:\n"
+            "        browser: chromium\n"
+            "        fixture_driver_command:\n"
+            "          - python3\n"
+            "          - scripts/fixture_driver.py\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_app_runtime_profiles == {
+        "desktop": {
+            "browser": "chromium",
+            "fixture_driver_command": ["python3", "scripts/fixture_driver.py"],
+        }
     }
 
 

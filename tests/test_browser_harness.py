@@ -144,6 +144,37 @@ def test_capture_journey_accepts_preparsed_browser_steps(tmp_path: Path) -> None
     assert session.visited == ["http://127.0.0.1:3000/"]
 
 
+def test_capture_journey_passes_storage_state_to_session_factory(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    session = _FakeBrowserSession()
+
+    def _session_factory(profile, entry_url, artifact_root, phase, storage_state_path=None):
+        captured["storage_state_path"] = storage_state_path
+        return session
+
+    harness = LocalBrowserHarness(session_factory=_session_factory)
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        browser="chromium",
+    )
+    storage_state_path = tmp_path / "auth-state.json"
+
+    result = harness.capture_journey(
+        profile=profile,
+        entry_url="http://127.0.0.1:3000",
+        repro_steps=("goto /", "expect_text Available todo routes"),
+        artifact_root=tmp_path / "artifacts",
+        phase="resolution",
+        expect_failure=False,
+        storage_state_path=str(storage_state_path),
+    )
+
+    assert result.passed is True
+    assert captured["storage_state_path"] == str(storage_state_path)
+
+
 def test_playwright_session_close_saves_video_before_shutdown(tmp_path: Path) -> None:
     events: list[str] = []
 
