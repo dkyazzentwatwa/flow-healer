@@ -132,6 +132,24 @@ test("complete resolves ids with a leading plus sign", () => {
   assert.equal(completed?.completed, true);
 });
 
+test("complete resolves legacy numeric string ids with leading zeroes", () => {
+  const service = new TodoService([
+    {
+      id: "001",
+      title: "Legacy padded id",
+      completed: false,
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: null,
+    },
+  ]);
+
+  const completed = service.complete(1);
+
+  assert.equal(toPublicTodo(service.list()[0]).id, 1);
+  assert.equal(completed?.id, "1");
+  assert.equal(completed?.completed, true);
+});
+
 test("complete is idempotent for already-completed items", () => {
   const service = new TodoService();
   const created = service.create("Avoid duplicate side effects");
@@ -182,6 +200,26 @@ test("seeded todos normalize legacy completed flags before completing", () => {
 
   assert.equal(completed?.completed, true);
   assert.ok(completed?.completedAt);
+});
+
+test("seeded todos preserve legacy truthy completed flags", () => {
+  const service = new TodoService([
+    {
+      id: "5",
+      title: "Legacy completed todo",
+      completed: "true",
+      createdAt: "2026-03-08T12:00:00.000Z",
+      completedAt: "2026-03-08T12:01:00.000Z",
+    },
+  ]);
+
+  assert.deepEqual(service.list()[0], {
+    id: "5",
+    title: "Legacy completed todo",
+    completed: true,
+    createdAt: "2026-03-08T12:00:00.000Z",
+    completedAt: "2026-03-08T12:01:00.000Z",
+  });
 });
 
 test("list returns a defensive copy to prevent mutation leaks", () => {

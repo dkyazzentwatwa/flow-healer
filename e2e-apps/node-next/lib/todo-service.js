@@ -3,8 +3,8 @@ export class TodoService {
     this._todos = todos.map((todo) => ({
       ...todo,
       id: normalizeTodoId(todo?.id),
-      completed: todo?.completed === true,
-      completedAt: todo?.completed === true ? todo?.completedAt ?? null : null,
+      completed: normalizeCompletedFlag(todo?.completed),
+      completedAt: normalizeCompletedFlag(todo?.completed) ? todo?.completedAt ?? null : null,
     }));
     this._nextId = getNextTodoId(this._todos);
   }
@@ -75,7 +75,31 @@ function getNextTodoId(todos) {
 
 function normalizeTodoId(value) {
   const normalized = String(value ?? "").trim();
-  return normalized.startsWith("+") ? normalized.slice(1) : normalized;
+  const unsigned = normalized.startsWith("+") ? normalized.slice(1) : normalized;
+
+  if (!/^-?\d+$/.test(unsigned)) {
+    return unsigned;
+  }
+
+  const numericId = Number.parseInt(unsigned, 10);
+  if (Number.isSafeInteger(numericId)) {
+    return String(numericId);
+  }
+
+  return unsigned;
+}
+
+function normalizeCompletedFlag(value) {
+  if (value === true) {
+    return true;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1";
+  }
+
+  return value === 1;
 }
 
 export function toPublicTodo(todo) {
