@@ -750,6 +750,41 @@ def test_task_spec_prompt_block_includes_app_contract_fields() -> None:
     assert "- Judgment required conditions: visual layout differs from the stored baseline" in prompt_block
 
 
+def test_compile_task_spec_does_not_truncate_browser_artifact_paths_into_code_targets() -> None:
+    spec = compile_task_spec(
+        issue_title="Node Next browser artifact smoke: todo landing proof capture",
+        issue_body=(
+            "Task kind: fix\n"
+            "app_target: web\n"
+            "entry_url: /\n"
+            "runtime_profile: node-next-web\n\n"
+            "Required code outputs:\n"
+            "- e2e-apps/node-next/app/page.js\n"
+            "- e2e-apps/node-next/artifacts/node-next-landing-proof-b1.png\n"
+            "- e2e-apps/node-next/artifacts/node-next-landing-proof-b1.console.log\n"
+            "- e2e-apps/node-next/artifacts/node-next-landing-proof-b1.network.log\n\n"
+            "repro_steps:\n"
+            "- goto /\n"
+            "- expect_text Browser smoke ready\n"
+            "- expect_text Available todo routes\n"
+            "- expect_text Artifact Proof B1\n\n"
+            "artifact_requirements:\n"
+            "- screenshot: artifacts/node-next-landing-proof-b1.png\n"
+            "- console log\n"
+            "- network log\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/node-next && npm test\n"
+        ),
+    )
+
+    assert spec.output_targets == ("e2e-apps/node-next/app/page.js",)
+    assert spec.artifact_requirements == (
+        "screenshot: artifacts/node-next-landing-proof-b1.png",
+        "console log",
+        "network log",
+    )
+
+
 def test_compile_task_spec_infers_node_execution_root_for_e2e_apps() -> None:
     spec = compile_task_spec(
         issue_title="Next.js sandbox regression",

@@ -42,6 +42,7 @@ class IssueContractLint:
 _EXPLICIT_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"((?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|mdx|rst|txt|py|yaml|yml|json|toml|ini|cfg|conf|js|ts|tsx|jsx|css|html|go|rs|rb|java|kt|scala|swift|c|cpp|h|hpp|gradle|kts|sql))"
+    r"(?![A-Za-z0-9_.-])"
 ,
     re.IGNORECASE,
 )
