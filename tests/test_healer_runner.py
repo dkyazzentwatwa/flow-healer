@@ -4245,6 +4245,125 @@ def test_run_attempt_boots_selected_app_runtime_profile_and_stops_session(tmp_pa
     assert app_harness.sessions[0].stop_calls == 1
 
 
+def test_run_attempt_resolves_relative_browser_entry_url_against_runtime_readiness_url(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Artifact Proof A1",
+                error="Artifact Proof A1",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "goto /", "status": "passed"},),
+            ),
+            BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Artifact Proof A1",
+                error="Artifact Proof A1",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path=str(tmp_path / "before-replay.webm"),
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
+                transcript=({"step": "goto /", "status": "passed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "after.png"),
+                video_path=str(tmp_path / "after.webm"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=(
+                    {"step": "goto /", "status": "passed"},
+                    {"step": "expect_text Artifact Proof A1", "status": "passed"},
+                ),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 0,
+        "promotion_state": "promotion_ready",
+        "phase_states": {"promotion_ready": True, "merge_blocked": False},
+    }
+
+    result = runner.run_attempt(
+        issue_id="app-relative-entry-url",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Artifact Proof A1"),
+            artifact_requirements=("screenshot: artifacts/demo.png",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert [call["entry_url"] for call in browser_harness.calls] == [
+        "http://127.0.0.1:3000/",
+        "http://127.0.0.1:3000/",
+        "http://127.0.0.1:3000/",
+    ]
+    assert result.test_summary["runtime_summary"]["app_harness"]["entry_url"] == "http://127.0.0.1:3000/"
+
+
 def test_run_attempt_classifies_app_runtime_boot_failures(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

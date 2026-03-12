@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urljoin
 
 import yaml
 
@@ -51,6 +52,19 @@ _DOCKER_INFRA_OUTPUT_HINTS = (
     "context canceled",
     "docker desktop is not running",
 )
+
+
+def _resolve_browser_entry_url(task_entry_url: str, runtime_readiness_url: str) -> str:
+    task_url = str(task_entry_url or "").strip()
+    readiness_url = str(runtime_readiness_url or "").strip()
+    if not task_url:
+        return readiness_url
+    if task_url.startswith(("http://", "https://")):
+        return task_url
+    if not readiness_url:
+        return task_url
+    base_for_join = readiness_url if readiness_url.endswith("/") else f"{readiness_url}/"
+    return urljoin(base_for_join, task_url.lstrip("/"))
 
 
 @dataclass(slots=True, frozen=True)
@@ -371,7 +385,7 @@ class HealerRunner:
                 )
 
             pre_fix_session: AppHarnessSession | None = None
-            browser_entry_url = task_spec.entry_url or browser_profile.readiness_url or ""
+            browser_entry_url = _resolve_browser_entry_url(task_spec.entry_url, browser_profile.readiness_url or "")
             try:
                 self._run_fixture_driver(
                     profile=browser_profile,
@@ -391,7 +405,7 @@ class HealerRunner:
                     "profile": boot_result.profile.name,
                     "pid": boot_result.pid,
                     "process": _app_runtime_process_metadata(profile=boot_result.profile, pid=boot_result.pid),
-                    "readiness_url": boot_result.readiness_url or task_spec.entry_url,
+                    "readiness_url": boot_result.readiness_url or browser_profile.readiness_url or "",
                     "entry_url": browser_entry_url,
                     "app_target": task_spec.app_target,
                     "fixture_profile": task_spec.fixture_profile,
@@ -1267,6 +1281,10 @@ class HealerRunner:
             task_spec=task_spec,
             workspace=workspace,
         )
+        resolved_runtime_entry_url = _resolve_browser_entry_url(
+            task_spec.entry_url,
+            runtime_profile.readiness_url if runtime_profile is not None else "",
+        )
         if runtime_profile is not None:
             try:
                 if browser_evidence_requested:
@@ -1280,7 +1298,7 @@ class HealerRunner:
                     runtime_storage_state_path = self._materialize_fixture_auth_state(
                         profile=runtime_profile,
                         fixture_profile=task_spec.fixture_profile,
-                        entry_url=task_spec.entry_url or runtime_profile.readiness_url or "",
+                        entry_url=resolved_runtime_entry_url,
                         browser_artifact_root=browser_artifact_root,
                         phase="resolution",
                     )
@@ -1288,7 +1306,7 @@ class HealerRunner:
                 app_runtime_status = {
                     "status": "failed",
                     "profile": runtime_profile.name,
-                    "entry_url": task_spec.entry_url,
+                    "entry_url": resolved_runtime_entry_url,
                     "app_target": task_spec.app_target,
                     "fixture_profile": task_spec.fixture_profile,
                     "reason": str(exc),
@@ -1319,8 +1337,8 @@ class HealerRunner:
                 "profile": boot_result.profile.name,
                 "pid": boot_result.pid,
                 "process": _app_runtime_process_metadata(profile=boot_result.profile, pid=boot_result.pid),
-                "readiness_url": boot_result.readiness_url or task_spec.entry_url,
-                "entry_url": task_spec.entry_url,
+                "readiness_url": boot_result.readiness_url or runtime_profile.readiness_url or "",
+                "entry_url": resolved_runtime_entry_url,
                 "app_target": task_spec.app_target,
                 "fixture_profile": task_spec.fixture_profile,
                 "ready_via_url": boot_result.ready_via_url,
@@ -1332,7 +1350,7 @@ class HealerRunner:
             app_runtime_status = {
                 "status": "unconfigured",
                 "profile": str(task_spec.runtime_profile or self._default_runtime_profile).strip(),
-                "entry_url": task_spec.entry_url,
+                "entry_url": resolved_runtime_entry_url,
                 "app_target": task_spec.app_target,
                 "fixture_profile": task_spec.fixture_profile,
                 "reason": runtime_failure_reason,
@@ -1395,7 +1413,7 @@ class HealerRunner:
                 targeted_tests=targeted_tests,
             )
         if browser_evidence_requested and runtime_profile is not None and app_runtime_session is not None:
-            browser_entry_url = task_spec.entry_url or runtime_profile.readiness_url or ""
+            browser_entry_url = _resolve_browser_entry_url(task_spec.entry_url, runtime_profile.readiness_url or "")
             try:
                 resolution_journey = self._browser_harness.capture_journey(
                     profile=runtime_profile,
