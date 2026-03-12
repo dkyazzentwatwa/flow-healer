@@ -504,6 +504,30 @@ def test_clarification_reasons_include_ambiguous_execution_root(tmp_path):
     assert reasons == ["ambiguous_execution_root"]
 
 
+def test_clarification_reasons_include_validation_root_mismatch(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(
+        store,
+        healer_issue_contract_mode="lenient",
+        healer_parse_confidence_threshold=0.3,
+    )
+    spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=("e2e-smoke/python/app/main.py",),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+        parse_confidence=0.8,
+        validation_commands=("cd e2e-smoke/node && npm test -- --passWithNoTests",),
+        execution_root="e2e-smoke/node",
+    )
+
+    reasons = loop._clarification_reasons_for_task_spec(task_spec=spec)
+
+    assert reasons == ["validation_root_mismatch"]
+
+
 def test_clarification_reasons_lenient_mode_only_uses_confidence_threshold(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -556,6 +580,31 @@ def test_build_needs_clarification_comment_includes_contract_skeleton_for_root_a
     assert "Required code outputs:" in comment
     assert "- e2e-smoke/node/src/app.js" in comment
     assert "Validation:" in comment
+
+
+def test_build_needs_clarification_comment_describes_validation_root_mismatch(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="code_patch",
+        output_targets=("e2e-smoke/python/app/main.py",),
+        tool_policy="restricted_patch",
+        validation_profile="code_change",
+        parse_confidence=0.8,
+        validation_commands=("cd e2e-smoke/node && npm test -- --passWithNoTests",),
+        execution_root="e2e-smoke/node",
+    )
+
+    comment = loop._build_needs_clarification_comment(
+        reasons=["validation_root_mismatch"],
+        task_spec=spec,
+    )
+
+    assert "Validation:` command root conflicts with the declared output targets" in comment
+    assert "Execution root:" in comment
+    assert "- e2e-smoke/python" in comment
 
 
 def test_process_claimed_issue_posts_stronger_contract_remediation_comment(tmp_path, monkeypatch):
@@ -4336,6 +4385,27 @@ def test_infra_pause_stays_active_for_unresolved_reason(tmp_path):
     )
 
     assert loop._infra_pause_active() is True
+
+
+def test_infra_pause_auto_clears_when_bundler_artifact_reason_has_no_remaining_contamination(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    until = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    store.set_states(
+        {
+            "healer_infra_pause_until": until,
+            "healer_infra_pause_reason": (
+                "infra_pause: Pause autonomous repair in this worktree because it is contaminated "
+                "with out-of-scope Bundler artifacts."
+            ),
+            "healer_last_contamination_paths": "",
+        }
+    )
+    loop = _make_loop(store, healer_repo_path=str(tmp_path))
+
+    assert loop._infra_pause_active() is False
+    assert store.get_state("healer_infra_pause_until") == ""
+    assert store.get_state("healer_infra_pause_reason") == ""
 
 
 def test_swarm_quarantine_with_sql_bootstrap_context_stays_quarantine(tmp_path):

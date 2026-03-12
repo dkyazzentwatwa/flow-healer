@@ -65,7 +65,11 @@ _DIRECTORY_RE = re.compile(
 )
 _COMMAND_LINE_RE = re.compile(
     r"(?:^|\b)(?:cd\s+[^\n&|;]+&&\s*)?"
-    r"(?:npm\s+test|npm\s+run\s+(?:lint|test|build|smoke)\b|pytest\b|python(?:3(?:\.\d+)?)?\s+-m\s+pytest\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b|\./scripts/healer_validate\.sh\b)"
+    r"(?:npm\s+test|npm\s+run\s+(?:lint|test|build|smoke)\b|"
+    r"pnpm\s+test\b|pnpm\s+run\s+(?:lint|test|build|smoke)\b|"
+    r"yarn\s+test\b|yarn\s+run\s+(?:lint|test|build|smoke)\b|"
+    r"bun\s+test\b|bun\s+run\s+(?:lint|test|build|smoke)\b|"
+    r"pytest\b|python(?:3(?:\.\d+)?)?\s+-m\s+pytest\b|python(?:3(?:\.\d+)?)?\s+manage\.py\s+test\b|bundle\s+exec\s+rspec\b|cargo\s+test\b|go\s+test\b|swift\s+test\b|mvn\s+test\b|\./gradlew\s+test\b|\./scripts/healer_validate\.sh\b)"
     r"[^\n]*",
     re.IGNORECASE,
 )
@@ -73,18 +77,19 @@ _URL_RE = re.compile(r"\bhttps?://[^\s)>`]+", re.IGNORECASE)
 _DIRECTIVE_LINE_RE = re.compile(r"^(?P<label>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<value>.*)$")
 _LIST_ITEM_PREFIX_RE = re.compile(r"^(?:[-*]\s+|\d+[.)]\s+)")
 
-_APP_SCALAR_FIELD_NAMES: tuple[str, ...] = (
+_CONTRACT_SCALAR_FIELD_NAMES: tuple[str, ...] = (
     "app_target",
     "entry_url",
+    "execution_root",
     "fixture_profile",
     "runtime_profile",
 )
-_APP_LIST_FIELD_NAMES: tuple[str, ...] = (
+_CONTRACT_LIST_FIELD_NAMES: tuple[str, ...] = (
     "repro_steps",
     "artifact_requirements",
     "judgment_required_conditions",
 )
-_APP_FIELD_NAMES = set((*_APP_SCALAR_FIELD_NAMES, *_APP_LIST_FIELD_NAMES))
+_CONTRACT_FIELD_NAMES = set((*_CONTRACT_SCALAR_FIELD_NAMES, *_CONTRACT_LIST_FIELD_NAMES))
 
 _LANGUAGE_COMMAND_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bnpm\s+test\b", re.IGNORECASE), "node"),
@@ -200,6 +205,7 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     validation_commands = _extract_validation_commands(issue_body)
     app_target = _extract_explicit_scalar_field(issue_body=issue_body, field_name="app_target")
     entry_url = _extract_explicit_scalar_field(issue_body=issue_body, field_name="entry_url")
+    explicit_execution_root = _extract_explicit_scalar_field(issue_body=issue_body, field_name="execution_root")
     repro_steps = _extract_explicit_list_field(issue_body=issue_body, field_name="repro_steps")
     fixture_profile = _extract_explicit_scalar_field(issue_body=issue_body, field_name="fixture_profile")
     artifact_requirements = _extract_explicit_list_field(
@@ -221,6 +227,7 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     tool_policy = "repo_plus_web" if task_kind == "research" else "repo_only"
     validation_profile = _validation_profile(task_kind=task_kind, output_targets=inferred_targets)
     inferred_execution_root = _infer_execution_root(
+        explicit_execution_root=explicit_execution_root,
         explicit_directories=explicit_directories,
         output_targets=inferred_targets,
         validation_commands=validation_commands,
@@ -298,6 +305,8 @@ def lint_issue_contract(
         and len(_sandbox_roots_from_targets(task_spec.output_targets)) > 1
     ):
         reasons.append("ambiguous_execution_root")
+    if requires_code_contract and _execution_root_conflicts_with_targets(task_spec):
+        reasons.append("validation_root_mismatch")
 
     return IssueContractLint(
         reason_codes=tuple(reasons),
@@ -638,7 +647,7 @@ def _parse_directive_line(line: str) -> tuple[str, str] | None:
     if not match:
         return None
     normalized = _normalize_app_field_name(match.group("label"))
-    if normalized not in _APP_FIELD_NAMES:
+    if normalized not in _CONTRACT_FIELD_NAMES:
         return None
     return normalized, match.group("value").strip().strip("`")
 
@@ -648,7 +657,7 @@ def _parse_heading_name(line: str) -> str:
         return ""
     heading = line.lstrip("#").strip()
     normalized = _normalize_app_field_name(heading)
-    if normalized in _APP_FIELD_NAMES:
+    if normalized in _CONTRACT_FIELD_NAMES:
         return normalized
     return ""
 
@@ -672,12 +681,20 @@ def _normalize_app_field_name(label: str) -> str:
 
 def _infer_execution_root(
     *,
+    explicit_execution_root: str,
     explicit_directories: tuple[str, ...],
     output_targets: tuple[str, ...],
     validation_commands: tuple[str, ...],
 ) -> str:
+    normalized_explicit_root = _normalize_contract_execution_root(explicit_execution_root)
+    if normalized_explicit_root:
+        return normalized_explicit_root
+
     for command in validation_commands:
         cd_root = _extract_cd_root(command)
+        normalized_cd_root = _normalize_known_sandbox_root(cd_root)
+        if normalized_cd_root:
+            return normalized_cd_root
         if cd_root:
             return cd_root
 
@@ -711,14 +728,29 @@ def _sandbox_roots_from_targets(output_targets: tuple[str, ...]) -> tuple[str, .
 
 
 def _suggest_execution_root(task_spec: HealerTaskSpec) -> str:
-    if task_spec.execution_root:
-        return str(task_spec.execution_root)
     roots = _sandbox_roots_from_targets(task_spec.output_targets)
+    normalized_execution_root = _normalize_known_sandbox_root(task_spec.execution_root)
+    if normalized_execution_root and normalized_execution_root in roots:
+        return normalized_execution_root
     if len(roots) == 1:
         return roots[0]
+    if task_spec.execution_root:
+        return str(task_spec.execution_root)
     if roots:
         return roots[0]
     return ""
+
+
+def _execution_root_conflicts_with_targets(task_spec: HealerTaskSpec) -> bool:
+    if not task_spec.execution_root:
+        return False
+    target_roots = _sandbox_roots_from_targets(task_spec.output_targets)
+    if not target_roots:
+        return False
+    normalized_execution_root = _normalize_known_sandbox_root(task_spec.execution_root)
+    if normalized_execution_root:
+        return normalized_execution_root not in target_roots
+    return str(task_spec.execution_root) not in target_roots
 
 
 def _infer_issue_language(
@@ -805,6 +837,13 @@ def _normalize_known_sandbox_root(path: str) -> str:
     if normalized.startswith("e2e-smoke/") or normalized.startswith("e2e-apps/"):
         return normalized
     return ""
+
+
+def _normalize_contract_execution_root(path: str) -> str:
+    normalized = _normalize_known_sandbox_root(path)
+    if normalized:
+        return normalized
+    return str(path or "").strip().strip("'\"").lstrip("./").rstrip("/")
 
 
 def _language_from_command(text: str) -> str:

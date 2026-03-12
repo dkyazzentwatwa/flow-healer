@@ -13,6 +13,7 @@ from flow_healer.issue_generation import (
     PROSPER_CHAT_DB_FAMILY,
     available_issue_families,
     build_issue_drafts,
+    render_issue_body,
     select_validation_command,
     validate_issue_drafts,
 )
@@ -73,6 +74,39 @@ def test_build_issue_drafts_adds_db_labels_and_validation_for_prosper_chat_famil
     assert "healer:ready" in draft.labels
     assert "area:db" in draft.labels
     assert any(label.startswith("kind:") for label in draft.labels)
+
+
+def test_render_issue_body_includes_execution_root_and_runtime_profile_for_browser_backed_app() -> None:
+    body = render_issue_body(
+        ("e2e-apps/node-next/app/page.js",),
+        "cd e2e-apps/node-next && npm test -- --passWithNoTests",
+    )
+
+    assert "Execution root:\n- e2e-apps/node-next\n" in body
+    assert "Runtime profile: node-next-web\n" in body
+    assert "Validation:\n- cd e2e-apps/node-next && npm test -- --passWithNoTests\n" in body
+
+
+def test_render_issue_body_includes_runtime_contract_for_ruby_browser_app() -> None:
+    body = render_issue_body(
+        ("e2e-apps/ruby-rails-web/app/controllers/sessions_controller.rb",),
+        "cd e2e-apps/ruby-rails-web && bundle exec rspec",
+    )
+
+    assert "Execution root:\n- e2e-apps/ruby-rails-web\n" in body
+    assert "Runtime profile: ruby-rails-web\n" in body
+    assert "Validation:\n- cd e2e-apps/ruby-rails-web && bundle exec rspec\n" in body
+
+
+def test_render_issue_body_includes_runtime_contract_for_java_browser_app() -> None:
+    body = render_issue_body(
+        ("e2e-apps/java-spring-web/src/main/java/example/web/LoginController.java",),
+        "cd e2e-apps/java-spring-web && ./gradlew test --no-daemon",
+    )
+
+    assert "Execution root:\n- e2e-apps/java-spring-web\n" in body
+    assert "Runtime profile: java-spring-web\n" in body
+    assert "Validation:\n- cd e2e-apps/java-spring-web && ./gradlew test --no-daemon\n" in body
 
 
 def test_available_issue_families_include_framework_expansions() -> None:
@@ -237,6 +271,60 @@ def test_validate_issue_drafts_rejects_missing_target_path() -> None:
         raise AssertionError("expected validation failure for missing target")
 
 
+def test_validate_issue_drafts_rejects_browser_backed_draft_missing_explicit_runtime_contract() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    draft = build_issue_drafts(
+        count=1,
+        prefix="Broken node-next app draft",
+        ready_label="healer:ready",
+        family=DEFAULT_FAMILY,
+    )[0].__class__(
+        title="Broken node-next app draft",
+        body=(
+            "Required code outputs:\n"
+            "- e2e-apps/node-next/app/page.js\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/node-next && npm test -- --passWithNoTests\n"
+        ),
+        labels=("healer:ready",),
+    )
+
+    try:
+        validate_issue_drafts([draft], repo_root=repo_root)
+    except ValueError as exc:
+        assert "runtime contract" in str(exc).lower()
+    else:
+        raise AssertionError("expected validation failure for missing browser-backed runtime contract")
+
+
+def test_validate_issue_drafts_rejects_unfocused_validation_command() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    draft = build_issue_drafts(
+        count=1,
+        prefix="Broken node draft",
+        ready_label="healer:ready",
+        family=DEFAULT_FAMILY,
+    )[0].__class__(
+        title="Broken node draft",
+        body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n\n"
+            "Execution root:\n"
+            "- e2e-smoke/node\n\n"
+            "Validation:\n"
+            "- npm test -- --passWithNoTests\n"
+        ),
+        labels=("healer:ready",),
+    )
+
+    try:
+        validate_issue_drafts([draft], repo_root=repo_root)
+    except ValueError as exc:
+        assert "validation command must be rooted" in str(exc).lower()
+    else:
+        raise AssertionError("expected validation failure for unfocused validation command")
+
+
 def test_mega_final_catalog_round_trips_through_task_spec_parser() -> None:
     for family in (MEGA_FINAL_WAVE_1_FAMILY, MEGA_FINAL_WAVE_2_FAMILY):
         drafts = build_issue_drafts(
@@ -265,3 +353,51 @@ def test_prod_eval_hybrid_heavy_catalog_round_trips_through_task_spec_parser() -
         assert spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/"))
         assert spec.validation_commands
         assert spec.output_targets
+
+
+def test_browser_backed_generated_draft_round_trips_runtime_profile() -> None:
+    drafts = build_issue_drafts(
+        count=30,
+        prefix="Parser check browser backed",
+        ready_label="healer:ready",
+        family=MEGA_FINAL_WAVE_1_FAMILY,
+    )
+
+    expected_profiles = {
+        "e2e-apps/node-next": "node-next-web",
+        "e2e-apps/ruby-rails-web": "ruby-rails-web",
+        "e2e-apps/java-spring-web": "java-spring-web",
+    }
+
+    for execution_root, runtime_profile in expected_profiles.items():
+        draft = next(draft for draft in drafts if execution_root in draft.body)
+        spec = compile_task_spec(issue_title=draft.title, issue_body=draft.body)
+
+        assert spec.execution_root == execution_root
+        assert spec.runtime_profile == runtime_profile
+
+
+def test_browser_backed_generated_drafts_round_trip_runtime_profiles_across_active_roots() -> None:
+    drafts = build_issue_drafts(
+        count=30,
+        prefix="Parser check browser backed roots",
+        ready_label="healer:ready",
+        family=MEGA_FINAL_WAVE_1_FAMILY,
+    )
+
+    expected_profiles = {
+        "e2e-apps/node-next": "node-next-web",
+        "e2e-apps/ruby-rails-web": "ruby-rails-web",
+        "e2e-apps/java-spring-web": "java-spring-web",
+    }
+    seen_roots: set[str] = set()
+
+    for draft in drafts:
+        spec = compile_task_spec(issue_title=draft.title, issue_body=draft.body)
+        expected_runtime_profile = expected_profiles.get(spec.execution_root)
+        if not expected_runtime_profile:
+            continue
+        seen_roots.add(spec.execution_root)
+        assert spec.runtime_profile == expected_runtime_profile
+
+    assert seen_roots == set(expected_profiles)

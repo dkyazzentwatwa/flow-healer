@@ -5274,6 +5274,14 @@ class AutonomousHealerLoop:
         normalized = str(reason or "").strip().lower()
         if not normalized:
             return True
+        if "bundler artifacts" in normalized or ".bundle/config" in normalized:
+            contamination_paths = str(self.store.get_state("healer_last_contamination_paths") or "").strip()
+            if contamination_paths:
+                return False
+            worktree_root = self.repo_path / ".apple-flow-healer" / "worktrees"
+            if not worktree_root.exists():
+                return True
+            return not any(worktree_root.rglob(".bundle/config"))
         if "requires `pnpm`" in normalized:
             return shutil.which("pnpm") is not None
         if "requires `yarn`" in normalized:
@@ -5370,6 +5378,7 @@ class AutonomousHealerLoop:
             "missing_required_outputs": "Strict issue-contract mode requires `Required code outputs:`.",
             "missing_validation": "Strict issue-contract mode requires a `Validation:` command.",
             "ambiguous_execution_root": "The issue maps to multiple execution roots, so the runtime scope is ambiguous.",
+            "validation_root_mismatch": "The `Validation:` command root conflicts with the declared output targets.",
         }
         for reason in normalized_reasons:
             rendered = reason_map.get(reason, reason.replace("_", " "))

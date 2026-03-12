@@ -6,7 +6,15 @@ from pathlib import Path
 import pytest
 
 from flow_healer.app_harness import AppRuntimeProfile
-from flow_healer.browser_harness import BrowserStep, LocalBrowserHarness, _PlaywrightBrowserSession, parse_repro_steps
+from flow_healer.browser_harness import (
+    BrowserJourneyResult,
+    BrowserStep,
+    LocalBrowserHarness,
+    _PlaywrightBrowserSession,
+    assess_browser_evidence_completeness,
+    classify_browser_failure,
+    parse_repro_steps,
+)
 
 
 def test_parse_repro_steps_supports_core_browser_actions() -> None:
@@ -246,3 +254,116 @@ def test_playwright_session_close_tolerates_missing_video_capture(tmp_path: Path
 
     assert events == ["page", "context", "browser", "playwright"]
     assert not session._video_output.exists()
+
+
+def test_assess_completeness_repro_phase_requires_screenshot_and_console(tmp_path: Path) -> None:
+    screenshot = tmp_path / "repro.png"
+    console = tmp_path / "repro-console.log"
+    screenshot.write_text("png", encoding="utf-8")
+    console.write_text("console", encoding="utf-8")
+    result = BrowserJourneyResult(
+        phase="repro",
+        passed=False,
+        expected_failure_observed=True,
+        final_url="http://127.0.0.1:3000",
+        screenshot_path=str(screenshot),
+        console_log_path=str(console),
+    )
+
+    completeness = assess_browser_evidence_completeness(result)
+
+    assert completeness.required == ("screenshot_path", "console_log_path")
+    assert completeness.present == ("screenshot_path", "console_log_path")
+    assert completeness.missing == ()
+    assert completeness.complete is True
+    assert completeness.missing_class == "none"
+
+
+def test_assess_completeness_verify_phase_requires_network_log(tmp_path: Path) -> None:
+    screenshot = tmp_path / "verify.png"
+    console = tmp_path / "verify-console.log"
+    screenshot.write_text("png", encoding="utf-8")
+    console.write_text("console", encoding="utf-8")
+    result = BrowserJourneyResult(
+        phase="verify",
+        passed=True,
+        expected_failure_observed=False,
+        final_url="http://127.0.0.1:3000",
+        screenshot_path=str(screenshot),
+        console_log_path=str(console),
+    )
+
+    completeness = assess_browser_evidence_completeness(result)
+
+    assert completeness.required == ("screenshot_path", "console_log_path", "network_log_path")
+    assert completeness.missing == ("network_log_path",)
+    assert completeness.complete is False
+
+
+def test_assess_completeness_missing_screenshot_sets_class(tmp_path: Path) -> None:
+    console = tmp_path / "repro-console.log"
+    console.write_text("console", encoding="utf-8")
+    result = BrowserJourneyResult(
+        phase="repro",
+        passed=False,
+        expected_failure_observed=True,
+        final_url="http://127.0.0.1:3000",
+        screenshot_path=str(tmp_path / "missing.png"),
+        console_log_path=str(console),
+    )
+
+    completeness = assess_browser_evidence_completeness(result)
+
+    assert completeness.complete is False
+    assert completeness.missing == ("screenshot_path",)
+    assert completeness.missing_class == "missing_screenshot"
+
+
+def test_classify_browser_failure_returns_fixture_auth_drift_on_auth_error() -> None:
+    result = BrowserJourneyResult(
+        phase="verify",
+        passed=False,
+        expected_failure_observed=False,
+        final_url="http://127.0.0.1:3000",
+        error="401 unauthorized after login redirect",
+    )
+
+    assert classify_browser_failure(result) == "fixture_auth_drift"
+
+
+def test_classify_browser_failure_returns_generic_flake_on_non_auth_error() -> None:
+    result = BrowserJourneyResult(
+        phase="verify",
+        passed=False,
+        expected_failure_observed=False,
+        final_url="http://127.0.0.1:3000",
+        error="timeout waiting for selector",
+    )
+
+    assert classify_browser_failure(result) == "generic_browser_flake"
+
+
+def test_browser_evidence_completeness_round_trips_all_active_profiles(tmp_path: Path) -> None:
+    for profile_name in ("node-next-web", "ruby-rails-web", "java-spring-web"):
+        phase_root = tmp_path / profile_name
+        screenshot = phase_root / "verify.png"
+        console = phase_root / "verify-console.log"
+        network = phase_root / "verify-network.jsonl"
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        screenshot.write_text("png", encoding="utf-8")
+        console.write_text("console", encoding="utf-8")
+        network.write_text("{\"event\":\"response\"}\n", encoding="utf-8")
+        result = BrowserJourneyResult(
+            phase="verify",
+            passed=True,
+            expected_failure_observed=False,
+            final_url="http://127.0.0.1:3000",
+            screenshot_path=str(screenshot),
+            console_log_path=str(console),
+            network_log_path=str(network),
+        )
+
+        completeness = assess_browser_evidence_completeness(result)
+
+        assert completeness.complete is True, profile_name
+        assert completeness.missing_class == "none", profile_name

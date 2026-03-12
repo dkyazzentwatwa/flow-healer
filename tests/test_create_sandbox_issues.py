@@ -58,6 +58,35 @@ def test_is_python_js_only_draft_accepts_generic_node_and_python_roots() -> None
     assert module._is_python_js_only_draft(python_body) is True
 
 
+def test_is_python_js_only_draft_accepts_node_app_runtime_contract_lines() -> None:
+    module = _load_module()
+    body = (
+        "Required code outputs:\n"
+        "- e2e-apps/node-next/app/page.js\n\n"
+        "Execution root:\n"
+        "- e2e-apps/node-next\n\n"
+        "Runtime profile: node-next-web\n\n"
+        "Validation:\n"
+        "- cd e2e-apps/node-next && npm test -- --passWithNoTests\n"
+    )
+
+    assert module._is_python_js_only_draft(body) is True
+
+
+def test_is_python_js_only_draft_ignores_non_contract_bullets_with_paths() -> None:
+    module = _load_module()
+    body = (
+        "Observed:\n"
+        "- manual repro mentioned /tmp/runtime-note.txt but not as a code target\n\n"
+        "Required code outputs:\n"
+        "- e2e-smoke/node/src/add.js\n\n"
+        "Validation:\n"
+        "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+    )
+
+    assert module._is_python_js_only_draft(body) is True
+
+
 def test_validate_drafts_or_die_accepts_mega_final_wave() -> None:
     module = _load_module()
     drafts = module.build_issue_drafts(

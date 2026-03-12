@@ -146,13 +146,59 @@ _ALLOWED_ROOT_RE = re.compile(
 )
 
 
+def _is_allowed_python_js_reference(value: str) -> bool:
+    normalized = str(value or "").strip()
+    if "/" not in normalized:
+        return True
+    return bool(_ALLOWED_ROOT_RE.search(normalized))
+
+
+def _contract_references(body: str) -> tuple[list[str], list[str], str]:
+    targets: list[str] = []
+    validations: list[str] = []
+    execution_root = ""
+    section = ""
+    for raw_line in str(body or "").splitlines():
+        stripped = raw_line.strip()
+        normalized = stripped.lower()
+        if normalized == "required code outputs:":
+            section = "targets"
+            continue
+        if normalized == "validation:":
+            section = "validation"
+            continue
+        if normalized == "execution root:":
+            section = "execution_root"
+            continue
+        if not stripped:
+            continue
+        if stripped.endswith(":") and not stripped.startswith("- "):
+            section = ""
+            continue
+        if not stripped.startswith("- "):
+            continue
+        value = stripped[2:].strip()
+        if not value:
+            continue
+        if section == "targets":
+            targets.append(value)
+        elif section == "validation":
+            validations.append(value)
+        elif section == "execution_root" and not execution_root:
+            execution_root = value
+    return targets, validations, execution_root
+
+
 def _is_python_js_only_draft(body: str) -> bool:
     text = str(body or "")
     if _DISALLOWED_VALIDATION_RE.search(text):
         return False
-    paths = [line.strip()[2:].strip() for line in text.splitlines() if line.strip().startswith("- ")]
-    for path in paths:
-        if "/" in path and not _ALLOWED_ROOT_RE.search(path):
+    targets, validations, execution_root = _contract_references(text)
+    references = [*targets, *validations]
+    if execution_root:
+        references.append(execution_root)
+    for reference in references:
+        if not _is_allowed_python_js_reference(reference):
             return False
     return True
 

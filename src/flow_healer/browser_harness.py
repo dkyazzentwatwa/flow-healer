@@ -12,6 +12,11 @@ from .app_harness import AppRuntimeProfile
 
 
 _DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+REQUIRED_ARTIFACTS_BY_PHASE: dict[str, tuple[str, ...]] = {
+    "repro": ("screenshot_path", "console_log_path"),
+    "verify": ("screenshot_path", "console_log_path", "network_log_path"),
+    "setup": ("screenshot_path",),
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -34,6 +39,16 @@ class BrowserJourneyResult:
     console_log_path: str = ""
     network_log_path: str = ""
     transcript: tuple[dict[str, object], ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class BrowserEvidenceCompleteness:
+    phase: str
+    required: tuple[str, ...]
+    present: tuple[str, ...]
+    missing: tuple[str, ...]
+    complete: bool
+    missing_class: str
 
 
 class LocalBrowserHarness:
@@ -513,9 +528,59 @@ def _valid_viewport(viewport: Any) -> bool:
     return isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0
 
 
+def assess_browser_evidence_completeness(result: BrowserJourneyResult) -> BrowserEvidenceCompleteness:
+    phase = str(result.phase or "").strip().lower() or "journey"
+    required = REQUIRED_ARTIFACTS_BY_PHASE.get(phase, ("screenshot_path",))
+    present = tuple(name for name in required if _artifact_exists(getattr(result, name, "")))
+    missing = tuple(name for name in required if name not in present)
+    missing_class = "none"
+    if missing:
+        has_screenshot_gap = "screenshot_path" in missing
+        has_other_gap = any(name != "screenshot_path" for name in missing)
+        if has_screenshot_gap and has_other_gap:
+            missing_class = "missing_all"
+        elif has_screenshot_gap:
+            missing_class = "missing_screenshot"
+        else:
+            missing_class = "missing_logs"
+    return BrowserEvidenceCompleteness(
+        phase=phase,
+        required=required,
+        present=present,
+        missing=missing,
+        complete=not missing,
+        missing_class=missing_class,
+    )
+
+
+def classify_browser_failure(result: BrowserJourneyResult) -> str:
+    if result.passed:
+        return "passed"
+    error = str(result.error or "").lower()
+    auth_markers = ("login", "auth", "session", "401", "403", "unauthorized")
+    if any(marker in error for marker in auth_markers):
+        return "fixture_auth_drift"
+    return "generic_browser_flake"
+
+
+def _artifact_exists(path: str) -> bool:
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return False
+    candidate = Path(raw_path)
+    try:
+        return candidate.exists() and candidate.stat().st_size > 0
+    except OSError:
+        return False
+
+
 __all__ = [
+    "BrowserEvidenceCompleteness",
     "BrowserJourneyResult",
     "BrowserStep",
     "LocalBrowserHarness",
+    "REQUIRED_ARTIFACTS_BY_PHASE",
+    "assess_browser_evidence_completeness",
+    "classify_browser_failure",
     "parse_repro_steps",
 ]

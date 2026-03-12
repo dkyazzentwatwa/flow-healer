@@ -203,6 +203,87 @@ def test_lint_issue_contract_reports_ambiguous_execution_root_for_multiple_sandb
     assert lint.reason_codes == ("ambiguous_execution_root",)
 
 
+def test_lint_issue_contract_reports_validation_root_mismatch() -> None:
+    issue_body = (
+        "Required code outputs:\n"
+        "- e2e-smoke/python/app/main.py\n\n"
+        "Validation:\n"
+        "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+    )
+    spec = compile_task_spec(
+        issue_title="Fix python smoke regression",
+        issue_body=issue_body,
+    )
+
+    lint = lint_issue_contract(
+        issue_title="Fix python smoke regression",
+        issue_body=issue_body,
+        task_spec=spec,
+        contract_mode="lenient",
+        parse_confidence_threshold=0.3,
+    )
+
+    assert lint.reason_codes == ("validation_root_mismatch",)
+    assert lint.suggested_execution_root == "e2e-smoke/python"
+
+
+def test_lint_issue_contract_phase2_wrong_root_replay_pack() -> None:
+    replay_cases = (
+        {
+            "title": "Replay ambiguous smoke roots",
+            "body": (
+                "Required code outputs:\n"
+                "- e2e-smoke/node/src/app.js\n"
+                "- e2e-smoke/python/app/main.py\n"
+            ),
+            "expected_execution_root": "",
+            "expected_reason_codes": ("ambiguous_execution_root",),
+            "expected_suggested_root": "e2e-smoke/node",
+        },
+        {
+            "title": "Replay validation root mismatch",
+            "body": (
+                "Required code outputs:\n"
+                "- e2e-smoke/python/app/main.py\n\n"
+                "Validation:\n"
+                "- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+            ),
+            "expected_execution_root": "e2e-smoke/node",
+            "expected_reason_codes": ("validation_root_mismatch",),
+            "expected_suggested_root": "e2e-smoke/python",
+        },
+        {
+            "title": "Replay explicit root resolution",
+            "body": (
+                "Required code outputs:\n"
+                "- e2e-apps/node-next/app/page.js\n\n"
+                "Execution root:\n"
+                "- e2e-apps/node-next\n\n"
+                "Runtime profile: node-next-web\n\n"
+                "Validation:\n"
+                "- npm test -- --passWithNoTests\n"
+            ),
+            "expected_execution_root": "e2e-apps/node-next",
+            "expected_reason_codes": (),
+            "expected_suggested_root": "e2e-apps/node-next",
+        },
+    )
+
+    for case in replay_cases:
+        spec = compile_task_spec(issue_title=case["title"], issue_body=case["body"])
+        lint = lint_issue_contract(
+            issue_title=case["title"],
+            issue_body=case["body"],
+            task_spec=spec,
+            contract_mode="lenient",
+            parse_confidence_threshold=0.3,
+        )
+
+        assert spec.execution_root == case["expected_execution_root"]
+        assert lint.reason_codes == case["expected_reason_codes"]
+        assert lint.suggested_execution_root == case["expected_suggested_root"]
+
+
 def test_lint_issue_contract_does_not_require_validation_for_artifact_only_issue() -> None:
     spec = compile_task_spec(
         issue_title="Document the runtime trust states",
@@ -397,6 +478,42 @@ def test_compile_task_spec_infers_node_execution_root_and_validation_command() -
     assert spec.validation_commands == ("cd e2e-smoke/node && npm test -- --passWithNoTests",)
 
 
+def test_compile_task_spec_infers_node_execution_root_from_pnpm_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Node package manager regression",
+        issue_body="Validation: cd e2e-apps/node-next && pnpm run lint",
+    )
+
+    assert spec.language == "node"
+    assert spec.language_source == "issue"
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert spec.validation_commands == ("cd e2e-apps/node-next && pnpm run lint",)
+
+
+def test_compile_task_spec_infers_node_execution_root_from_yarn_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Node package manager regression",
+        issue_body="Validation: cd e2e-apps/node-next && yarn run build",
+    )
+
+    assert spec.language == "node"
+    assert spec.language_source == "issue"
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert spec.validation_commands == ("cd e2e-apps/node-next && yarn run build",)
+
+
+def test_compile_task_spec_infers_node_execution_root_from_bun_validation_command() -> None:
+    spec = compile_task_spec(
+        issue_title="Node package manager regression",
+        issue_body="Validation: cd e2e-apps/node-next && bun run smoke",
+    )
+
+    assert spec.language == "node"
+    assert spec.language_source == "issue"
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert spec.validation_commands == ("cd e2e-apps/node-next && bun run smoke",)
+
+
 def test_compile_task_spec_ignores_issue_title_when_extracting_validation_commands() -> None:
     spec = compile_task_spec(
         issue_title="npm run test only",
@@ -423,6 +540,57 @@ def test_compile_task_spec_preserves_python3_pytest_validation_command_and_execu
     assert spec.validation_commands == ("cd e2e-apps/python-fastapi && python3 -m pytest -q",)
 
 
+def test_compile_task_spec_honors_explicit_execution_root_field() -> None:
+    spec = compile_task_spec(
+        issue_title="Node Next app regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- app/page.js\n\n"
+            "Execution root:\n"
+            "- e2e-apps/node-next\n\n"
+            "Runtime profile: node-next-web\n"
+            "Validation:\n"
+            "- npm test -- --passWithNoTests\n"
+        ),
+    )
+
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert spec.runtime_profile == "node-next-web"
+    assert spec.validation_commands == ("npm test -- --passWithNoTests",)
+
+
+def test_compile_task_spec_normalizes_nested_cd_root_to_known_sandbox_root() -> None:
+    spec = compile_task_spec(
+        issue_title="Nested Next.js app regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/node-next/app/page.js\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/node-next/app && pnpm run build\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert spec.validation_commands == ("cd e2e-apps/node-next/app && pnpm run build",)
+
+
+def test_compile_task_spec_preserves_django_manage_py_validation_command_and_execution_root() -> None:
+    spec = compile_task_spec(
+        issue_title="Django sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/py-django/app/views.py\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/py-django && python manage.py test app.tests -v 2\n"
+        ),
+    )
+
+    assert spec.language == "python"
+    assert spec.execution_root == "e2e-smoke/py-django"
+    assert spec.validation_commands == ("cd e2e-smoke/py-django && python manage.py test app.tests -v 2",)
+
+
 def test_compile_task_spec_infers_swift_execution_root_and_validation_command() -> None:
     spec = compile_task_spec(
         issue_title="Swift sandbox regression",
@@ -439,6 +607,54 @@ def test_compile_task_spec_infers_swift_execution_root_and_validation_command() 
     assert spec.language_source == "issue"
     assert spec.execution_root == "e2e-smoke/swift"
     assert spec.validation_commands == ("cd e2e-smoke/swift && swift test",)
+
+
+def test_compile_task_spec_preserves_pnpm_validation_command_and_execution_root() -> None:
+    spec = compile_task_spec(
+        issue_title="Next sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-apps/node-next/app/page.js\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/node-next && pnpm run test -- --runInBand\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.execution_root == "e2e-apps/node-next"
+    assert spec.validation_commands == ("cd e2e-apps/node-next && pnpm run test -- --runInBand",)
+
+
+def test_compile_task_spec_preserves_yarn_validation_command_and_execution_root() -> None:
+    spec = compile_task_spec(
+        issue_title="Node sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node && yarn test --watch=false\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.execution_root == "e2e-smoke/node"
+    assert spec.validation_commands == ("cd e2e-smoke/node && yarn test --watch=false",)
+
+
+def test_compile_task_spec_preserves_bun_validation_command_and_execution_root() -> None:
+    spec = compile_task_spec(
+        issue_title="Node sandbox regression",
+        issue_body=(
+            "Required code outputs:\n"
+            "- e2e-smoke/node/src/add.js\n\n"
+            "Validation:\n"
+            "- cd e2e-smoke/node && bun test --timeout=10000\n"
+        ),
+    )
+
+    assert spec.language == "node"
+    assert spec.execution_root == "e2e-smoke/node"
+    assert spec.validation_commands == ("cd e2e-smoke/node && bun test --timeout=10000",)
 
 
 def test_compile_task_spec_swift_inference_routes_to_supported_language_path() -> None:

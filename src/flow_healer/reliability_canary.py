@@ -11,6 +11,8 @@ from typing import Callable
 
 _PASSED_RE = re.compile(r"(?P<count>\d+)\s+passed")
 _FAILED_RE = re.compile(r"(?P<count>\d+)\s+failed")
+STALE_PROFILE_DAYS = 7
+ACTIVE_RUNTIME_PROFILES = ("node-next-web", "ruby-rails-web", "java-spring-web")
 
 DEFAULT_CANARY_GROUPS: dict[str, tuple[str, ...]] = {
     "docs": (
@@ -41,9 +43,11 @@ def run_canary_suite(
     pytest_bin: str = "pytest",
     timeout_seconds: int = 900,
     run_command: Callable[[list[str], int], subprocess.CompletedProcess[str]] | None = None,
+    profile_last_success: dict[str, str] | None = None,
 ) -> dict[str, object]:
     selected_groups = groups or DEFAULT_CANARY_GROUPS
     runner = run_command or _run_command
+    known_profile_last_success = profile_last_success or {}
     report_groups: dict[str, dict[str, object]] = {}
     total_duration_seconds = 0.0
     passed_groups = 0
@@ -84,6 +88,10 @@ def run_canary_suite(
         "no_op_rate": 0.0,
         "mean_time_to_valid_pr_minutes": round(total_duration_seconds / 60.0, 4),
         "total_duration_seconds": round(total_duration_seconds, 3),
+        "runtime_profiles": {
+            profile: check_profile_freshness(known_profile_last_success.get(profile))
+            for profile in ACTIVE_RUNTIME_PROFILES
+        },
     }
     return {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -172,6 +180,16 @@ def evaluate_canary_report(*, report: dict[str, object], policy: dict[str, objec
             warnings=warnings,
         )
 
+    runtime_profiles = summary.get("runtime_profiles")
+    if isinstance(runtime_profiles, dict):
+        stale_profiles = [
+            str(profile_name)
+            for profile_name, freshness in runtime_profiles.items()
+            if isinstance(freshness, dict) and bool(freshness.get("stale"))
+        ]
+        if stale_profiles:
+            warnings.append(f"stale_runtime_profiles: {', '.join(sorted(stale_profiles))}")
+
     return CanaryEvaluation(passed=not failures, failures=tuple(failures), warnings=tuple(warnings))
 
 
@@ -250,6 +268,24 @@ def _extract_counter(pattern: re.Pattern[str], text: str) -> int:
         return 0
 
 
+def check_profile_freshness(last_success_at: str | None, max_age_days: int = STALE_PROFILE_DAYS) -> dict[str, object]:
+    checked_at = _parse_timestamp(last_success_at)
+    if checked_at is None:
+        return {
+            "stale": True,
+            "days_since_success": None,
+            "within_window": False,
+        }
+    now = datetime.now(UTC)
+    days_since_success = round(max(0.0, (now - checked_at).total_seconds()) / 86400.0, 4)
+    within_window = days_since_success <= float(max_age_days)
+    return {
+        "stale": not within_window,
+        "days_since_success": days_since_success,
+        "within_window": within_window,
+    }
+
+
 def _run_command(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -258,6 +294,26 @@ def _run_command(command: list[str], timeout_seconds: int) -> subprocess.Complet
         text=True,
         timeout=max(30, int(timeout_seconds)),
     )
+
+
+def _parse_timestamp(raw: str | None) -> datetime | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    candidates = (value, value.replace("Z", "+00:00"))
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    for fmt in ("%Y-%m-%d %H:%M:%S",):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
 
 
 def _as_float(value: object, *, default: float) -> float:

@@ -9,6 +9,7 @@ from flow_healer.healer_preflight import (
     _probe_node_toolchain,
     _preflight_validation_commands,
     execution_root_for_language,
+    is_stably_ready,
     list_cached_preflight_reports,
     preflight_readiness_assessment,
     summarize_preflight_readiness,
@@ -199,3 +200,122 @@ def test_cached_preflight_reports_include_new_smoke_and_app_targets(tmp_path: Pa
     assert "e2e-smoke/ruby" in execution_roots
     assert "e2e-apps/ruby-rails-web" in execution_roots
     assert "e2e-apps/java-spring-web" in execution_roots
+
+
+def test_is_stably_ready_requires_both_current_and_prior_ready() -> None:
+    report = PreflightReport(
+        language="node",
+        execution_root="e2e-smoke/node",
+        gate_mode="local_only",
+        status="ready",
+        prior_status="ready",
+        prior_checked_at="2026-03-12 05:00:00",
+        failure_class="",
+        summary="ok",
+        output_tail="",
+        checked_at="2026-03-12 05:05:00",
+        test_summary={},
+    )
+
+    assert is_stably_ready(report) is True
+
+
+def test_is_stably_ready_returns_false_if_prior_missing() -> None:
+    report = PreflightReport(
+        language="node",
+        execution_root="e2e-smoke/node",
+        gate_mode="local_only",
+        status="ready",
+        failure_class="",
+        summary="ok",
+        output_tail="",
+        checked_at="2026-03-12 05:05:00",
+        test_summary={},
+    )
+
+    assert is_stably_ready(report) is False
+
+
+def test_ensure_language_ready_preserves_prior_status_on_refresh(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.bootstrap()
+    preflight = HealerPreflight(
+        store=store,
+        runner=_Runner(),  # type: ignore[arg-type]
+        repo_path=tmp_path,
+        ttl_seconds=60,
+    )
+    cached = PreflightReport(
+        language="node",
+        execution_root="e2e-smoke/node",
+        gate_mode="local_only",
+        status="ready",
+        failure_class="",
+        summary="ok",
+        output_tail="",
+        checked_at="2026-03-12 05:00:00",
+        test_summary={},
+    )
+    store.set_state(
+        "healer_preflight:local_only:node:e2e-smoke/node",
+        cached.to_state_value(),
+    )
+
+    def _fake_run_preflight(*, language: str, framework: str, execution_root: str) -> PreflightReport:
+        return PreflightReport(
+            language=language,
+            execution_root=execution_root,
+            gate_mode="local_only",
+            status="ready",
+            failure_class="",
+            summary="ok again",
+            output_tail="",
+            checked_at="2026-03-12 05:10:00",
+            test_summary={},
+        )
+
+    preflight._run_preflight = _fake_run_preflight  # type: ignore[method-assign]
+
+    report = preflight.ensure_language_ready(
+        language="node",
+        execution_root="e2e-smoke/node",
+        force=True,
+    )
+
+    assert report.prior_status == "ready"
+    assert report.prior_checked_at == "2026-03-12 05:00:00"
+
+
+def test_summarize_preflight_readiness_includes_stably_ready_roots() -> None:
+    reports = [
+        PreflightReport(
+            language="node",
+            execution_root="e2e-smoke/node",
+            gate_mode="local_only",
+            status="ready",
+            prior_status="ready",
+            prior_checked_at="2026-03-12 05:00:00",
+            failure_class="",
+            summary="ok",
+            output_tail="",
+            checked_at="2026-03-12 05:05:00",
+            test_summary={},
+        ),
+        PreflightReport(
+            language="python",
+            execution_root="e2e-smoke/python",
+            gate_mode="local_only",
+            status="ready",
+            prior_status="failed",
+            prior_checked_at="2026-03-12 05:00:00",
+            failure_class="",
+            summary="ok",
+            output_tail="",
+            checked_at="2026-03-12 05:05:00",
+            test_summary={},
+        ),
+    ]
+
+    summary = summarize_preflight_readiness(reports)
+
+    assert summary["stably_ready_roots"] == ["e2e-smoke/node"]

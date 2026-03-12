@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime, timedelta
 
 from flow_healer.reliability_canary import (
+    ACTIVE_RUNTIME_PROFILES,
     CanaryEvaluation,
+    STALE_PROFILE_DAYS,
+    check_profile_freshness,
     evaluate_canary_report,
     render_markdown_summary,
     run_canary_suite,
@@ -137,3 +141,85 @@ def test_render_markdown_summary_contains_failure_sections() -> None:
     assert "## Reliability Canary" in markdown
     assert "### Failures" in markdown
     assert "### Warnings" in markdown
+
+
+def test_check_profile_freshness_within_window() -> None:
+    recent = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+
+    freshness = check_profile_freshness(recent)
+
+    assert freshness["stale"] is False
+    assert freshness["within_window"] is True
+    assert freshness["days_since_success"] is not None
+
+
+def test_check_profile_freshness_stale_after_seven_days() -> None:
+    stale = (datetime.now(UTC) - timedelta(days=STALE_PROFILE_DAYS + 1)).isoformat()
+
+    freshness = check_profile_freshness(stale)
+
+    assert freshness["stale"] is True
+    assert freshness["within_window"] is False
+    assert freshness["days_since_success"] is not None
+
+
+def test_check_profile_freshness_treats_none_as_stale() -> None:
+    freshness = check_profile_freshness(None)
+
+    assert freshness == {
+        "stale": True,
+        "days_since_success": None,
+        "within_window": False,
+    }
+
+
+def test_run_canary_suite_includes_runtime_profile_freshness() -> None:
+    recent = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+
+    def fake_runner(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="1 passed in 0.01s", stderr="")
+
+    report = run_canary_suite(
+        groups={"docs": ("tests/docs.py::test_ok",)},
+        run_command=fake_runner,
+        profile_last_success={
+            "node-next-web": recent,
+            "ruby-rails-web": stale,
+        },
+    )
+
+    runtime_profiles = report["summary"]["runtime_profiles"]
+
+    assert tuple(runtime_profiles.keys()) == ACTIVE_RUNTIME_PROFILES
+    assert runtime_profiles["node-next-web"]["within_window"] is True
+    assert runtime_profiles["ruby-rails-web"]["stale"] is True
+    assert runtime_profiles["java-spring-web"]["stale"] is True
+
+
+def test_evaluate_canary_report_warns_on_stale_runtime_profile() -> None:
+    report = {
+        "groups": {
+            "docs": {"passed": True, "duration_seconds": 12},
+        },
+        "summary": {
+            "first_pass_success_rate": 1.0,
+            "no_op_rate": 0.0,
+            "wrong_root_execution_rate": 0.0,
+            "mean_time_to_valid_pr_minutes": 1.0,
+            "runtime_profiles": {
+                "node-next-web": {"stale": False, "days_since_success": 1.0, "within_window": True},
+                "ruby-rails-web": {"stale": True, "days_since_success": 9.0, "within_window": False},
+                "java-spring-web": {"stale": False, "days_since_success": 2.0, "within_window": True},
+            },
+        },
+    }
+    policy = {
+        "required_groups": ["docs"],
+        "minimum_first_pass_success_rate": 0.8,
+    }
+
+    evaluation = evaluate_canary_report(report=report, policy=policy)
+
+    assert evaluation.passed is True
+    assert any("stale_runtime_profiles" in item for item in evaluation.warnings)

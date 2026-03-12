@@ -1325,6 +1325,221 @@ def test_run_attempt_retries_after_patch_apply_failure(monkeypatch, tmp_path):
     assert "Previous proposer output was unusable." in connector.turns[1][1]
 
 
+def test_run_attempt_serialized_patch_mode_reclassifies_narrative_only_no_patch(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(["Updated demo.py to fix the add helper and ran tests."])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="123a",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_workspace_change:narrative_only"
+    assert result.failure_fingerprint == "execution_contract|serialized_patch|no_workspace_change:narrative_only"
+    assert "status summary" in result.failure_reason.lower()
+
+
+def test_run_attempt_serialized_patch_mode_marks_final_answer_without_edits_as_narrative_only(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    class _DetailedNoopConnector(_RetryConnector):
+        def run_turn_detailed(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> ConnectorTurnResult:
+            self.turns.append((thread_id, prompt))
+            return ConnectorTurnResult(
+                output_text="I fixed demo.py and verified the requested behavior.",
+                final_answer_present=True,
+            )
+
+    runner = HealerRunner(_DetailedNoopConnector(outputs=[]), timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="123b",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_workspace_change:narrative_only"
+    assert result.failure_fingerprint == "execution_contract|serialized_patch|no_workspace_change:narrative_only"
+    assert "final answer" in result.failure_reason.lower()
+
+
+def test_run_attempt_serialized_patch_mode_marks_commentary_only_turn_as_connector_noop(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    class _DetailedCommentaryConnector(_RetryConnector):
+        def run_turn_detailed(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> ConnectorTurnResult:
+            self.turns.append((thread_id, prompt))
+            return ConnectorTurnResult(
+                output_text="",
+                commentary_tail="Thinking through the requested fix now.",
+            )
+
+    runner = HealerRunner(_DetailedCommentaryConnector(outputs=[]), timeout_seconds=30, test_gate_mode="local_only")
+    runner.max_code_proposer_retries = 0
+
+    result = runner.run_attempt(
+        issue_id="123c",
+        issue_title="Fix demo",
+        issue_body="Repair demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "no_workspace_change:connector_noop"
+    assert result.failure_fingerprint == "execution_contract|serialized_patch|no_workspace_change:connector_noop"
+    assert "commentary mode" in result.failure_reason.lower()
+
+
+def test_run_attempt_phase2_noop_replay_pack(tmp_path):
+    def _make_workspace(name: str) -> Path:
+        workspace = tmp_path / name
+        workspace.mkdir()
+        _init_git_repo(workspace)
+        (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+        return workspace
+
+    def _run_case(issue_id: str, workspace: Path, connector) -> object:
+        runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_only")
+        runner.max_code_proposer_retries = 0
+        return runner.run_attempt(
+            issue_id=issue_id,
+            issue_title="Fix demo",
+            issue_body="Repair demo.py",
+            task_spec=HealerTaskSpec(
+                task_kind="fix",
+                output_mode="patch",
+                output_targets=("demo.py",),
+                tool_policy="repo_only",
+                validation_profile="code_change",
+            ),
+            workspace=workspace,
+            max_diff_files=5,
+            max_diff_lines=20,
+            max_failed_tests_allowed=0,
+            targeted_tests=[],
+        )
+
+    narrative_result = _run_case(
+        "phase2-noop-1",
+        _make_workspace("narrative"),
+        _RetryConnector(["Updated demo.py to fix the add helper and ran tests."]),
+    )
+
+    final_answer_workspace = _make_workspace("final-answer")
+
+    class _DetailedNoopConnector(_RetryConnector):
+        def run_turn_detailed(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> ConnectorTurnResult:
+            self.turns.append((thread_id, prompt))
+            return ConnectorTurnResult(
+                output_text="I fixed demo.py and verified the requested behavior.",
+                final_answer_present=True,
+            )
+
+    final_answer_result = _run_case("phase2-noop-2", final_answer_workspace, _DetailedNoopConnector(outputs=[]))
+
+    commentary_workspace = _make_workspace("commentary")
+
+    class _DetailedCommentaryConnector(_RetryConnector):
+        def run_turn_detailed(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> ConnectorTurnResult:
+            self.turns.append((thread_id, prompt))
+            return ConnectorTurnResult(
+                output_text="",
+                commentary_tail="Thinking through the requested fix now.",
+            )
+
+    commentary_result = _run_case("phase2-noop-3", commentary_workspace, _DetailedCommentaryConnector(outputs=[]))
+
+    runtime_workspace = _make_workspace("runtime-artifacts")
+
+    class _GeneratedArtifactConnector(_RetryConnector):
+        def __init__(self, workspace_path: Path):
+            super().__init__(["Updated runtime artifacts only."])
+            self.workspace_path = workspace_path
+
+        def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
+            self.turns.append((thread_id, prompt))
+            cache_dir = self.workspace_path / ".pytest_cache"
+            cache_dir.mkdir(exist_ok=True)
+            (cache_dir / "v").write_text("cached\n", encoding="utf-8")
+            return self.outputs.pop(0)
+
+    app_server_cls = type("CodexAppServerConnector", (_GeneratedArtifactConnector,), {})
+    runtime_artifact_result = _run_case("phase2-noop-4", runtime_workspace, app_server_cls(runtime_workspace))
+
+    replay_results = {
+        "narrative_summary": narrative_result.failure_class,
+        "final_answer_only": final_answer_result.failure_class,
+        "commentary_only": commentary_result.failure_class,
+        "runtime_artifacts_only": runtime_artifact_result.failure_class,
+    }
+
+    assert replay_results == {
+        "narrative_summary": "no_workspace_change:narrative_only",
+        "final_answer_only": "no_workspace_change:narrative_only",
+        "commentary_only": "no_workspace_change:connector_noop",
+        "runtime_artifacts_only": "no_workspace_change:staging_filtered_all",
+    }
+
+
 def test_run_attempt_uses_longer_turn_timeout_for_code_change(monkeypatch, tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

@@ -1064,6 +1064,18 @@ class HealerRunner:
                 failure_reason = ""
                 break
 
+            if (
+                failure_class not in _NON_RETRYABLE_FAILURES
+                and failure_class not in {"patch_apply_failed", "malformed_diff", "empty_diff"}
+            ):
+                failure_class, failure_reason = _classify_workspace_edit_noop(
+                    proposer_output=proposer_output,
+                    turn_result=turn_result,
+                    path_fence_rejection_reason="",
+                    stage_excluded_paths=[],
+                    task_spec=task_spec,
+                )
+
             if failure_class in _NON_RETRYABLE_FAILURES:
                     return HealerRunResult(
                         success=False,
@@ -4613,9 +4625,6 @@ def _materialize_artifact_from_output(
     return wrote_any
 
 
-_COMPLETION_ARTIFACT_NO_CHANGE_CLASSES = {"no_patch", "no_workspace_change", "empty_diff"}
-
-
 def _materialize_completion_artifact(
     *,
     issue_id: str,
@@ -4627,7 +4636,10 @@ def _materialize_completion_artifact(
     workspace: Path,
 ) -> bool:
     """Write a structured run-summary artifact when the agent ran but produced no file changes."""
-    if failure_class not in _COMPLETION_ARTIFACT_NO_CHANGE_CLASSES:
+    is_no_workspace_change = _is_no_workspace_change_failure_class(failure_class)
+    if failure_class not in {"no_patch", "empty_diff"} and not is_no_workspace_change:
+        return False
+    if is_no_workspace_change and task_spec.validation_profile != "artifact_only":
         return False
     output_text = (proposer_output or "").strip()
     if not output_text:

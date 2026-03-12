@@ -2,6 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from flow_healer.app_harness import AppRuntimeProfile
 from flow_healer.claude_cli_connector import ClaudeCliConnector
 from flow_healer.cline_connector import ClineConnector
 from flow_healer.codex_app_server_connector import CodexAppServerConnector
@@ -495,6 +496,44 @@ def test_doctor_rows_report_trust_payload(tmp_path, monkeypatch) -> None:
     _assert_trust_contract(trust)
     assert trust["state"] == "needs_environment_fix"
     assert trust["recommended_operator_action"] == "repair_environment"
+
+
+def test_doctor_rows_surface_repo_identity_drift(tmp_path, monkeypatch) -> None:
+    service = _make_demo_service(tmp_path)
+    _set_github_token(monkeypatch, service)
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.close()
+
+    legacy_db_path = service.config.state_root_path() / "repos" / "legacy-demo" / "state.db"
+    legacy_store = SQLiteStore(legacy_db_path)
+    legacy_store.bootstrap()
+    legacy_store.upsert_healer_issue(
+        issue_id="926",
+        repo="owner/repo",
+        title="Legacy issue",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    legacy_store.close()
+
+    monkeypatch.setattr(
+        "flow_healer.service._launch_agent_repo_identity_snapshot",
+        lambda label, configured_repo_path: {
+            "config_path": str(tmp_path / "legacy-config.yaml"),
+            "repo_name": "legacy-demo",
+            "repo_path": str(service.config.select_repos("demo")[0].healer_repo_path),
+        },
+    )
+
+    rows = service.doctor_rows("demo")
+
+    identity = rows[0]["repo_identity"]
+    assert identity["drift_detected"] is True
+    assert identity["configured_repo_name"] == "demo"
+    assert identity["launchd_repo_name"] == "legacy-demo"
+    assert identity["legacy_state_db_path"].endswith("legacy-demo/state.db")
 
 
 def test_status_rows_do_not_report_ready_when_repo_path_or_token_is_missing(tmp_path, monkeypatch) -> None:
@@ -1160,8 +1199,8 @@ def test_status_rows_surface_harness_health_and_harness_rollups(tmp_path) -> Non
                 "healer_browser_session_cleanup_events": "2",
                 "healer_stale_runtime_profiles_detected": "1",
                 "healer_stale_runtime_profiles": json.dumps(["web"]),
-            "healer_app_runtime_profile_last_seen_at:web": "2026-03-10 12:30:00",
-            "healer_app_runtime_canary_last_success_at:web": "2026-03-10 12:00:00",
+            "healer_app_runtime_profile_last_seen_at:web": "2026-02-10 12:30:00",
+            "healer_app_runtime_canary_last_success_at:web": "2026-02-10 12:00:00",
             "healer_artifact_root_ref:9302:failure": json.dumps(
                 {"issue_id": "9302", "path": str((tmp_path / "artifacts" / "issue-9302").resolve())}
             ),
@@ -1202,8 +1241,8 @@ def test_status_rows_surface_harness_health_and_harness_rollups(tmp_path) -> Non
             "configured": True,
             "status": "stale",
             "stale": True,
-            "last_seen_at": "2026-03-10 12:30:00",
-            "last_canary_at": "2026-03-10 12:00:00",
+            "last_seen_at": "2026-02-10 12:30:00",
+            "last_canary_at": "2026-02-10 12:00:00",
         }
     ]
     assert harness_health["canary_profiles"]["failures"] == 1
@@ -1214,6 +1253,59 @@ def test_status_rows_surface_harness_health_and_harness_rollups(tmp_path) -> Non
         "artifact_publish": 1,
         "runtime_boot": 1,
     }
+
+
+def test_status_rows_recompute_runtime_profile_staleness_from_recent_activity(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    _init_git_repo(repo_path)
+    state_root = tmp_path / "state"
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root)),
+            repos=[
+                RelaySettings(
+                    repo_name="demo",
+                    healer_repo_path=str(repo_path),
+                    healer_repo_slug="owner/repo",
+                    healer_app_runtime_stale_days=14,
+                    healer_app_runtime_profiles={
+                        "ruby-rails-web": AppRuntimeProfile(
+                            name="ruby-rails-web",
+                            command=("ruby", "server.rb"),
+                            cwd=repo_path,
+                            readiness_url="http://127.0.0.1:3101/healthz",
+                        )
+                    },
+                )
+            ],
+        )
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.set_states(
+        {
+            "healer_stale_runtime_profiles_detected": "1",
+            "healer_stale_runtime_profiles": json.dumps(["ruby-rails-web"]),
+            "healer_app_runtime_profile_last_seen_at:ruby-rails-web": "2099-03-12 07:42:01",
+            "healer_app_runtime_canary_last_success_at:ruby-rails-web": "2099-03-12 07:42:01",
+        }
+    )
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    harness_health = rows[0]["harness_health"]
+    assert harness_health["stale_runtime_profiles"]["profiles"] == []
+    assert harness_health["runtime_profiles"] == [
+        {
+            "profile": "ruby-rails-web",
+            "configured": True,
+            "status": "healthy",
+            "stale": False,
+            "last_seen_at": "2099-03-12 07:42:01",
+            "last_canary_at": "2099-03-12 07:42:01",
+        }
+    ]
 
 
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Iterable, Sequence
 
 from .healer_task_spec import compile_task_spec
@@ -17,6 +18,11 @@ _PROSPER_CHAT_DB_COMMAND = f"cd {_PROSPER_CHAT_ROOT} && ./scripts/healer_validat
 _PROSPER_CHAT_BACKEND_COMMAND = f"cd {_PROSPER_CHAT_ROOT} && ./scripts/healer_validate.sh backend"
 _PROSPER_CHAT_FULL_COMMAND = f"cd {_PROSPER_CHAT_ROOT} && ./scripts/healer_validate.sh full"
 _SQL_TITLE_HINTS = ("migration", "rls", "policy", "constraint", "trigger", "function", "sql")
+_RUNTIME_PROFILE_BY_ROOT = {
+    "e2e-apps/node-next": "node-next-web",
+    "e2e-apps/ruby-rails-web": "ruby-rails-web",
+    "e2e-apps/java-spring-web": "java-spring-web",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,12 +113,7 @@ def build_issue_drafts(
 
 
 def render_issue_body(targets: Sequence[str], validation_command: str) -> str:
-    body = "Required code outputs:\n"
-    for target in targets:
-        body += f"- {target}\n"
-    body += "\nValidation:\n"
-    body += f"- {validation_command}\n"
-    return body
+    return "\n".join(_contract_section_lines(targets=targets, validation=validation_command)) + "\n"
 
 
 def get_issue_templates(family: str) -> tuple[IssueTemplate, ...]:
@@ -500,6 +501,23 @@ def validate_issue_drafts(drafts: Sequence[IssueDraft], *, repo_root: Path) -> N
         if not spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/")):
             raise ValueError(
                 f"Draft validation failed: unsupported execution root '{spec.execution_root}' for {title}"
+            )
+        if not _has_focused_validation_command(
+            execution_root=spec.execution_root,
+            validation_commands=spec.validation_commands,
+        ):
+            raise ValueError(
+                f"Draft validation failed: validation command must be rooted to '{spec.execution_root}' for {title}"
+            )
+        required_runtime_profile = _RUNTIME_PROFILE_BY_ROOT.get(spec.execution_root, "")
+        if required_runtime_profile and (
+            not _body_has_explicit_contract_field(draft.body, "Execution root")
+            or not _body_has_explicit_contract_field(draft.body, "Runtime profile")
+            or str(spec.runtime_profile or "").strip() != required_runtime_profile
+        ):
+            raise ValueError(
+                f"Draft validation failed: missing browser-backed runtime contract for {title} "
+                f"(expected execution root + runtime profile {required_runtime_profile})"
             )
         normalized_targets = tuple(_normalize_path(target) for target in spec.output_targets)
         if normalized_targets in seen_targets:
@@ -1093,16 +1111,12 @@ def _hybrid_body(*, summary: str, observed: Sequence[str], expected: Sequence[st
     lines.extend(f"- {item}" for item in observed)
     lines.extend(["", "Expected:"])
     lines.extend(f"- {item}" for item in expected)
-    lines.extend(["", "Required code outputs:"])
-    lines.extend(f"- {target}" for target in targets)
-    lines.extend(["", "Validation:", f"- {validation}"])
+    lines.extend(["", *_contract_section_lines(targets=targets, validation=validation)])
     return "\n".join(lines) + "\n"
 
 
 def _messy_body(*, intro_lines: Sequence[str], targets: Sequence[str], validation: str) -> str:
-    lines = [*intro_lines, "", "Required code outputs:"]
-    lines.extend(f"- {target}" for target in targets)
-    lines.extend(["", "Validation:", f"- {validation}"])
+    lines = [*intro_lines, "", *_contract_section_lines(targets=targets, validation=validation)]
     return "\n".join(lines) + "\n"
 
 
@@ -1122,6 +1136,31 @@ def _is_prosper_chat_sql_target(target: str) -> bool:
 def _is_prosper_chat_backend_target(target: str) -> bool:
     normalized = _normalize_path(target)
     return normalized.startswith(_PROSPER_CHAT_BACKEND_PREFIX)
+
+
+def _contract_section_lines(*, targets: Sequence[str], validation: str) -> list[str]:
+    lines = ["Required code outputs:"]
+    lines.extend(f"- {target}" for target in targets)
+    execution_root, runtime_profile = _contract_execution_metadata(targets=targets, validation=validation)
+    if execution_root:
+        lines.extend(["", "Execution root:", f"- {execution_root}"])
+    if runtime_profile:
+        lines.extend(["", f"Runtime profile: {runtime_profile}"])
+    lines.extend(["", "Validation:", f"- {validation}"])
+    return lines
+
+
+def _contract_execution_metadata(*, targets: Sequence[str], validation: str) -> tuple[str, str]:
+    draft_body = (
+        "Required code outputs:\n"
+        + "\n".join(f"- {target}" for target in targets)
+        + "\n\nValidation:\n"
+        + f"- {validation}\n"
+    )
+    spec = compile_task_spec(issue_title="", issue_body=draft_body)
+    execution_root = str(spec.execution_root or "").strip()
+    runtime_profile = _RUNTIME_PROFILE_BY_ROOT.get(execution_root, "")
+    return execution_root, runtime_profile
 
 
 def _prod_eval_hybrid_heavy_templates() -> tuple[IssueTemplate, ...]:
@@ -1373,3 +1412,20 @@ def _dedupe_labels(labels: Iterable[str]) -> list[str]:
         seen.add(lowered)
         deduped.append(label)
     return deduped
+
+
+def _body_has_explicit_contract_field(body: str, label: str) -> bool:
+    pattern = re.compile(rf"^\s*{re.escape(label)}\s*:", re.IGNORECASE | re.MULTILINE)
+    return pattern.search(str(body or "")) is not None
+
+
+def _has_focused_validation_command(*, execution_root: str, validation_commands: Sequence[str]) -> bool:
+    normalized_root = str(execution_root or "").strip().strip("/")
+    if not normalized_root:
+        return False
+    expected_prefix = f"cd {normalized_root} &&"
+    for command in validation_commands:
+        normalized_command = " ".join(str(command or "").split())
+        if normalized_command.startswith(expected_prefix):
+            return True
+    return False

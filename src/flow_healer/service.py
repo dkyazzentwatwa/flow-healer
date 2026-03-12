@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 
@@ -336,6 +337,21 @@ class FlowHealerService:
                     store=runtime.store,
                     workspace_manager=runtime.loop.workspace_manager,
                 ).resource_audit()
+                repo_identity = _launch_agent_repo_identity_snapshot("local.flow-healer", repo_path)
+                launchd_repo_name = str(repo_identity.get("repo_name") or "").strip()
+                legacy_state_db = (
+                    self.config.state_root_path() / "repos" / launchd_repo_name / "state.db"
+                    if launchd_repo_name and launchd_repo_name != repo.repo_name
+                    else None
+                )
+                repo_identity.update(
+                    {
+                        "configured_repo_name": repo.repo_name,
+                        "launchd_repo_name": launchd_repo_name,
+                        "legacy_state_db_path": str(legacy_state_db) if legacy_state_db and legacy_state_db.exists() else "",
+                        "drift_detected": bool(launchd_repo_name and launchd_repo_name != repo.repo_name),
+                    }
+                )
                 harness_health = _build_harness_health(
                     store=runtime.store,
                     repo=repo,
@@ -442,6 +458,7 @@ class FlowHealerService:
                                 else {"counts": {}}
                             ),
                         },
+                        "repo_identity": repo_identity,
                         "worker": _worker_runtime_state(runtime.store),
                         "resource_audit": resource_audit,
                         "preflight": {
@@ -631,6 +648,21 @@ class FlowHealerService:
             repo_path = Path(repo.healer_repo_path).expanduser().resolve()
             runtime = self.build_runtime(repo)
             try:
+                repo_identity = _launch_agent_repo_identity_snapshot("local.flow-healer", repo_path)
+                launchd_repo_name = str(repo_identity.get("repo_name") or "").strip()
+                legacy_state_db = (
+                    self.config.state_root_path() / "repos" / launchd_repo_name / "state.db"
+                    if launchd_repo_name and launchd_repo_name != repo.repo_name
+                    else None
+                )
+                repo_identity.update(
+                    {
+                        "configured_repo_name": repo.repo_name,
+                        "launchd_repo_name": launchd_repo_name,
+                        "legacy_state_db_path": str(legacy_state_db) if legacy_state_db and legacy_state_db.exists() else "",
+                        "drift_detected": bool(launchd_repo_name and launchd_repo_name != repo.repo_name),
+                    }
+                )
                 reports = (
                     runtime.loop.preflight.refresh_all(force=True)
                     if preflight
@@ -731,6 +763,7 @@ class FlowHealerService:
                         "tracker_last_error_class": runtime.store.get_state("healer_tracker_last_error_class") or "",
                         "tracker_last_error_reason": runtime.store.get_state("healer_tracker_last_error_reason") or "",
                         "tracker_last_error_at": runtime.store.get_state("healer_tracker_last_error_at") or "",
+                        "repo_identity": repo_identity,
                         "worker": _worker_runtime_state(runtime.store),
                         "preflight_gate_mode": repo.healer_test_gate_mode,
                         "trust": trust,
@@ -1669,20 +1702,35 @@ def _build_harness_health(
     last_seen_states = store.list_states(prefix="healer_app_runtime_profile_last_seen_at:", limit=200)
     canary_success_states = store.list_states(prefix="healer_app_runtime_canary_last_success_at:", limit=200)
     stale_profile_entries = _parse_profile_name_list(store.get_state("healer_stale_runtime_profiles"))
-    stale_profiles = {name for name in stale_profile_entries if name}
+    cached_stale_profiles = {name for name in stale_profile_entries if name}
+    stale_cutoff = datetime.now(UTC) - timedelta(days=max(1, int(repo.healer_app_runtime_stale_days or 14)))
     profile_names = sorted(
         {
             *configured_profiles.keys(),
             *(_state_suffixes(last_seen_states, "healer_app_runtime_profile_last_seen_at:")),
             *(_state_suffixes(canary_success_states, "healer_app_runtime_canary_last_success_at:")),
-            *stale_profiles,
+            *cached_stale_profiles,
         }
     )
+    stale_profiles: set[str] = set()
     runtime_profiles = []
     for profile_name in profile_names:
         last_seen_at = str(last_seen_states.get(f"healer_app_runtime_profile_last_seen_at:{profile_name}") or "").strip()
         last_canary_at = str(canary_success_states.get(f"healer_app_runtime_canary_last_success_at:{profile_name}") or "").strip()
-        stale = profile_name in stale_profiles
+        last_activity = max(
+            (
+                timestamp
+                for timestamp in (
+                    _parse_service_state_timestamp(last_seen_at),
+                    _parse_service_state_timestamp(last_canary_at),
+                )
+                if timestamp is not None
+            ),
+            default=None,
+        )
+        stale = last_activity <= stale_cutoff if last_activity is not None else profile_name in cached_stale_profiles
+        if stale:
+            stale_profiles.add(profile_name)
         status = "stale" if stale else "healthy" if (last_seen_at or last_canary_at) else "unknown"
         runtime_profiles.append(
             {
@@ -1725,10 +1773,7 @@ def _build_harness_health(
             "counts": dict(harness_metrics["browser_failure_families"]),
         },
         "stale_runtime_profiles": {
-            "count": max(
-                _safe_int(store.get_state("healer_stale_runtime_profiles_detected")),
-                len(stale_profiles),
-            ),
+            "count": len(stale_profiles),
             "profiles": sorted(stale_profiles),
         },
         "orphan_cleanup": {
@@ -1806,6 +1851,18 @@ def _parse_profile_name_list(raw_value: object) -> list[str]:
     if isinstance(parsed, str) and parsed.strip():
         return [parsed.strip()]
     return []
+
+
+def _parse_service_state_timestamp(raw_value: object) -> datetime | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
 
 
 def _aggregate_ci_status_summary(issues: list[dict[str, object]]) -> dict[str, object]:
@@ -2027,6 +2084,40 @@ def _launch_agent_path(label: str) -> str:
         return ""
     # Prefer the explicit environment PATH, then fallback to default.
     return path_matches[-1].strip()
+
+
+def _launch_agent_repo_identity_snapshot(label: str, configured_repo_path: Path) -> dict[str, str]:
+    launch_agent_file = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    if not launch_agent_file.exists():
+        return {"config_path": "", "repo_name": "", "repo_path": ""}
+    try:
+        payload = plistlib.loads(launch_agent_file.read_bytes())
+    except Exception:
+        return {"config_path": "", "repo_name": "", "repo_path": ""}
+    arguments = payload.get("ProgramArguments") or []
+    if not isinstance(arguments, list):
+        return {"config_path": "", "repo_name": "", "repo_path": ""}
+    config_path = ""
+    for index, value in enumerate(arguments):
+        if str(value) == "--config" and index + 1 < len(arguments):
+            config_path = str(arguments[index + 1] or "").strip()
+            break
+    if not config_path:
+        return {"config_path": "", "repo_name": "", "repo_path": ""}
+    try:
+        launchd_config = AppConfig.load(Path(config_path).expanduser())
+    except Exception:
+        return {"config_path": config_path, "repo_name": "", "repo_path": ""}
+    wanted_repo_path = Path(configured_repo_path).expanduser().resolve()
+    for repo in launchd_config.repos:
+        repo_path = Path(repo.healer_repo_path).expanduser().resolve()
+        if repo_path == wanted_repo_path:
+            return {
+                "config_path": config_path,
+                "repo_name": repo.repo_name,
+                "repo_path": str(repo_path),
+            }
+    return {"config_path": config_path, "repo_name": "", "repo_path": ""}
 
 
 def _resolve_command_in_path(command: str, path_value: str) -> str:

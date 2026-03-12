@@ -9,7 +9,7 @@ Use this runbook when both daemons must stay always-on while remaining fully iso
 ~~~bash
 mkdir -p ~/.apple-flow/backups ~/.flow-healer/backups
 cp -av ~/Documents/code/codex-flow/data/relay.db ~/.apple-flow/backups/relay.db.$(date +%Y%m%d%H%M%S).bak || true
-cp -av ~/.flow-healer/repos/flow-healer/state.db ~/.flow-healer/backups/flow-healer.state.$(date +%Y%m%d%H%M%S).bak || true
+cp -av ~/.flow-healer/repos/flow-healer-self/state.db ~/.flow-healer/backups/flow-healer-self.state.$(date +%Y%m%d%H%M%S).bak || true
 ~~~
 
 ### 2) Stop both services
@@ -85,17 +85,31 @@ The continuous `start` command now boots the same always-on runtime as `serve`, 
 If an issue remains `running` after daemon restart, requeue expired leases:
 
 ~~~bash
-sqlite3 ~/.flow-healer/repos/flow-healer/state.db "UPDATE healer_issues SET state='queued', lease_owner=NULL, lease_expires_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE state='running' AND lease_expires_at <= CURRENT_TIMESTAMP;"
+sqlite3 ~/.flow-healer/repos/flow-healer-self/state.db "UPDATE healer_issues SET state='queued', lease_owner=NULL, lease_expires_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE state='running' AND lease_expires_at <= CURRENT_TIMESTAMP;"
 ~~~
 
 ### 7) Verify separation
 
 ~~~bash
-scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml flow-healer
-scripts/verify_runtime.sh ~/.flow-healer/config.yaml flow-healer
-flow-healer --config ~/.flow-healer/config.yaml doctor --repo flow-healer
-flow-healer --config ~/.flow-healer/config.yaml status --repo flow-healer
+scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml flow-healer-self
+scripts/verify_runtime.sh ~/.flow-healer/config.yaml flow-healer-self
+flow-healer --config ~/.flow-healer/config.yaml doctor --repo flow-healer-self
+flow-healer --config ~/.flow-healer/config.yaml status --repo flow-healer-self
 ~~~
+
+### 7a) Repo identity cutover
+
+If a live daemon is still writing to `~/.flow-healer/repos/flow-healer/state.db` while the canonical config repo name is `flow-healer-self`, migrate the active state before resuming normal operations:
+
+~~~bash
+python scripts/migrate_repo_state.py \
+  --source-db ~/.flow-healer/repos/flow-healer/state.db \
+  --target-db ~/.flow-healer/repos/flow-healer-self/state.db \
+  --source-repo-name flow-healer \
+  --target-repo-name flow-healer-self
+~~~
+
+After migration, update `~/.flow-healer/config.yaml` so the repo entry name is `flow-healer-self`, then restart `local.flow-healer`.
 
 ## Workspace Reconciliation
 

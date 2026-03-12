@@ -69,6 +69,8 @@ class PreflightReport:
     output_tail: str
     checked_at: str
     test_summary: dict[str, object]
+    prior_status: str = ""
+    prior_checked_at: str = ""
 
     def to_state_value(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=True, sort_keys=True)
@@ -93,6 +95,8 @@ class PreflightReport:
             output_tail=str(data.get("output_tail") or ""),
             checked_at=str(data.get("checked_at") or ""),
             test_summary=dict(data.get("test_summary") or {}),
+            prior_status=str(data.get("prior_status") or ""),
+            prior_checked_at=str(data.get("prior_checked_at") or ""),
         )
 
 
@@ -230,7 +234,22 @@ class HealerPreflight:
         cached = self.get_cached_report(language=language, execution_root=execution_root)
         if not force and cached is not None and not self._is_stale(cached):
             return cached
+        prior_status = cached.status if cached is not None else ""
+        prior_checked_at = cached.checked_at if cached is not None else ""
         report = self._run_preflight(language=language, framework=framework, execution_root=execution_root)
+        report = PreflightReport(
+            language=report.language,
+            execution_root=report.execution_root,
+            gate_mode=report.gate_mode,
+            status=report.status,
+            failure_class=report.failure_class,
+            summary=report.summary,
+            output_tail=report.output_tail,
+            checked_at=report.checked_at,
+            test_summary=dict(report.test_summary),
+            prior_status=prior_status,
+            prior_checked_at=prior_checked_at,
+        )
         self.store.set_state(
             preflight_cache_key(
                 gate_mode=self.runner.test_gate_mode,
@@ -496,6 +515,10 @@ def preflight_readiness_assessment(report: PreflightReport) -> dict[str, object]
     }
 
 
+def is_stably_ready(report: PreflightReport) -> bool:
+    return str(report.status or "").strip().lower() == "ready" and str(report.prior_status or "").strip().lower() == "ready"
+
+
 def summarize_preflight_readiness(reports: list[PreflightReport]) -> dict[str, object]:
     if not reports:
         return {
@@ -506,6 +529,7 @@ def summarize_preflight_readiness(reports: list[PreflightReport]) -> dict[str, o
             "overall_score": 0,
             "overall_class": "unknown",
             "blocking_execution_roots": [],
+            "stably_ready_roots": [],
         }
     assessments = [(report, preflight_readiness_assessment(report)) for report in reports]
     ready = sum(1 for _report, assessment in assessments if assessment["class"] == "ready")
@@ -536,6 +560,7 @@ def summarize_preflight_readiness(reports: list[PreflightReport]) -> dict[str, o
         "overall_score": average_score,
         "overall_class": overall_class,
         "blocking_execution_roots": blocking_execution_roots,
+        "stably_ready_roots": [report.execution_root for report, _assessment in assessments if is_stably_ready(report)],
     }
 
 
