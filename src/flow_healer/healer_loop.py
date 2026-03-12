@@ -3955,6 +3955,21 @@ class AutonomousHealerLoop:
             return False
         open_pr = self._discover_open_pr_for_issue(issue_id=issue.issue_id)
         if open_pr is not None:
+            local_issue = self.store.get_healer_issue(issue.issue_id) or {}
+            local_state = str(local_issue.get("state") or "").strip().lower()
+            local_pr_number = int(local_issue.get("pr_number") or 0)
+            if (
+                local_state in {"queued", "claimed", "running", "verify_pending"}
+                and local_pr_number > 0
+                and local_pr_number == open_pr.number
+            ):
+                logger.info(
+                    "Continuing issue #%s in state %s on existing PR #%s.",
+                    issue.issue_id,
+                    local_state or "unknown",
+                    open_pr.number,
+                )
+                return True
             self._restore_open_pr_state(
                 issue_id=issue.issue_id,
                 pr_number=open_pr.number,

@@ -2379,6 +2379,53 @@ def test_claim_is_actionable_is_case_insensitive_for_labels(tmp_path):
     assert loop._claim_is_actionable(issue) is True
 
 
+def test_claim_is_actionable_allows_queued_repair_on_existing_open_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="505",
+        repo="owner/repo",
+        title="Repair failing CI on existing PR",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="505",
+        state="queued",
+        pr_number=250,
+        pr_state="open",
+        last_failure_class="ci_failed",
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+    loop = _make_loop(store)
+    loop.tracker.get_issue.return_value = {
+        "issue_id": "505",
+        "state": "open",
+        "labels": ["healer:ready"],
+    }
+    loop.tracker.find_pr_for_issue.return_value = PullRequestResult(
+        number=250,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/250",
+    )
+
+    issue = HealerIssue(
+        issue_id="505",
+        repo="owner/repo",
+        title="Repair failing CI on existing PR",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+        html_url="https://example.test/issues/505",
+    )
+
+    assert loop._claim_is_actionable(issue) is True
+
+
 def test_resume_approved_pending_pr_requeues_issue(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
