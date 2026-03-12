@@ -446,6 +446,7 @@ def test_run_tests_locally_bootstraps_bundle_for_rspec(monkeypatch, tmp_path):
         raise AssertionError(f"Unexpected command: {cmd!r}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("flow_healer.healer_runner._local_tool_available", lambda _command: True)
 
     summary = _run_tests_locally(
         tmp_path,
@@ -480,6 +481,7 @@ def test_run_tests_locally_falls_back_when_bundle_exec_rspec_missing(monkeypatch
         raise AssertionError(f"Unexpected command: {cmd!r}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("flow_healer.healer_runner._local_tool_available", lambda _command: True)
 
     summary = _run_tests_locally(
         tmp_path,
