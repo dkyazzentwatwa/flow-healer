@@ -70,4 +70,11 @@ RSpec.describe "Ruby rails web reference app" do
     expect(dashboard.code).to eq("200")
     expect(dashboard.body).to include("seeded-admin@example.com")
   end
+
+  it "renders the deterministic browser evidence marker on /login" do
+    login = http_get("/login")
+
+    expect(login.code).to eq("200")
+    expect(login.body).to include("Evidence TC 2")
+  end
 end

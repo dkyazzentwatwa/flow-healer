@@ -8,6 +8,7 @@ class SessionsController
       body: <<~HTML
         <h1>Ruby Rails Web</h1>
         <p class="fixture-profile">#{session_user.empty? ? "anonymous" : session_user}</p>
+        <p>Evidence TC 2</p>
         <form action="/login" method="post">
           <label>Email <input name="email" type="email" /></label>
           <label>Password <input name="password" type="password" /></label>

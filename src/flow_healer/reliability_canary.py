@@ -268,6 +268,42 @@ def _extract_counter(pattern: re.Pattern[str], text: str) -> int:
         return 0
 
 
+def load_profile_last_success_from_config(
+    config_path: str | Path | None = None,
+    *,
+    repo_name: str | None = None,
+) -> dict[str, str]:
+    from .config import AppConfig
+    from .store import SQLiteStore
+
+    config_target = Path(config_path).expanduser() if config_path is not None else None
+    if config_target is not None and not config_target.exists():
+        return {}
+
+    app_config = AppConfig.load(config_target)
+    selected_repos = app_config.select_repos(repo_name)
+    if not selected_repos:
+        return {}
+
+    profile_last_success: dict[str, str] = {}
+    for repo in selected_repos:
+        db_path = app_config.repo_db_path(repo.repo_name)
+        if not db_path.exists():
+            continue
+        store = SQLiteStore(db_path)
+        try:
+            for profile in ACTIVE_RUNTIME_PROFILES:
+                last_success = str(store.get_state(f"healer_app_runtime_canary_last_success_at:{profile}") or "").strip()
+                if not last_success:
+                    continue
+                existing = profile_last_success.get(profile, "")
+                if not existing or existing < last_success:
+                    profile_last_success[profile] = last_success
+        finally:
+            store.close()
+    return profile_last_success
+
+
 def check_profile_freshness(last_success_at: str | None, max_age_days: int = STALE_PROFILE_DAYS) -> dict[str, object]:
     checked_at = _parse_timestamp(last_success_at)
     if checked_at is None:

@@ -8,6 +8,7 @@ public class LoginController {
             """
             <h1>Java Spring Web</h1>
             <p class="fixture-profile">%s</p>
+            <p>Evidence TC 3</p>
             <form action="/login" method="post">
               <label>Email <input name="email" type="email" /></label>
               <label>Password <input name="password" type="password" /></label>
