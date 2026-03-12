@@ -1,0 +1,6 @@
+Browser smoke pass for http://127.0.0.1:3000/
+Observed console output: none
+Verified page text:
+- Browser smoke ready
+- Available todo routes
+- Artifact Proof C1

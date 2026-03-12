@@ -30,48 +30,27 @@ class HealerWorkspaceManager:
         path = self.worktrees_root / f"issue-{issue_id}-{slug}"
         branch = f"healer/issue-{issue_id}-{slug}"
         if path.exists():
-            check = subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "--git-dir"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if check.returncode == 0:
+            if self._is_git_worktree(path):
                 return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
             logger.warning("Stale or corrupt worktree at %s; removing and recreating.", path)
             self.remove_workspace(workspace_path=path)
 
-        cmd = [
-            "git",
-            "-C",
-            str(self.repo_path),
-            "worktree",
-            "add",
-            "-f",
-            "-b",
-            branch,
-            str(path),
-            "HEAD",
-        ]
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
-        if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip()
-            # Branch may already exist from previous attempt; retry by reusing branch.
-            retry = [
-                "git",
-                "-C",
-                str(self.repo_path),
-                "worktree",
-                "add",
-                "-f",
-                str(path),
-                branch,
-            ]
-            proc_retry = subprocess.run(retry, check=False, capture_output=True, text=True, timeout=60)
-            if proc_retry.returncode != 0:
+        create_error = self._add_worktree(path=path, branch=branch)
+        if create_error:
+            raise RuntimeError(f"Failed to create worktree for issue {issue_id}: {create_error}")
+        if not self._is_git_worktree(path):
+            logger.warning(
+                "Worktree add for issue %s returned without a valid workspace at %s; pruning and retrying.",
+                issue_id,
+                path,
+            )
+            self._run_git_worktree_prune()
+            create_error = self._add_worktree(path=path, branch=branch)
+            if create_error:
+                raise RuntimeError(f"Failed to create worktree for issue {issue_id}: {create_error}")
+            if not self._is_git_worktree(path):
                 raise RuntimeError(
-                    f"Failed to create worktree for issue {issue_id}: {stderr or proc_retry.stderr or 'unknown error'}"
+                    f"Git reported worktree creation for issue {issue_id}, but workspace {path} is missing or invalid."
                 )
         return WorkspaceInfo(issue_id=issue_id, branch=branch, path=path)
 
@@ -187,6 +166,51 @@ class HealerWorkspaceManager:
             text=True,
             timeout=30,
         )
+
+    def _add_worktree(self, *, path: Path, branch: str) -> str:
+        cmd = [
+            "git",
+            "-C",
+            str(self.repo_path),
+            "worktree",
+            "add",
+            "-f",
+            "-b",
+            branch,
+            str(path),
+            "HEAD",
+        ]
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+        if proc.returncode == 0:
+            return ""
+        stderr = (proc.stderr or "").strip()
+        retry = [
+            "git",
+            "-C",
+            str(self.repo_path),
+            "worktree",
+            "add",
+            "-f",
+            str(path),
+            branch,
+        ]
+        proc_retry = subprocess.run(retry, check=False, capture_output=True, text=True, timeout=60)
+        if proc_retry.returncode == 0:
+            return ""
+        return stderr or (proc_retry.stderr or "").strip() or "unknown error"
+
+    def _is_git_worktree(self, path: Path) -> bool:
+        ws = Path(path).expanduser().absolute()
+        if ws == self.repo_path or not ws.exists():
+            return False
+        check = subprocess.run(
+            ["git", "-C", str(ws), "rev-parse", "--git-dir"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return check.returncode == 0
 
     def list_workspaces(self) -> list[Path]:
         if not self.worktrees_root.exists():

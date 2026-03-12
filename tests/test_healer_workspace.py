@@ -71,6 +71,40 @@ def test_ensure_workspace_recreates_corrupt_worktree(tmp_path):
     assert check.returncode == 0
 
 
+def test_ensure_workspace_retries_when_git_add_returns_without_valid_worktree(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    manager = HealerWorkspaceManager(repo_path=repo)
+
+    target_path = manager.worktrees_root / "issue-905-fix-parser"
+    calls: list[list[str]] = []
+    state = {"worktree_checks": 0}
+
+    def fake_run(cmd, check=False, capture_output=True, text=True, timeout=60):  # noqa: ANN001
+        cmd_list = [str(part) for part in cmd]
+        calls.append(cmd_list)
+        if cmd_list[:4] == ["git", "-C", str(repo), "worktree"] and cmd_list[4:6] == ["add", "-f"]:
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    def fake_is_git_worktree(path: Path) -> bool:
+        assert path == target_path
+        state["worktree_checks"] += 1
+        if state["worktree_checks"] == 1:
+            return False
+        target_path.mkdir(parents=True, exist_ok=True)
+        return True
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(manager, "_is_git_worktree", fake_is_git_worktree)
+
+    workspace = manager.ensure_workspace(issue_id="905", title="Fix parser")
+
+    assert workspace.path == target_path
+    assert state["worktree_checks"] == 2
+    assert any(row[-4:] == ["worktree", "prune", "--expire", "now"] for row in calls)
+
+
 def test_prepare_workspace_resets_issue_branch_to_latest_base(tmp_path):
     repo = tmp_path / "repo"
     remote = tmp_path / "remote.git"
