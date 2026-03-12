@@ -89,7 +89,10 @@ def _request_reference_app(
     connection.request(method, path, body=payload, headers=headers or {})
     response = connection.getresponse()
     response_body = response.read().decode("utf-8")
-    response_headers = {key: value for key, value in response.getheaders()}
+    response_headers = {
+        "-".join(part.capitalize() for part in key.split("-")): value
+        for key, value in response.getheaders()
+    }
     connection.close()
     return response.status, response_headers, response_body
 
@@ -150,6 +153,65 @@ def test_ruby_reference_app_serves_health_and_cookie_session() -> None:
         assert status == 302
         assert headers["Location"].endswith("/dashboard")
         assert "healer_session=" in headers["Set-Cookie"]
+
+        status, _headers, body = _request_reference_app(
+            port=port,
+            method="GET",
+            path="/dashboard",
+            headers={"Cookie": headers["Set-Cookie"]},
+        )
+        assert status == 200
+        assert "seeded-admin@example.com" in body
+        assert "Seeded alerts are ready." in body
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
+
+
+def test_java_reference_app_serves_health_and_cookie_session() -> None:
+    app_root = E2E_APPS / "java-spring-web"
+    env = os.environ.copy()
+    env["HOST"] = "127.0.0.1"
+    port = _reserve_local_port()
+    env["PORT"] = str(port)
+    java_bin = Path("/opt/homebrew/opt/openjdk/bin")
+    if java_bin.is_dir():
+        env["PATH"] = f"{java_bin}:{env.get('PATH', '')}"
+        env["JAVA_HOME"] = "/opt/homebrew/opt/openjdk"
+    process = subprocess.Popen(
+        ["./gradlew", "bootRun"],
+        cwd=app_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        _wait_for_reference_app(port, timeout_seconds=10.0)
+
+        status, _headers, body = _request_reference_app(port=port, method="GET", path="/healthz")
+        assert status == 200
+        assert json.loads(body)["status"] == "ok"
+
+        status, headers, _body = _request_reference_app(port=port, method="GET", path="/dashboard")
+        assert status == 302
+        assert headers["Location"].endswith("/login")
+
+        login_body = "email=seeded-admin%40example.com"
+        status, headers, _body = _request_reference_app(
+            port=port,
+            method="POST",
+            path="/login",
+            body=login_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert status == 302
+        assert headers["Location"].endswith("/dashboard")
+        assert "healer_session=seeded-admin@example.com" in headers["Set-Cookie"]
 
         status, _headers, body = _request_reference_app(
             port=port,

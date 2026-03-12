@@ -1,45 +1,49 @@
 package example.web;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.cookie;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
-import jakarta.servlet.http.Cookie;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.test.web.servlet.MockMvc;
-
-@WebMvcTest({HealthController.class, LoginController.class, DashboardController.class})
-class HealthControllerTest {
-    @Autowired
-    private MockMvc mockMvc;
-
-    @Test
-    void healthEndpointReturnsOk() throws Exception {
-        mockMvc.perform(get("/healthz"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.status").value("ok"));
+public class HealthControllerTest {
+    public static void main(String[] args) {
+        healthEndpointReturnsOk();
+        loginEndpointIssuesCookieBackedSession();
+        dashboardRendersFixtureCookieIdentity();
     }
 
-    @Test
-    void loginEndpointIssuesCookieBackedSession() throws Exception {
-        mockMvc.perform(post("/login").param("email", "seeded-admin@example.com"))
-            .andExpect(status().isFound())
-            .andExpect(header().string("Location", "/dashboard"))
-            .andExpect(cookie().value("healer_session", "seeded-admin@example.com"));
+    private static void healthEndpointReturnsOk() {
+        ResponsePlan response = new HealthController().health();
+        assertEquals(200, response.status(), "health status");
+        assertContains(response.body(), "\"status\":\"ok\"", "health body");
     }
 
-    @Test
-    void dashboardRendersFixtureCookieIdentity() throws Exception {
-        mockMvc.perform(get("/dashboard").cookie(new Cookie("healer_session", "seeded-admin")))
-            .andExpect(status().isOk())
-            .andExpect(content().string(containsString("seeded-admin")))
-            .andExpect(content().string(containsString("Seeded alerts are ready.")));
+    private static void loginEndpointIssuesCookieBackedSession() {
+        ResponsePlan response = new LoginController().createSession("seeded-admin@example.com");
+        assertEquals(302, response.status(), "login status");
+        assertEquals("/dashboard", response.headers().get("Location"), "login redirect");
+        assertContains(
+            response.headers().get("Set-Cookie"),
+            "healer_session=seeded-admin@example.com",
+            "login cookie"
+        );
+    }
+
+    private static void dashboardRendersFixtureCookieIdentity() {
+        ResponsePlan anonymous = new DashboardController().dashboard("");
+        assertEquals(302, anonymous.status(), "anonymous redirect status");
+        assertEquals("/login", anonymous.headers().get("Location"), "anonymous redirect location");
+
+        ResponsePlan authenticated = new DashboardController().dashboard("seeded-admin");
+        assertEquals(200, authenticated.status(), "dashboard status");
+        assertContains(authenticated.body(), "seeded-admin", "dashboard identity");
+        assertContains(authenticated.body(), "Seeded alerts are ready.", "dashboard fixture text");
+    }
+
+    private static void assertEquals(Object expected, Object actual, String label) {
+        if ((expected == null && actual != null) || (expected != null && !expected.equals(actual))) {
+            throw new AssertionError(label + " expected " + expected + " but was " + actual);
+        }
+    }
+
+    private static void assertContains(String body, String expected, String label) {
+        if (body == null || !body.contains(expected)) {
+            throw new AssertionError(label + " missing expected fragment: " + expected);
+        }
     }
 }

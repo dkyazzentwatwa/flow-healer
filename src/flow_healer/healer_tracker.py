@@ -1171,6 +1171,8 @@ class GitHubHealerTracker:
         state_key: str,
         source_label: str,
     ) -> dict[str, Any]:
+        if source_label in {"check_run", "workflow_run"}:
+            entries = cls._latest_ci_entries_by_name(entries=entries, name_key=name_key, updated_at_keys=updated_at_keys)
         counts = {"total": 0, "success": 0, "pending": 0, "failure": 0, "neutral": 0}
         failing_contexts: list[str] = []
         pending_contexts: list[str] = []
@@ -1272,6 +1274,35 @@ class GitHubHealerTracker:
             "pending_buckets": sorted(pending_buckets),
             "updated_at": cls._latest_timestamp(*updated_values),
         }
+
+    @classmethod
+    def _latest_ci_entries_by_name(
+        cls,
+        *,
+        entries: list[Any],
+        name_key: str,
+        updated_at_keys: tuple[str, ...],
+    ) -> list[Any]:
+        latest_by_name: dict[str, tuple[str, int, Any]] = {}
+        passthrough: list[Any] = []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get(name_key) or "").strip()
+            if not name:
+                passthrough.append(entry)
+                continue
+            updated_at = ""
+            for key in updated_at_keys:
+                timestamp = str(entry.get(key) or "").strip()
+                if timestamp:
+                    updated_at = timestamp
+                    break
+            existing = latest_by_name.get(name)
+            if existing is None or (updated_at, index) >= (existing[0], existing[1]):
+                latest_by_name[name] = (updated_at, index, entry)
+        deduped = [item[2] for item in sorted(latest_by_name.values(), key=lambda item: (item[0], item[1]))]
+        return [*passthrough, *deduped]
 
     @staticmethod
     def _classify_ci_failure_bucket(name: str) -> str:

@@ -1249,6 +1249,82 @@ def test_get_pr_ci_status_summary_distinguishes_transient_infra_failures(monkeyp
     ]
 
 
+def test_get_pr_ci_status_summary_ignores_superseded_cancelled_runs(monkeypatch):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        assert method == "GET"
+        if path == "/repos/owner/repo/pulls/93":
+            return {
+                "number": 93,
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/93",
+                "mergeable_state": "clean",
+                "user": {"login": "alice"},
+                "head": {"ref": "healer/issue-93", "sha": "ghi789"},
+                "updated_at": "2026-03-12T07:38:00Z",
+            }
+        if path == "/repos/owner/repo/commits/ghi789/check-runs?per_page=100":
+            return {
+                "check_runs": [
+                    {
+                        "name": "test (3.11)",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "completed_at": "2026-03-12T07:36:03Z",
+                    },
+                    {
+                        "name": "test (3.11)",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "completed_at": "2026-03-12T07:37:11Z",
+                    },
+                    {
+                        "name": "reliability-canary",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "completed_at": "2026-03-12T07:36:03Z",
+                    },
+                    {
+                        "name": "reliability-canary",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "completed_at": "2026-03-12T07:37:37Z",
+                    },
+                ]
+            }
+        if path == "/repos/owner/repo/commits/ghi789/status":
+            return {"state": "success", "statuses": []}
+        if path == "/repos/owner/repo/actions/runs?head_sha=ghi789&per_page=100":
+            return {
+                "workflow_runs": [
+                    {
+                        "name": "CI",
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "updated_at": "2026-03-12T07:36:03Z",
+                    },
+                    {
+                        "name": "CI",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "updated_at": "2026-03-12T07:37:37Z",
+                    },
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    summary = tracker.get_pr_ci_status_summary(pr_number=93)
+
+    assert summary["overall_state"] == "success"
+    assert summary["check_runs"]["failure"] == 0
+    assert summary["workflow_runs"]["failure"] == 0
+    assert summary["failing_entries"] == []
+
+
 def test_open_or_update_pr_updates_existing_pull_request_body(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
