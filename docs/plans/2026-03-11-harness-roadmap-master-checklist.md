@@ -48,8 +48,9 @@ Last updated: `2026-03-11`
 - [x] Live issue smoke for inline GitHub evidence: `#913`
 - [x] Confirm GitHub inline rendering uses the raw asset URL, not `blob?...raw=1`
 - [x] Live PR-body smoke with before/after gallery rendered on a real PR
-- [ ] Live end-to-end issue -> repro -> fix -> PR -> CI -> merge smoke
+- [x] Live end-to-end issue -> repro -> fix -> PR -> CI -> merge smoke
 - [x] Live app-backed PR smoke: issue `#918` -> PR `#919` with inline before/after screenshots and green remote CI
+- [x] Live code-only promotion smoke: issue `#920` -> PR `#921` -> green CI -> merged
 
 ## Phase 1: Harness Foundation
 
@@ -137,7 +138,7 @@ Last updated: `2026-03-11`
 
 ## Phase 3: Promotion Engine
 
-Status: `Partial`
+Status: `Done`
 
 ### Remote CI ingestion
 
@@ -183,6 +184,7 @@ Status: `Partial`
 - [x] Loop tests for CI failure remediation
 - [x] Service/dashboard tests for promotion-state surfacing
 - [x] Live PR smoke with remote CI observed and reflected in status
+- [x] Live end-to-end issue -> PR -> green CI -> merge smoke
 
 ## Phase 4: Judgment Routing
 
