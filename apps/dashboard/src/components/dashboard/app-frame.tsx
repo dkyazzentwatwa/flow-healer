@@ -35,6 +35,13 @@ export function AppFrame({
   const pathname = usePathname();
   const currentPath = pathname || "";
   const { resolvedTheme, setTheme } = useTheme();
+  const [mounted, setMounted] = React.useState(false);
+  const nextTheme = resolvedTheme === "dark" ? "light" : "dark";
+  const themeIcon = !mounted ? "pending" : resolvedTheme === "dark" ? "sun" : "moon";
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   return (
     <div className="min-h-screen pb-20 lg:pb-0">
@@ -57,10 +64,16 @@ export function AppFrame({
             <Button
               variant="outline"
               size="icon"
-              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+              onClick={() => setTheme(nextTheme)}
               aria-label="Toggle theme"
             >
-              {resolvedTheme === "dark" ? <SunMedium className="h-4 w-4" /> : <MoonStar className="h-4 w-4" />}
+              {themeIcon === "sun" ? (
+                <SunMedium className="h-4 w-4" data-theme-icon="sun" />
+              ) : themeIcon === "moon" ? (
+                <MoonStar className="h-4 w-4" data-theme-icon="moon" />
+              ) : (
+                <span className="h-4 w-4 rounded-full border border-current/40" data-theme-icon="pending" />
+              )}
             </Button>
             {actions}
           </div>
