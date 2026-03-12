@@ -728,38 +728,38 @@ def test_collect_activity_marks_swarm_events_as_running(tmp_path: Path) -> None:
     assert swarm_event["attempt_id"] == "hat_612"
 
 
-def test_render_dashboard_returns_local_react_shell(tmp_path: Path) -> None:
+def test_render_dashboard_returns_minimal_api_landing_page(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "<title>Flow Healer Control Center</title>" in html
-    assert "<div id='root'></div>" in html
-    assert "/assets/dashboard.css" in html
-    assert "/assets/dashboard.js" in html
-    assert "window.__FLOW_HEALER_BOOTSTRAP__" in html
+    assert "<title>Flow Healer API Server</title>" in html
+    assert "Start the separate dashboard app" in html
+    assert "apps/dashboard" in html
+    assert "/api/queue" in html
+    assert "/api/issue-detail" in html
 
 
-def test_render_dashboard_uses_local_assets_not_runtime_cdns(tmp_path: Path) -> None:
+def test_render_dashboard_does_not_embed_any_frontend_app_assets(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="")
 
-    assert "cdn.tailwindcss.com" not in html
-    assert "cdn.jsdelivr.net/npm/alpinejs" not in html
+    assert "/assets/dashboard.css" not in html
+    assert "/assets/dashboard.js" not in html
+    assert "window.__FLOW_HEALER_BOOTSTRAP__" not in html
 
 
-def test_render_dashboard_bootstrap_embeds_notice_and_web_auth_settings(tmp_path: Path) -> None:
+def test_render_dashboard_surfaces_notice_without_bootstrap_script(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     html = _render_dashboard(config, service, notice="scan completed")
 
-    assert '"notice": "scan completed"' in html
-    assert '"authMode": "token"' in html
-    assert '"authTokenEnv": "FLOW_HEALER_WEB_TOKEN"' in html
+    assert "scan completed" in html
+    assert "window.__FLOW_HEALER_BOOTSTRAP__" not in html
 
 
-def test_dashboard_server_serves_static_dashboard_asset(tmp_path: Path) -> None:
+def test_dashboard_server_does_not_serve_removed_dashboard_assets(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
 
     class DummyRouter:
@@ -770,15 +770,17 @@ def test_dashboard_server_serves_static_dashboard_asset(tmp_path: Path) -> None:
     server.start()
     try:
         port = server._httpd.server_address[1]  # type: ignore[union-attr]
-        with urlopen(f"http://127.0.0.1:{port}/assets/dashboard.css", timeout=5) as response:
-            payload = response.read().decode("utf-8")
-            content_type = response.headers.get("Content-Type")
+        try:
+            urlopen(f"http://127.0.0.1:{port}/assets/dashboard.css", timeout=5)
+        except Exception as exc:
+            error = exc
+        else:  # pragma: no cover - regression guard
+            error = None
     finally:
         server.stop()
 
-    assert response.status == 200
-    assert "text/css" in str(content_type)
-    assert "--app-bg" in payload
+    assert error is not None
+    assert "404" in str(error)
 
 
 def test_render_repo_action_cards_include_auth_field_when_token_mode_enabled(tmp_path: Path) -> None:

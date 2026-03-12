@@ -963,35 +963,91 @@ def _decorate_artifact_link(link: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def _dashboard_bootstrap_payload(config: AppConfig, notice: str) -> dict[str, Any]:
-    return {
-        "notice": str(notice or ""),
-        "authMode": str(getattr(config.control.web, "auth_mode", "none") or "none"),
-        "authTokenEnv": str(getattr(config.control.web, "auth_token_env", "FLOW_HEALER_WEB_TOKEN") or "FLOW_HEALER_WEB_TOKEN"),
-        "refreshMs": 5000,
-        "generatedAt": _now_label(),
-    }
-
-
 def render_dashboard(config: AppConfig, service: FlowHealerService, notice: str) -> str:
+    del config
     del service
-    bootstrap = json.dumps(_dashboard_bootstrap_payload(config, notice), default=str).replace("</", "<\\/")
+    notice_html = (
+        f"<p class='notice'>{escape(notice)}</p>"
+        if notice
+        else ""
+    )
     return f"""
 <!doctype html>
 <html lang='en'>
 <head>
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <meta name='color-scheme' content='dark light'>
-  <title>Flow Healer Control Center</title>
-  <link rel='stylesheet' href='/assets/dashboard.css'>
+  <title>Flow Healer API Server</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #090b10;
+      color: #f5f7fb;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: linear-gradient(180deg, #090b10 0%, #0d1118 100%);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }}
+    main {{
+      max-width: 760px;
+      width: min(100%, 760px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 24px;
+      background: rgba(15, 18, 26, 0.92);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      padding: 28px;
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: 2rem;
+      letter-spacing: -0.04em;
+    }}
+    p {{
+      margin: 0 0 14px;
+      color: #a7b1c2;
+      line-height: 1.6;
+    }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #f5f7fb;
+    }}
+    ul {{
+      margin: 18px 0 0;
+      padding-left: 20px;
+      color: #c7cfdd;
+    }}
+    li + li {{
+      margin-top: 8px;
+    }}
+    .notice {{
+      margin-top: 18px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(91, 141, 239, 0.14);
+      color: #d9e7ff;
+    }}
+  </style>
 </head>
 <body>
-  <div id='root'></div>
-  <script>
-    window.__FLOW_HEALER_BOOTSTRAP__ = {bootstrap};
-  </script>
-  <script type='module' src='/assets/dashboard.js'></script>
+  <main>
+    <h1>Flow Healer API Server</h1>
+    <p>Start the separate dashboard app from <code>apps/dashboard</code> to use the new UI.</p>
+    <p>This server now exists to provide Flow Healer data and actions only.</p>
+    <ul>
+      <li><code>/api/queue</code></li>
+      <li><code>/api/issue-detail</code></li>
+      <li><code>/api/overview</code></li>
+      <li><code>/api/activity</code></li>
+      <li><code>/api/logs</code></li>
+      <li><code>/artifact</code></li>
+    </ul>
+    {notice_html}
+  </main>
 </body>
 </html>
 """
