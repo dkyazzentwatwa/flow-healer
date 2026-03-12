@@ -438,6 +438,16 @@ def execution_root_for_language(language: str) -> str:
     return ""
 
 
+def language_for_execution_root(execution_root: str) -> str:
+    wanted = str(execution_root or "").strip().strip("/")
+    if not wanted:
+        return ""
+    for candidate_language, _framework, candidate_root in _SUPPORTED_SANDBOXES:
+        if str(candidate_root or "").strip().strip("/") == wanted:
+            return candidate_language
+    return ""
+
+
 def _preflight_validation_commands(*, execution_root: str, language: str, framework: str = "") -> tuple[str, ...]:
     normalized_root = str(execution_root or "").strip().strip("/")
     if normalized_root == "e2e-apps/prosper-chat":

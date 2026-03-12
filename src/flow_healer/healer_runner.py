@@ -2641,8 +2641,22 @@ def _run_explicit_validation_commands(
     timeout_seconds: int,
 ) -> dict[str, Any]:
     env = os.environ.copy()
+    bundle_bootstrap_required = any(_is_bundle_exec_rspec_command(command) for command in commands)
+    if bundle_bootstrap_required:
+        _configure_bundle_environment(env)
     output_chunks: list[str] = []
+    bundle_bootstrap_done = False
     for command in commands:
+        if bundle_bootstrap_required and not bundle_bootstrap_done:
+            bootstrap_result = _bootstrap_bundle_runtime(
+                workspace=workspace,
+                env=env,
+                timeout_seconds=timeout_seconds,
+                output_chunks=output_chunks,
+            )
+            bundle_bootstrap_done = True
+            if bootstrap_result is not None:
+                return bootstrap_result
         output_chunks.append(f"$ {command}")
         try:
             proc = subprocess.run(
@@ -2673,6 +2687,41 @@ def _run_explicit_validation_commands(
         if output:
             output_chunks.append(output)
         if int(proc.returncode) != 0:
+            fallback_command = _bundle_exec_rspec_fallback_command(command)
+            if fallback_command and _looks_like_bundle_exec_rspec_resolution_failure(output):
+                output_chunks.append(
+                    "(bundle exec rspec could not resolve executable; retrying via ruby entrypoint fallback)"
+                )
+                output_chunks.append(f"$ {fallback_command}")
+                try:
+                    fallback_proc = subprocess.run(
+                        ["/bin/zsh", "-lc", fallback_command],
+                        cwd=str(workspace),
+                        env=env,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=max(30, timeout_seconds),
+                    )
+                except FileNotFoundError:
+                    return {
+                        "exit_code": 127,
+                        "output_tail": "(/bin/zsh unavailable for explicit validation commands)",
+                        "gate_status": "failed",
+                        "gate_reason": "tool_missing",
+                    }
+                except subprocess.TimeoutExpired:
+                    return {
+                        "exit_code": 124,
+                        "output_tail": "\n".join(output_chunks)[-2000:],
+                        "gate_status": "failed",
+                        "gate_reason": "timeout",
+                    }
+                fallback_output = ((fallback_proc.stdout or "") + "\n" + (fallback_proc.stderr or "")).strip()
+                if fallback_output:
+                    output_chunks.append(fallback_output)
+                if int(fallback_proc.returncode) == 0:
+                    continue
             return {
                 "exit_code": int(proc.returncode),
                 "output_tail": "\n".join(output_chunks)[-2000:],
@@ -2685,6 +2734,104 @@ def _run_explicit_validation_commands(
         "gate_status": "passed",
         "gate_reason": "",
     }
+
+
+def _is_bundle_exec_rspec_command(command: str) -> bool:
+    normalized = _normalize_validation_command(command)
+    return len(normalized) >= 3 and normalized[0] == "bundle" and normalized[1] == "exec" and normalized[2] == "rspec"
+
+
+def _configure_bundle_environment(env: dict[str, str]) -> None:
+    bundle_path = Path(str(env.get("BUNDLE_PATH") or _DEFAULT_BUNDLE_PATH)).expanduser()
+    bundle_app_config = Path(str(env.get("BUNDLE_APP_CONFIG") or _DEFAULT_BUNDLE_APP_CONFIG)).expanduser()
+    try:
+        bundle_path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        bundle_app_config.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    env.setdefault("BUNDLE_PATH", str(bundle_path))
+    env.setdefault("BUNDLE_APP_CONFIG", str(bundle_app_config))
+
+
+def _bootstrap_bundle_runtime(
+    *,
+    workspace: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+    output_chunks: list[str],
+) -> dict[str, Any] | None:
+    bootstrap_command = "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1"
+    output_chunks.append(f"$ {bootstrap_command}")
+    try:
+        proc = subprocess.run(
+            ["/bin/zsh", "-lc", bootstrap_command],
+            cwd=str(workspace),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(30, timeout_seconds),
+        )
+    except FileNotFoundError:
+        return {
+            "exit_code": 127,
+            "output_tail": "(/bin/zsh unavailable for explicit validation commands)",
+            "gate_status": "failed",
+            "gate_reason": "tool_missing",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "exit_code": 124,
+            "output_tail": "\n".join(output_chunks)[-2000:],
+            "gate_status": "failed",
+            "gate_reason": "timeout",
+        }
+    output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if output:
+        output_chunks.append(output)
+    if int(proc.returncode) == 0:
+        return None
+    gate_reason = ""
+    lowered = output.lower()
+    if "command not found" in lowered or "no such file or directory" in lowered:
+        gate_reason = "tool_missing"
+    return {
+        "exit_code": int(proc.returncode),
+        "output_tail": "\n".join(output_chunks)[-2000:],
+        "gate_status": "failed",
+        "gate_reason": gate_reason,
+    }
+
+
+def _bundle_exec_rspec_fallback_command(command: str) -> str:
+    normalized = _normalize_validation_command(command)
+    if not _is_bundle_exec_rspec_command(command):
+        return ""
+    return _bundle_exec_rspec_fallback_command_from_args(list(normalized[3:]))
+
+
+def _looks_like_bundle_exec_rspec_resolution_failure(output: str) -> bool:
+    normalized = str(output or "").strip().lower()
+    if not normalized:
+        return False
+    return "command not found: rspec" in normalized or "no such file or directory -- rspec" in normalized
+
+
+def _bundle_exec_rspec_fallback_command_from_args(args: list[str]) -> str:
+    fallback = [
+        "bundle",
+        "exec",
+        "ruby",
+        "-e",
+        'load Gem.bin_path("rspec-core", "rspec")',
+    ]
+    if args:
+        fallback.append("--")
+        fallback.extend(args)
+    return " ".join(shlex.quote(part) for part in fallback)
 
 
 def _should_use_explicit_validation_commands(
@@ -3013,9 +3160,21 @@ def _run_tests_locally(
 
     final_cmd = _compose_local_command(local_cmd=local_cmd, command=command, strategy=strategy)
     env = os.environ.copy()
+    output_chunks: list[str] = []
     if _is_pytest_style_command(local_cmd):
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(workspace) if not existing else f"{workspace}{os.pathsep}{existing}"
+    bundle_exec_rspec = _is_bundle_exec_rspec_local_command(final_cmd)
+    if bundle_exec_rspec:
+        _configure_bundle_environment(env)
+        bootstrap_result = _bootstrap_bundle_runtime(
+            workspace=workspace,
+            env=env,
+            timeout_seconds=timeout_seconds,
+            output_chunks=output_chunks,
+        )
+        if bootstrap_result is not None:
+            return bootstrap_result
 
     try:
         proc = subprocess.run(
@@ -3043,11 +3202,53 @@ def _run_tests_locally(
             "gate_reason": "tool_missing",
         }
 
-    status = "passed" if int(proc.returncode) == 0 else "failed"
     output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if output:
+        output_chunks.append(output)
+    if int(proc.returncode) != 0 and bundle_exec_rspec and _looks_like_bundle_exec_rspec_resolution_failure(output):
+        fallback_command = _bundle_exec_rspec_fallback_command_from_args(list(final_cmd[3:]))
+        output_chunks.append(
+            "(bundle exec rspec could not resolve executable; retrying via ruby entrypoint fallback)"
+        )
+        output_chunks.append(f"$ {fallback_command}")
+        try:
+            fallback_proc = subprocess.run(
+                ["/bin/zsh", "-lc", fallback_command],
+                cwd=str(workspace),
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=max(30, timeout_seconds),
+            )
+        except FileNotFoundError:
+            return {
+                "exit_code": 127,
+                "output_tail": "(/bin/zsh unavailable for local test gate fallback)",
+                "gate_status": "failed",
+                "gate_reason": "tool_missing",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "exit_code": 124,
+                "output_tail": "\n".join(output_chunks)[-2000:],
+                "gate_status": "failed",
+                "gate_reason": "timeout",
+            }
+        fallback_output = ((fallback_proc.stdout or "") + "\n" + (fallback_proc.stderr or "")).strip()
+        if fallback_output:
+            output_chunks.append(fallback_output)
+        if int(fallback_proc.returncode) == 0:
+            return {
+                "exit_code": 0,
+                "output_tail": "\n".join(output_chunks)[-2000:],
+                "gate_status": "passed",
+                "gate_reason": "",
+            }
+    status = "passed" if int(proc.returncode) == 0 else "failed"
     return {
         "exit_code": int(proc.returncode),
-        "output_tail": output[-2000:],
+        "output_tail": "\n".join(output_chunks)[-2000:],
         "gate_status": status,
         "gate_reason": "",
     }
@@ -3082,6 +3283,10 @@ def _is_pytest_style_command(command: list[str]) -> bool:
     if _starts_with_any(command, ["pytest"], ["py.test"]):
         return True
     return bool(command) and command[0].startswith("python") and "pytest" in command
+
+
+def _is_bundle_exec_rspec_local_command(command: list[str]) -> bool:
+    return len(command) >= 3 and command[0] == "bundle" and command[1] == "exec" and command[2] == "rspec"
 
 
 def _run_tests_in_docker(
@@ -3961,7 +4166,11 @@ _LOCKFILE_GROUPS = {
     "package-lock.json": {"package.json", "dependency", "dependencies", "lockfile"},
     "pnpm-lock.yaml": {"package.json", "dependency", "dependencies", "lockfile"},
     "yarn.lock": {"package.json", "dependency", "dependencies", "lockfile"},
+    "gemfile.lock": {"gemfile", "dependency", "dependencies", "lockfile"},
 }
+_RUBY_BUNDLE_BINSTUB_FILES = {"rspec"}
+_DEFAULT_BUNDLE_PATH = str((Path.home() / ".flow-healer" / "bundle").resolve())
+_DEFAULT_BUNDLE_APP_CONFIG = str((Path.home() / ".flow-healer" / "bundle-config").resolve())
 
 
 def _stage_workspace_changes(
@@ -4249,9 +4458,14 @@ def _is_tolerated_runtime_artifact(path: str, *, language: str) -> bool:
     effective_language = str(language or "").strip().lower()
     lockfile_name = PurePosixPath(normalized_lower).name
     if lockfile_name in _LOCKFILE_GROUPS:
-        # npm can regenerate package-lock.json during validation even when lockfile edits
-        # are not part of the requested patch. Treat it as tolerated runtime noise.
-        return effective_language == "node" and lockfile_name == "package-lock.json"
+        # Validation tools can regenerate lockfiles even when lockfile edits are not part
+        # of the requested patch. Treat these as tolerated runtime noise while unstaged.
+        return (
+            (effective_language == "node" and lockfile_name == "package-lock.json")
+            or (effective_language == "ruby" and lockfile_name == "gemfile.lock")
+        )
+    if _is_ruby_bundle_binstub_path(normalized, language=effective_language):
+        return True
 
     parts = _normalized_path_parts(normalized)
     filename = parts[-1] if parts else normalized_lower
@@ -4384,6 +4598,8 @@ def _should_exclude_generated_artifact(
             issue_body=issue_body,
             task_spec=task_spec,
         )
+    if _is_ruby_bundle_binstub_path(normalized, language=language):
+        return True
 
     parts = _normalized_path_parts(normalized)
     filename = parts[-1] if parts else normalized_lower
@@ -4411,6 +4627,15 @@ def _normalized_path_parts(path: str) -> list[str]:
     if not normalized:
         return []
     return [part.lower() for part in normalized.split("/") if part]
+
+
+def _is_ruby_bundle_binstub_path(path: str, *, language: str) -> bool:
+    if str(language or "").strip().lower() != "ruby":
+        return False
+    parts = _normalized_path_parts(path)
+    if len(parts) < 2:
+        return False
+    return parts[-2] == "bin" and parts[-1] in _RUBY_BUNDLE_BINSTUB_FILES
 
 
 def _is_explicit_output_target(path: str, task_spec: HealerTaskSpec | None) -> bool:

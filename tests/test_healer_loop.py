@@ -116,6 +116,9 @@ def _make_loop(store, **overrides):
         healer_infra_dlq_threshold=overrides.get("healer_infra_dlq_threshold", 8),
         healer_infra_dlq_cooldown_seconds=overrides.get("healer_infra_dlq_cooldown_seconds", 3600),
         healer_housekeeping_interval_seconds=overrides.get("healer_housekeeping_interval_seconds", 300),
+        healer_processing_pr_maintenance_interval_seconds=overrides.get(
+            "healer_processing_pr_maintenance_interval_seconds", 120
+        ),
         healer_blocked_label_repair_interval_seconds=overrides.get(
             "healer_blocked_label_repair_interval_seconds", 600
         ),
@@ -186,6 +189,8 @@ def _make_loop(store, **overrides):
     loop._sticky_runtime_status = overrides.get("_sticky_runtime_status", "")
     loop._sticky_runtime_issue_id = overrides.get("_sticky_runtime_issue_id", "")
     loop._last_harness_canary_at = overrides.get("_last_harness_canary_at", 0.0)
+    loop._last_processing_pr_maintenance_at = overrides.get("_last_processing_pr_maintenance_at", 0.0)
+    loop._processing_pr_maintenance_lock = threading.Lock()
     return loop
 
 
@@ -1287,6 +1292,100 @@ def test_process_claimed_issue_requeues_when_language_preflight_fails(tmp_path):
     assert attempts == []
     loop.runner.run_attempt.assert_not_called()
     loop.workspace_manager.ensure_workspace.assert_not_called()
+
+
+def test_process_claimed_issue_forces_preflight_refresh_for_app_execution_roots(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5041a",
+        repo="owner/repo",
+        title="Ruby app issue",
+        body="Validation: cd e2e-apps/ruby-rails-web && bundle exec rspec",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    (tmp_path / "e2e-apps" / "ruby-rails-web").mkdir(parents=True)
+    loop.repo_path = tmp_path
+    loop.tracker.get_issue.return_value = {"issue_id": "5041a", "state": "open", "labels": ["healer:ready"]}
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.resolve_execution.return_value = SimpleNamespace(
+        language_effective="ruby",
+        language_detected="ruby",
+        execution_root="e2e-apps/ruby-rails-web",
+    )
+    loop.preflight.ensure_language_ready.return_value = PreflightReport(
+        language="ruby",
+        execution_root="e2e-apps/ruby-rails-web",
+        gate_mode="docker_only",
+        status="failed",
+        failure_class="validation_failed",
+        summary="Preflight validation failed for ruby in e2e-apps/ruby-rails-web.",
+        output_tail="bundle check failed",
+        checked_at="2026-03-06 20:00:00",
+        test_summary={"failed_tests": 1, "docker_full_status": "failed"},
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    loop.preflight.ensure_language_ready.assert_called_once_with(
+        language="ruby",
+        execution_root="e2e-apps/ruby-rails-web",
+        force=True,
+    )
+    loop.runner.run_attempt.assert_not_called()
+
+
+def test_process_claimed_issue_uses_execution_root_language_when_task_language_missing(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5041b",
+        repo="owner/repo",
+        title="Ruby app issue missing language hints",
+        body="Validation: cd e2e-apps/ruby-rails-web && bundle exec rspec",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store)
+    (tmp_path / "e2e-apps" / "ruby-rails-web").mkdir(parents=True)
+    loop.repo_path = tmp_path
+    loop.tracker.get_issue.return_value = {"issue_id": "5041b", "state": "open", "labels": ["healer:ready"]}
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.resolve_execution.return_value = SimpleNamespace(
+        language_effective="",
+        language_detected="",
+        execution_root="e2e-apps/ruby-rails-web",
+    )
+    loop.preflight.ensure_language_ready.return_value = PreflightReport(
+        language="ruby",
+        execution_root="e2e-apps/ruby-rails-web",
+        gate_mode="docker_only",
+        status="failed",
+        failure_class="validation_failed",
+        summary="Preflight validation failed for ruby in e2e-apps/ruby-rails-web.",
+        output_tail="bundle exec rspec failed",
+        checked_at="2026-03-06 20:00:00",
+        test_summary={"failed_tests": 1},
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    loop.preflight.ensure_language_ready.assert_called_once_with(
+        language="ruby",
+        execution_root="e2e-apps/ruby-rails-web",
+        force=True,
+    )
+    loop.runner.run_attempt.assert_not_called()
 
 
 def test_process_claimed_issue_requeues_when_workspace_is_corrupt_before_attempt_start(tmp_path):
@@ -2871,6 +2970,79 @@ def test_auto_merge_open_pr_refreshes_stale_pending_ci_before_merging(tmp_path):
     loop.tracker.merge_pr.assert_called_once_with(pr_number=2301, merge_method="squash")
 
 
+def test_maybe_maintain_open_prs_during_processing_runs_reconcile_and_pr_actions(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60131c",
+        repo="owner/repo",
+        title="Issue 60131c",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60131c",
+        state="pr_open",
+        pr_number=2310,
+        pr_state="open",
+        ci_status_summary={"overall_state": "pending", "pending_contexts": ["CI"]},
+    )
+
+    loop = _make_loop(store)
+    loop._reconcile_pr_outcomes = MagicMock()
+    loop._requeue_ci_failed_prs = MagicMock()
+    loop._auto_approve_open_prs = MagicMock()
+    loop._auto_merge_open_prs = MagicMock(return_value=0)
+    loop.tracker.viewer_login.return_value = "healer-service"
+
+    loop._maybe_maintain_open_prs_during_processing(issue_id="60131c", force=True)
+
+    loop._reconcile_pr_outcomes.assert_called_once()
+    _, reconcile_kwargs = loop._reconcile_pr_outcomes.call_args
+    assert reconcile_kwargs["force_refresh"] is True
+    loop._requeue_ci_failed_prs.assert_called_once()
+    loop._auto_approve_open_prs.assert_called_once()
+    loop._auto_merge_open_prs.assert_called_once()
+
+
+def test_maybe_maintain_open_prs_during_processing_respects_interval(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60131d",
+        repo="owner/repo",
+        title="Issue 60131d",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60131d",
+        state="pr_open",
+        pr_number=2311,
+        pr_state="open",
+        ci_status_summary={"overall_state": "pending", "pending_contexts": ["CI"]},
+    )
+
+    loop = _make_loop(
+        store,
+        healer_processing_pr_maintenance_interval_seconds=3600,
+    )
+    loop._reconcile_pr_outcomes = MagicMock()
+    loop._requeue_ci_failed_prs = MagicMock()
+    loop._auto_approve_open_prs = MagicMock()
+    loop._auto_merge_open_prs = MagicMock(return_value=0)
+    loop.tracker.viewer_login.return_value = "healer-service"
+
+    loop._maybe_maintain_open_prs_during_processing(issue_id="60131d")
+    loop._maybe_maintain_open_prs_during_processing(issue_id="60131d")
+
+    loop._reconcile_pr_outcomes.assert_called_once()
+
+
 def test_auto_merge_open_pr_skips_when_local_promotion_is_blocked(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -4024,6 +4196,34 @@ def test_lease_heartbeat_renews_issue_lease(tmp_path):
     assert lease_lost.is_set() is False
 
 
+def test_lease_heartbeat_runs_open_pr_maintenance_hook(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    class _StopAfterOne:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _interval: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    stop_event = _StopAfterOne()
+    lease_lost = threading.Event()
+    loop.store = MagicMock()
+    loop.dispatcher = MagicMock()
+    loop.dispatcher.lease_seconds = 180
+    loop.worker_id = "worker-a"
+    loop.store.renew_healer_issue_lease.return_value = True
+    loop._maybe_maintain_open_prs_during_processing = MagicMock()
+
+    loop._lease_heartbeat("703", stop_event, lease_lost)  # type: ignore[arg-type]
+
+    loop._maybe_maintain_open_prs_during_processing.assert_called_once_with(issue_id="703")
+    assert lease_lost.is_set() is False
+
+
 def test_lease_heartbeat_sets_event_when_renewal_fails(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -4508,6 +4708,51 @@ def test_swarm_infra_pause_strategy_with_sql_path_resolution_stays_issue_scoped(
 
     assert failure_class == "swarm_quarantine"
     assert "Requested SQL assertion path does not exist" in failure_reason
+
+
+def test_swarm_quarantine_scope_limited_redirect_failure_stays_issue_scoped(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    outcome = SwarmRecoveryOutcome(
+        recovered=False,
+        strategy="quarantine",
+        summary=(
+            "The failing Ruby Rails request spec is blocked by redirect header serialization outside the issue's "
+            "allowed edit set. The staged route change for GET / should not be promoted, but a safe autonomous "
+            "fix cannot be completed by editing only the named dashboard files."
+        ),
+        analyzer_results=(),
+        plan=SwarmRecoveryPlan(
+            strategy="quarantine",
+            summary=(
+                "The failing Ruby Rails request spec is blocked by redirect header serialization outside the issue's "
+                "allowed edit set. The staged route change for GET / should not be promoted, but a safe autonomous "
+                "fix cannot be completed by editing only the named dashboard files."
+            ),
+            root_cause="redirect_location_contract_mismatch_outside_allowed_scope",
+            edit_scope=(
+                "e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",
+                "e2e-apps/ruby-rails-web/config/routes.rb",
+            ),
+            targeted_tests=("cd e2e-apps/ruby-rails-web && bundle exec rspec",),
+            validation_focus=(),
+        ),
+        failure_class="tests_failed",
+        failure_reason=(
+            "The failing Ruby Rails request spec is blocked by redirect header serialization outside the issue's "
+            "allowed edit set."
+        ),
+    )
+
+    failure_class, failure_reason = loop._swarm_failure_override(
+        base_failure_class="tests_failed",
+        base_failure_reason="Failed tests=1 exceeds cap=0",
+        swarm_outcome=outcome,
+    )
+
+    assert failure_class == "swarm_quarantine"
+    assert "allowed edit set" in failure_reason
 
 
 def test_backoff_or_fail_no_patch_does_not_exhaust_retry_budget(tmp_path):

@@ -949,7 +949,11 @@ class SQLiteStore:
         conn = self._connect()
         with self._lock:
             rows = conn.execute(
-                "SELECT * FROM healer_attempts WHERE issue_id = ? ORDER BY started_at DESC LIMIT ?",
+                (
+                    "SELECT * FROM healer_attempts "
+                    "WHERE issue_id = ? "
+                    "ORDER BY attempt_no DESC, started_at DESC, rowid DESC LIMIT ?"
+                ),
                 (issue_id, int(limit)),
             ).fetchall()
         return [attempt for row in rows if (attempt := self._decode_healer_attempt_row(self._row_to_dict(row))) is not None]
@@ -957,7 +961,10 @@ class SQLiteStore:
     def list_recent_healer_attempts(self, *, limit: int = 50) -> list[dict[str, Any]]:
         conn = self._connect()
         with self._lock:
-            rows = conn.execute("SELECT * FROM healer_attempts ORDER BY started_at DESC LIMIT ?", (int(limit),)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM healer_attempts ORDER BY started_at DESC, rowid DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
         return [attempt for row in rows if (attempt := self._decode_healer_attempt_row(self._row_to_dict(row))) is not None]
 
     def list_healer_attempts_in_window(
@@ -978,7 +985,7 @@ class SQLiteStore:
                     SELECT * FROM healer_attempts
                     WHERE started_at >= datetime('now', ?)
                       AND started_at < datetime('now', ?)
-                    ORDER BY started_at DESC
+                    ORDER BY started_at DESC, rowid DESC
                     LIMIT ?
                     """,
                     (f"-{start_days} days", f"-{offset} days", int(limit)),
@@ -988,7 +995,7 @@ class SQLiteStore:
                     """
                     SELECT * FROM healer_attempts
                     WHERE started_at >= datetime('now', ?)
-                    ORDER BY started_at DESC
+                    ORDER BY started_at DESC, rowid DESC
                     LIMIT ?
                     """,
                     (f"-{start_days} days", int(limit)),

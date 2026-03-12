@@ -21,7 +21,10 @@ flow-healer start --once
 - [usage.md](usage.md): CLI flows and examples
 - [usage.md - Failure Recovery](usage.md#failure-recovery): handling `no_patch` and `verifier_failed` retries
 - [plans/2026-03-12-horizontal-mastery-roadmap.md](plans/2026-03-12-horizontal-mastery-roadmap.md): master checklist for the horizontal mastery push
+- [plans/2026-03-12-continuous-improvement-loop.md](plans/2026-03-12-continuous-improvement-loop.md): always-on bugfix loop charter, progress score, and running execution log
 - [plans/2026-03-12-mastery-weekly-note-01.md](plans/2026-03-12-mastery-weekly-note-01.md): first fixed-pack weekly note for mastery scorecard deltas
+- [plans/2026-03-12-ralph-prd-horizontal-mastery.md](plans/2026-03-12-ralph-prd-horizontal-mastery.md): PRD used to drive Ralph autonomous completion loop
+- [plans/2026-03-12-java-go-rust-toolchain-smoke-followup.md](plans/2026-03-12-java-go-rust-toolchain-smoke-followup.md): native toolchain smoke proof and follow-up automation plan
 - [app-target-onboarding.md](app-target-onboarding.md): checklist for adding a new browser-backed app target or runtime profile
 - [fixture-profile-guidance.md](fixture-profile-guidance.md): deterministic fixture and auth-state conventions for app-backed repro flows
 - [architecture.md](architecture.md): control loop and module map

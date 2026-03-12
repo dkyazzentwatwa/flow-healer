@@ -9,6 +9,7 @@ from flow_healer.healer_preflight import (
     _probe_node_toolchain,
     _preflight_validation_commands,
     execution_root_for_language,
+    language_for_execution_root,
     is_stably_ready,
     list_cached_preflight_reports,
     preflight_readiness_assessment,
@@ -184,6 +185,17 @@ def test_execution_root_for_language_returns_new_smoke_roots() -> None:
     assert execution_root_for_language("rust") == "e2e-smoke/rust"
     assert execution_root_for_language("java_gradle") == "e2e-smoke/java-gradle"
     assert execution_root_for_language("ruby") == "e2e-smoke/ruby"
+
+
+def test_language_for_execution_root_returns_supported_languages() -> None:
+    assert language_for_execution_root("e2e-smoke/python") == "python"
+    assert language_for_execution_root("e2e-apps/ruby-rails-web") == "ruby"
+    assert language_for_execution_root("e2e-apps/java-spring-web") == "java_gradle"
+
+
+def test_language_for_execution_root_returns_empty_for_unknown_root() -> None:
+    assert language_for_execution_root("e2e-apps/unknown") == ""
+    assert language_for_execution_root("") == ""
 
 
 def test_cached_preflight_reports_include_new_smoke_and_app_targets(tmp_path: Path) -> None:

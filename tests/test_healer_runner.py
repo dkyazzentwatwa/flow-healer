@@ -18,12 +18,13 @@ from flow_healer.healer_runner import (
     _looks_like_unified_diff,
     _normalize_test_gate_mode,
     _run_test_gates,
+    _run_explicit_validation_commands,
     _run_tests_in_docker,
     _run_tests_locally,
     _run_connector_turn,
     _stage_workspace_changes,
     _task_execution_instructions,
-    )
+)
 from flow_healer.protocols import ConnectorTurnResult
 from flow_healer.language_strategies import LanguageStrategy, get_strategy
 from flow_healer.healer_task_spec import HealerTaskSpec, compile_task_spec
@@ -431,6 +432,67 @@ def test_run_tests_locally_normalizes_pytest_command(monkeypatch, tmp_path):
     assert seen["cwd"] == str(tmp_path)
     assert str(tmp_path) in seen["env"]["PYTHONPATH"]
     assert summary["gate_status"] == "passed"
+
+
+def test_run_tests_locally_bootstraps_bundle_for_rspec(monkeypatch, tmp_path):
+    calls: list[object] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["/bin/zsh", "-lc", "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="bundle ok", stderr="")
+        if cmd == ["bundle", "exec", "rspec"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="rspec ok", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_locally(
+        tmp_path,
+        ["bundle", "exec", "rspec"],
+        30,
+        strategy=get_strategy("ruby"),
+        local_gate_policy="auto",
+    )
+
+    assert calls[0] == ["/bin/zsh", "-lc", "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1"]
+    assert calls[1] == ["bundle", "exec", "rspec"]
+    assert summary["gate_status"] == "passed"
+
+
+def test_run_tests_locally_falls_back_when_bundle_exec_rspec_missing(monkeypatch, tmp_path):
+    calls: list[object] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["/bin/zsh", "-lc", "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["bundle", "exec", "rspec"]:
+            return subprocess.CompletedProcess(cmd, 127, stdout="", stderr="bundler: command not found: rspec")
+        if (
+            isinstance(cmd, list)
+            and len(cmd) == 3
+            and cmd[0] == "/bin/zsh"
+            and cmd[1] == "-lc"
+            and str(cmd[2]).startswith("bundle exec ruby -e")
+        ):
+            return subprocess.CompletedProcess(cmd, 0, stdout="fallback ok", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    summary = _run_tests_locally(
+        tmp_path,
+        ["bundle", "exec", "rspec"],
+        30,
+        strategy=get_strategy("ruby"),
+        local_gate_policy="auto",
+    )
+
+    assert calls[0] == ["/bin/zsh", "-lc", "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1"]
+    assert calls[1] == ["bundle", "exec", "rspec"]
+    assert summary["gate_status"] == "passed"
+    assert "bundle exec ruby -e" in summary["output_tail"]
 
 
 def test_run_tests_in_docker_uses_posix_shell(monkeypatch, tmp_path):
@@ -966,6 +1028,67 @@ def test_run_test_gates_preserves_python3_pytest_command_with_execution_root(mon
     assert summary["validation_commands"] == ["python3 -m pytest -q"]
 
 
+def test_run_explicit_validation_commands_bootstraps_bundle_for_rspec(monkeypatch, tmp_path):
+    shell_commands: list[str] = []
+    env_snapshots: list[dict[str, str]] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        shell_command = command[2]
+        shell_commands.append(shell_command)
+        env_snapshots.append(dict(kwargs.get("env") or {}))
+        if shell_command.startswith("bundle check"):
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if shell_command == "bundle exec rspec":
+            return subprocess.CompletedProcess(command, 0, "2 examples, 0 failures", "")
+        raise AssertionError(f"Unexpected command: {shell_command}")
+
+    monkeypatch.setattr("flow_healer.healer_runner.subprocess.run", fake_run)
+
+    result = _run_explicit_validation_commands(
+        tmp_path,
+        commands=("bundle exec rspec",),
+        timeout_seconds=30,
+    )
+
+    assert result["gate_status"] == "passed"
+    assert shell_commands == [
+        "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1",
+        "bundle exec rspec",
+    ]
+    assert any(snapshot.get("BUNDLE_PATH") for snapshot in env_snapshots)
+    assert any(snapshot.get("BUNDLE_APP_CONFIG") for snapshot in env_snapshots)
+
+
+def test_run_explicit_validation_commands_falls_back_when_bundle_exec_rspec_missing(monkeypatch, tmp_path):
+    shell_commands: list[str] = []
+
+    def fake_run(*args, **kwargs):
+        command = args[0]
+        shell_command = command[2]
+        shell_commands.append(shell_command)
+        if shell_command.startswith("bundle check"):
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if shell_command == "bundle exec rspec":
+            return subprocess.CompletedProcess(command, 127, "", "bundler: command not found: rspec")
+        if shell_command.startswith("bundle exec ruby -e"):
+            return subprocess.CompletedProcess(command, 0, "2 examples, 0 failures", "")
+        raise AssertionError(f"Unexpected command: {shell_command}")
+
+    monkeypatch.setattr("flow_healer.healer_runner.subprocess.run", fake_run)
+
+    result = _run_explicit_validation_commands(
+        tmp_path,
+        commands=("bundle exec rspec",),
+        timeout_seconds=30,
+    )
+
+    assert result["gate_status"] == "passed"
+    assert shell_commands[0] == "bundle check >/dev/null 2>&1 || bundle install --jobs 2 --retry 1"
+    assert shell_commands[1] == "bundle exec rspec"
+    assert shell_commands[2].startswith("bundle exec ruby -e")
+
+
 def test_stage_workspace_changes_excludes_python_packaging_artifacts(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -1019,6 +1142,110 @@ def test_stage_workspace_changes_allows_explicit_lockfile_targets(tmp_path):
 
     assert changed is True
     assert _changed_paths(workspace) == ["package-lock.json"]
+
+
+def test_stage_workspace_changes_excludes_ruby_lockfile_when_only_validation_mentions_bundle(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "app" / "controllers").mkdir(parents=True)
+    (workspace / "app" / "controllers" / "dashboard_controller.rb").write_text(
+        "class DashboardController\nend\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (workspace / "app" / "controllers" / "dashboard_controller.rb").write_text(
+        "class DashboardController\n  def show; end\nend\n",
+        encoding="utf-8",
+    )
+    (workspace / "Gemfile.lock").write_text("GEM\n  specs:\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Ruby app fix",
+        issue_body="Validation:\n- cd e2e-apps/ruby-rails-web && bundle exec rspec\n",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        language="ruby",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["app/controllers/dashboard_controller.rb"]
+
+
+def test_stage_workspace_changes_allows_ruby_lockfile_when_explicitly_requested(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "Gemfile").write_text('source "https://rubygems.org"\n', encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (workspace / "Gemfile.lock").write_text("GEM\n  specs:\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Update Gemfile.lock",
+        issue_body="Refresh Gemfile.lock after dependency updates.",
+        task_spec=HealerTaskSpec(
+            task_kind="build",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        language="ruby",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["Gemfile.lock"]
+
+
+def test_stage_workspace_changes_excludes_ruby_bundle_binstub_artifacts(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "app" / "controllers").mkdir(parents=True)
+    (workspace / "app" / "controllers" / "dashboard_controller.rb").write_text(
+        "class DashboardController\nend\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    (workspace / "app" / "controllers" / "dashboard_controller.rb").write_text(
+        "class DashboardController\n  def show; end\nend\n",
+        encoding="utf-8",
+    )
+    (workspace / "bin").mkdir()
+    (workspace / "bin" / "rspec").write_text("#!/usr/bin/env ruby\n", encoding="utf-8")
+
+    changed = _stage_workspace_changes(
+        workspace,
+        issue_title="Ruby app fix",
+        issue_body="Validation:\n- cd e2e-apps/ruby-rails-web && bundle exec rspec\n",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        language="ruby",
+    )
+
+    assert changed is True
+    assert _changed_paths(workspace) == ["app/controllers/dashboard_controller.rb"]
 
 
 def test_stage_workspace_changes_excludes_swift_build_artifacts(tmp_path):
@@ -1729,6 +1956,76 @@ def test_run_attempt_recleans_regenerated_lockfile_contamination(monkeypatch, tm
     assert "package-lock.json" in result.workspace_status["cleaned_paths"]
     assert validate_calls["count"] >= 2
     assert "package-lock.json" not in _changed_paths(workspace)
+
+
+def test_run_attempt_recleans_regenerated_ruby_lockfile_contamination(monkeypatch, tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "Gemfile").write_text("source 'https://rubygems.org'\n", encoding="utf-8")
+    (workspace / "app.rb").write_text("def add(a, b)\n  a - b\nend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/app.rb b/app.rb\n"
+        "--- a/app.rb\n"
+        "+++ b/app.rb\n"
+        "@@ -1,3 +1,3 @@\n"
+        " def add(a, b)\n"
+        "-  a - b\n"
+        "+  a + b\n"
+        " end\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    runner = HealerRunner(connector, timeout_seconds=30, test_gate_mode="local_then_docker")
+
+    (workspace / "Gemfile.lock").write_text("GEM\n  specs:\n", encoding="utf-8")
+    validate_calls = {"count": 0}
+
+    def fake_validate_workspace(*args, **kwargs):
+        validate_calls["count"] += 1
+        (workspace / "Gemfile.lock").write_text(
+            f"GEM\n  specs:\n    regenerated_{validate_calls['count']}\n",
+            encoding="utf-8",
+        )
+        return {
+            "mode": "local_then_docker",
+            "failed_tests": 0,
+            "targeted_tests": [],
+            "local_full_exit_code": 0,
+            "local_full_output_tail": "ok",
+        }
+
+    monkeypatch.setattr(runner, "validate_workspace", fake_validate_workspace)
+
+    result = runner.run_attempt(
+        issue_id="lockfix-ruby-1",
+        issue_title="Fix ruby add helper",
+        issue_body="Update app.rb only.",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=(),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=20,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert result.failure_class == ""
+    assert result.workspace_status["cleanup_cycles_used"] >= 1
+    assert "Gemfile.lock" in result.workspace_status["cleaned_paths"]
+    assert validate_calls["count"] >= 2
+    assert "Gemfile.lock" not in _changed_paths(workspace)
 
 
 def test_run_attempt_embeds_input_context_file_contents_in_prompt(monkeypatch, tmp_path):

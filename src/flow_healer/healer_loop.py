@@ -28,6 +28,7 @@ from .healer_locks import canonicalize_lock_keys, diff_paths_to_lock_keys, predi
 from .healer_memory import HealerMemoryService
 from .healer_preflight import (
     HealerPreflight,
+    language_for_execution_root,
     execution_root_for_language,
     preflight_report_to_test_summary,
 )
@@ -397,6 +398,8 @@ class AutonomousHealerLoop:
         self.preflight = self.preflight_by_backend[primary_backend]
         self._last_housekeeping_at = 0.0
         self._last_blocked_label_repair_at = 0.0
+        self._last_processing_pr_maintenance_at = 0.0
+        self._processing_pr_maintenance_lock = threading.Lock()
         self._sticky_runtime_status = ""
         self._sticky_runtime_issue_id = ""
 
@@ -614,6 +617,65 @@ class AutonomousHealerLoop:
             return None
         self._last_housekeeping_at = now
         return self.reconciler.reconcile()
+
+    def _maybe_maintain_open_prs_during_processing(self, *, issue_id: str = "", force: bool = False) -> None:
+        if not bool(getattr(self.tracker, "enabled", False)):
+            return
+        interval = max(
+            30.0,
+            float(getattr(self.settings, "healer_processing_pr_maintenance_interval_seconds", 120.0)),
+        )
+        now = time.monotonic()
+        last_maintenance = float(getattr(self, "_last_processing_pr_maintenance_at", 0.0))
+        if not force and last_maintenance and (now - last_maintenance) < interval:
+            return
+        if not self._processing_pr_maintenance_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_processing_pr_maintenance_at = now
+            active_pr_rows = self._list_active_pr_rows(include_blocked=True)
+            open_pr_rows = [
+                row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
+            ]
+            if not open_pr_rows:
+                return
+
+            details_cache: dict[int, PullRequestDetails | None] = {}
+            viewer_login = self.tracker.viewer_login().lower()
+            self._reconcile_pr_outcomes(
+                active_prs=active_pr_rows,
+                details_cache=details_cache,
+                force_refresh=True,
+            )
+
+            active_pr_rows = self._list_active_pr_rows(include_blocked=True)
+            open_pr_rows = [
+                row for row in active_pr_rows if str(row.get("state") or "").strip().lower() == "pr_open"
+            ]
+            if not open_pr_rows:
+                return
+
+            self._requeue_ci_failed_prs(active_prs=open_pr_rows)
+            self._auto_approve_open_prs(
+                active_prs=open_pr_rows,
+                details_cache=details_cache,
+                viewer_login=viewer_login,
+            )
+            merged = self._auto_merge_open_prs(
+                active_prs=open_pr_rows,
+                details_cache=details_cache,
+            )
+            if merged:
+                details_cache = {}
+                self._reconcile_pr_outcomes(details_cache=details_cache, force_refresh=True)
+        except Exception as exc:
+            logger.warning(
+                "Open-PR maintenance during issue #%s processing failed: %s",
+                issue_id or "-",
+                exc,
+            )
+        finally:
+            self._processing_pr_maintenance_lock.release()
 
     def _record_worker_heartbeat(
         self,
@@ -1661,6 +1723,12 @@ class AutonomousHealerLoop:
             "sql",
             "table",
             "column",
+            "allowed edit set",
+            "outside the issue's allowed",
+            "outside the allowed edit set",
+            "editing only the named",
+            "editing only the named dashboard files",
+            "out-of-scope",
         )
         if any(token in haystack for token in non_infra_tokens):
             return False
@@ -1682,7 +1750,6 @@ class AutonomousHealerLoop:
             "environment",
             "infra",
             "network",
-            "runtime",
             "stack unavailable",
         )
         return any(token in haystack for token in infra_tokens)
@@ -3403,7 +3470,12 @@ class AutonomousHealerLoop:
                     reason=failure_reason,
                 )
                 return
-            detected_language = resolved_execution.language_effective or resolved_execution.language_detected or ""
+            detected_language = (
+                resolved_execution.language_effective
+                or resolved_execution.language_detected
+                or language_for_execution_root(resolved_execution.execution_root)
+                or ""
+            )
             preflight_root_candidate = _sanitize_execution_root(
                 execution_root=(
                     resolved_execution.execution_root
@@ -3419,9 +3491,11 @@ class AutonomousHealerLoop:
                 self.repo_path / preflight_execution_root
             ).is_dir()
             if detected_language and should_run_preflight:
+                force_preflight_refresh = preflight_execution_root.startswith("e2e-apps/")
                 report = selected_preflight.ensure_language_ready(
                     language=detected_language,
                     execution_root=preflight_execution_root,
+                    force=force_preflight_refresh,
                 )
                 if report.status != "ready":
                     failure_class = "preflight_failed"
@@ -4608,6 +4682,7 @@ class AutonomousHealerLoop:
                 lease_lost.set()
                 return
             self._record_worker_heartbeat(status="processing", issue_id=issue_id)
+            self._maybe_maintain_open_prs_during_processing(issue_id=issue_id)
 
     def _backoff_or_fail(
         self,

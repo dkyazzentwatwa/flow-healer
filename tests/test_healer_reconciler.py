@@ -82,6 +82,47 @@ def test_reconcile_interrupts_running_attempt_for_inactive_issue(tmp_path) -> No
     assert attempts[0]["failure_class"] == "interrupted"
 
 
+def test_list_healer_attempts_prefers_attempt_no_when_started_at_ties(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="2b",
+        repo="owner/repo",
+        title="Issue 2b",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_old",
+        issue_id="2b",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_new",
+        issue_id="2b",
+        attempt_no=2,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    with store._lock:
+        conn = store._connect()
+        conn.execute(
+            "UPDATE healer_attempts SET started_at = ? WHERE issue_id = ?",
+            ("2026-03-12 10:00:00", "2b"),
+        )
+        conn.commit()
+
+    attempts = store.list_healer_attempts(issue_id="2b", limit=5)
+
+    assert [attempt["attempt_id"] for attempt in attempts[:2]] == ["ha_new", "ha_old"]
+
+
 def test_reconcile_interrupts_superseded_running_attempt(tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()

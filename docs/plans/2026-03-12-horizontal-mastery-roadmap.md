@@ -294,6 +294,17 @@ The first recorded weekly note for this pack is:
 
 - [2026-03-12-mastery-weekly-note-01.md](/Users/cypher-server/Documents/code/flow-healer/docs/plans/2026-03-12-mastery-weekly-note-01.md)
 
+Latest fixed-pack replay evidence (`2026-03-12`):
+
+- snapshot `run03a`: `/tmp/mastery-pack-snapshot-2026-03-12-run03a.json`
+- compare `run02a -> run03a`:
+  - markdown: `/tmp/mastery-pack-comparison-2026-03-12-run02a-run03a.md`
+  - json: `/tmp/mastery-pack-comparison-2026-03-12-run02a-run03a.json`
+- notable deltas:
+  - `#928` advanced from failed/quarantined to `pr_open` (`PR #940`) after Ruby gate hardening
+  - `#930` and `#931` now have execution-root metadata populated in the latest snapshot
+  - markdown drift rendering now preserves numeric zeroes (for example `retry_count=0`) instead of collapsing to `-`
+
 ### Fixed Weekly Issue Pack
 
 - [x] Define a fixed issue pack across the mastery cohort
