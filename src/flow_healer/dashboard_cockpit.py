@@ -961,3 +961,37 @@ def _decorate_artifact_link(link: dict[str, Any]) -> dict[str, Any]:
     else:
         row["web_href"] = ""
     return row
+
+
+def _dashboard_bootstrap_payload(config: AppConfig, notice: str) -> dict[str, Any]:
+    return {
+        "notice": str(notice or ""),
+        "authMode": str(getattr(config.control.web, "auth_mode", "none") or "none"),
+        "authTokenEnv": str(getattr(config.control.web, "auth_token_env", "FLOW_HEALER_WEB_TOKEN") or "FLOW_HEALER_WEB_TOKEN"),
+        "refreshMs": 5000,
+        "generatedAt": _now_label(),
+    }
+
+
+def render_dashboard(config: AppConfig, service: FlowHealerService, notice: str) -> str:
+    del service
+    bootstrap = json.dumps(_dashboard_bootstrap_payload(config, notice), default=str).replace("</", "<\\/")
+    return f"""
+<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <meta name='color-scheme' content='dark light'>
+  <title>Flow Healer Control Center</title>
+  <link rel='stylesheet' href='/assets/dashboard.css'>
+</head>
+<body>
+  <div id='root'></div>
+  <script>
+    window.__FLOW_HEALER_BOOTSTRAP__ = {bootstrap};
+  </script>
+  <script type='module' src='/assets/dashboard.js'></script>
+</body>
+</html>
+"""

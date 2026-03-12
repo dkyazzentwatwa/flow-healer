@@ -108,6 +108,13 @@ class DashboardServer:
                 if parsed.path == "/api/overview":
                     self._write_json(_overview_payload(server.config, server.service))
                     return
+                if parsed.path.startswith("/assets/"):
+                    asset_path = _resolve_dashboard_static_path(parsed.path)
+                    if asset_path is None or not asset_path.exists() or not asset_path.is_file():
+                        self.send_error(404, "Not Found")
+                        return
+                    self._write_file(asset_path)
+                    return
                 if parsed.path == "/artifact":
                     artifact_path = _resolve_dashboard_artifact_path(
                         server.config,
@@ -1906,6 +1913,22 @@ def _resolve_dashboard_artifact_path(config: AppConfig, raw_path: str) -> Path |
         except ValueError:
             continue
     return None
+
+
+def _resolve_dashboard_static_path(raw_path: str) -> Path | None:
+    path_text = str(raw_path or "").strip()
+    if not path_text.startswith("/assets/"):
+        return None
+    relative = path_text.lstrip("/")
+    if not relative:
+        return None
+    static_root = Path(__file__).resolve().parent / "dashboard_static"
+    candidate = (static_root / relative).resolve()
+    try:
+        candidate.relative_to(static_root.resolve())
+    except ValueError:
+        return None
+    return candidate
 
 
 def _allowed_dashboard_artifact_roots(config: AppConfig) -> list[Path]:
