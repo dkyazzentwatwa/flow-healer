@@ -1,6 +1,7 @@
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -191,3 +192,52 @@ def test_app_runtime_profile_supports_browser_configuration_fields(tmp_path: Pat
     assert profile.headless is True
     assert profile.viewport == {"width": 1280, "height": 800}
     assert profile.device == "Desktop Chrome"
+
+
+def test_bootstrap_dependencies_runs_npm_ci_when_node_modules_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(tuple(command))
+        (tmp_path / "node_modules").mkdir()
+        return SimpleNamespace(returncode=0, stdout="installed")
+
+    monkeypatch.setattr("flow_healer.app_harness.subprocess.run", fake_run)
+
+    harness = LocalAppHarness()
+    profile = AppRuntimeProfile(
+        name="node-app",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+    )
+
+    harness._maybe_bootstrap_dependencies(profile, env={})
+
+    assert commands == [("npm", "ci")]
+
+
+def test_bootstrap_dependencies_raises_on_install_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="install exploded")
+
+    monkeypatch.setattr("flow_healer.app_harness.subprocess.run", fake_run)
+
+    harness = LocalAppHarness()
+    profile = AppRuntimeProfile(
+        name="node-app",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="dependency bootstrap failed"):
+        harness._maybe_bootstrap_dependencies(profile, env={})

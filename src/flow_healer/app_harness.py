@@ -17,6 +17,8 @@ class AppRuntimeProfile:
     command: tuple[str, ...]
     cwd: Path
     env: Mapping[str, str] | None = None
+    install_command: tuple[str, ...] = ()
+    install_marker_path: str = ""
     readiness_url: str | None = None
     readiness_log_text: str | None = None
     browser: str = ""
@@ -76,6 +78,7 @@ class LocalAppHarness:
         env = os.environ.copy()
         if profile.env:
             env.update(profile.env)
+        self._maybe_bootstrap_dependencies(profile, env=env)
 
         process = subprocess.Popen(
             profile.command,
@@ -109,6 +112,30 @@ class LocalAppHarness:
             session.stop()
             raise
         return result, session
+
+    def _maybe_bootstrap_dependencies(self, profile: AppRuntimeProfile, *, env: Mapping[str, str]) -> None:
+        install_command = tuple(profile.install_command) or _infer_install_command(profile)
+        if not install_command:
+            return
+        install_marker = _resolve_install_marker(profile)
+        if install_marker is not None and install_marker.exists():
+            return
+
+        result = subprocess.run(
+            install_command,
+            cwd=profile.cwd,
+            env=dict(env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            output_tail = "\n".join((result.stdout or "").splitlines()[-40:])
+            raise RuntimeError(
+                f"{profile.name} dependency bootstrap failed "
+                f"(exit code {result.returncode}). Output tail:\n{output_tail}"
+            )
 
     def _wait_until_ready(self, session: AppHarnessSession) -> AppHarnessBootResult:
         profile = session.profile
@@ -158,6 +185,28 @@ class LocalAppHarness:
 def _capture_output(stream, output_lines: deque[str]) -> None:
     for line in iter(stream.readline, ""):
         output_lines.append(line.rstrip("\n"))
+
+
+def _resolve_install_marker(profile: AppRuntimeProfile) -> Path | None:
+    marker_path = str(profile.install_marker_path or "").strip()
+    if marker_path:
+        return profile.cwd / marker_path
+    if (profile.cwd / "package.json").exists():
+        return profile.cwd / "node_modules"
+    return None
+
+
+def _infer_install_command(profile: AppRuntimeProfile) -> tuple[str, ...]:
+    package_json = profile.cwd / "package.json"
+    if not package_json.exists():
+        return ()
+
+    command_head = profile.command[0] if profile.command else ""
+    if command_head != "npm":
+        return ()
+    if (profile.cwd / "package-lock.json").exists():
+        return ("npm", "ci")
+    return ("npm", "install")
 
 
 def _url_is_ready(url: str, *, timeout_seconds: float) -> bool:
