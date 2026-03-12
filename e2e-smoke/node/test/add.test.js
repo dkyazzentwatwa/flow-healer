@@ -134,9 +134,11 @@ test('add preserves regular number semantics for non-integer inputs', () => {
 test('add preserves NaN semantics across mixed-number and bigint tails', () => {
   const mixedTailResult = add(1, Number.NaN, 2n);
   const leadingNaNResult = add(Number.NaN, 1n);
+  const trailingNaNResult = add(1n, Number.NaN);
 
   assert.ok(Number.isNaN(mixedTailResult));
   assert.ok(Number.isNaN(leadingNaNResult));
+  assert.ok(Number.isNaN(trailingNaNResult));
 });
 
 test('add rejects string operands for two-argument calls', () => {
