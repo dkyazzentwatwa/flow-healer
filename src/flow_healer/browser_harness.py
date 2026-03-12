@@ -53,12 +53,12 @@ class LocalBrowserHarness:
         *,
         profile: AppRuntimeProfile,
         entry_url: str,
-        repro_steps: tuple[str, ...],
+        repro_steps: tuple[str | BrowserStep, ...],
         artifact_root: Path,
         phase: str,
         expect_failure: bool,
     ) -> BrowserJourneyResult:
-        steps = parse_repro_steps(repro_steps)
+        steps = _coerce_repro_steps(repro_steps)
         phase_root = Path(artifact_root) / phase
         phase_root.mkdir(parents=True, exist_ok=True)
         session = self._build_session(
@@ -426,6 +426,13 @@ def parse_repro_steps(repro_steps: tuple[str, ...]) -> tuple[BrowserStep, ...]:
             continue
         parsed.append(BrowserStep(kind=normalized_kind, subject=remainder, argument=""))
     return tuple(parsed)
+
+
+def _coerce_repro_steps(repro_steps: tuple[str | BrowserStep, ...]) -> tuple[BrowserStep, ...]:
+    if all(isinstance(step, BrowserStep) for step in repro_steps):
+        return tuple(step for step in repro_steps if isinstance(step, BrowserStep))
+    raw_steps = tuple(str(step) for step in repro_steps)
+    return parse_repro_steps(raw_steps)
 
 
 def _split_fetch_subject(subject: str) -> tuple[str, str]:

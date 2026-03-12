@@ -118,6 +118,32 @@ def test_capture_journey_runs_fetch_steps_and_passes_resolution_flow(tmp_path: P
     assert result.final_url == "http://127.0.0.1:3000/"
 
 
+def test_capture_journey_accepts_preparsed_browser_steps(tmp_path: Path) -> None:
+    session = _FakeBrowserSession()
+    harness = LocalBrowserHarness(session_factory=lambda profile, entry_url, artifact_root, phase: session)
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        browser="chromium",
+    )
+
+    result = harness.capture_journey(
+        profile=profile,
+        entry_url="http://127.0.0.1:3000",
+        repro_steps=(
+            BrowserStep(kind="goto", subject="/"),
+            BrowserStep(kind="expect_text", subject="Available todo routes"),
+        ),
+        artifact_root=tmp_path / "artifacts",
+        phase="resolution",
+        expect_failure=False,
+    )
+
+    assert result.passed is True
+    assert session.visited == ["http://127.0.0.1:3000/"]
+
+
 def test_playwright_session_close_saves_video_before_shutdown(tmp_path: Path) -> None:
     events: list[str] = []
 
