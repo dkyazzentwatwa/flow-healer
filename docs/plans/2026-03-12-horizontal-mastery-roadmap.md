@@ -305,6 +305,20 @@ Latest fixed-pack replay evidence (`2026-03-12`):
   - `#930` and `#931` now have execution-root metadata populated in the latest snapshot
   - markdown drift rendering now preserves numeric zeroes (for example `retry_count=0`) instead of collapsing to `-`
 
+Balanced verification-wave evidence (`2026-03-12`, campaign `verify-2026-03-12`):
+
+- snapshot files:
+  - baseline: `/tmp/verify-wave-baseline.json`
+  - final: `/tmp/verify-wave-final.json`
+- issue outcomes:
+  - `#944` resolved (`PR #947`, merged)
+  - `#946` resolved (`PR #949`, merged)
+  - `#941`, `#942`, `#943` failed with `browser_step_failed` (full screenshot evidence captured, no `missing_screenshot`)
+  - `#945` failed with `ci_failed` (`PR #948` open/unstable)
+- remediation issues opened:
+  - `#950` app-backed resolution-text determinism for screenshot lanes
+  - `#951` rust lockfile/scope drift and CI follow-up
+
 ### Fixed Weekly Issue Pack
 
 - [x] Define a fixed issue pack across the mastery cohort

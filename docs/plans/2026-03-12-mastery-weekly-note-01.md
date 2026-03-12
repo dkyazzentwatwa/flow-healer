@@ -103,6 +103,58 @@ After installing the missing native runtimes and forcing two consecutive preflig
   - the Java reference app smoke flow passes in `tests/test_e2e_apps_sandboxes.py`
 - Historical artifact publish failures are still present in the rolling window, so browser-evidence mastery is not yet “green” even though the completeness checks and failure taxonomy are now implemented.
 
+## Verification Wave (Balanced 6)
+
+Date: `2026-03-12`
+
+Restart + gate commands executed:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/local.flow-healer
+flow-healer resume --repo flow-healer-self
+flow-healer recycle-helpers --repo flow-healer-self --idle-only
+flow-healer status --repo flow-healer-self > /tmp/verify-wave-baseline.json
+flow-healer status --repo flow-healer-self > /tmp/verify-wave-final.json
+```
+
+Verification issues created (`campaign:verify-2026-03-12`):
+
+- `#941` Node Next screenshot evidence completeness
+- `#942` Ruby Rails screenshot evidence completeness
+- `#943` Java Spring screenshot evidence completeness
+- `#944` Go determinism (`AddMany`)
+- `#945` Rust determinism (`add_many`)
+- `#946` Java Gradle determinism (`add3`)
+
+Terminal outcomes:
+
+- `#944` resolved (PR `#947` merged; CI green)
+- `#946` resolved (PR `#949` merged; CI green)
+- `#941` failed (`browser_step_failed`)
+- `#942` failed (`browser_step_failed`)
+- `#943` failed (`browser_step_failed`)
+- `#945` failed (`ci_failed`, PR `#948` left open/unstable)
+
+Browser evidence checks (`#941/#942/#943`, latest attempts):
+
+- `failure_screenshot` present
+- `resolution_screenshot` present
+- artifact paths were non-empty on disk at verification time
+- no `missing_screenshot` failure classification observed
+
+Code-lane checks:
+
+- expected execution roots confirmed from latest attempts:
+  - `#944` -> `e2e-smoke/go`
+  - `#945` -> `e2e-smoke/rust`
+  - `#946` -> `e2e-smoke/java-gradle`
+- no wrong-root or no-op failure family observed in this wave
+
+Drift/remediation follow-ups opened:
+
+- `#950` app-backed resolution text determinism for screenshot TCs
+- `#951` rust lockfile/scope drift on retry lane
+
 ## Next Review Questions
 
 - Does the fixed issue pack produce the same execution root and validation command choices on the next weekly replay?
