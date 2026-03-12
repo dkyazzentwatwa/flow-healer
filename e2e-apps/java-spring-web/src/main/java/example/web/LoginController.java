@@ -18,7 +18,8 @@ public class LoginController {
     }
 
     public ResponsePlan createSession(String email) {
-        String resolvedEmail = (email == null || email.isBlank()) ? "admin@example.com" : email;
+        String normalizedEmail = email == null ? "" : email.trim();
+        String resolvedEmail = normalizedEmail.isEmpty() ? "admin@example.com" : normalizedEmail;
         return ResponsePlan.redirect("/dashboard")
             .withHeader("Set-Cookie", "healer_session=" + resolvedEmail + "; Path=/; SameSite=Lax");
     }
