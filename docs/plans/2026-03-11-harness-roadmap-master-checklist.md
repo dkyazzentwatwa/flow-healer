@@ -40,15 +40,16 @@ Last updated: `2026-03-11`
 - [x] Record current completion state for Phase 1 and Phase 2
 - [x] Capture a live inline-evidence GitHub smoke proof
 - [ ] Keep this file updated after every meaningful harness slice
-- [ ] Add links to real smoke PRs as Phase 3 lands
+- [x] Add links to real smoke PRs as Phase 3 lands
 
 ## Live Proof Log
 
 - [x] Live browser validation against `e2e-apps/node-next`
 - [x] Live issue smoke for inline GitHub evidence: `#913`
 - [x] Confirm GitHub inline rendering uses the raw asset URL, not `blob?...raw=1`
-- [ ] Live PR-body smoke with before/after gallery rendered on a real PR
+- [x] Live PR-body smoke with before/after gallery rendered on a real PR
 - [ ] Live end-to-end issue -> repro -> fix -> PR -> CI -> merge smoke
+- [x] Live app-backed PR smoke: issue `#918` -> PR `#919` with inline before/after screenshots and green remote CI
 
 ## Phase 1: Harness Foundation
 
@@ -124,7 +125,7 @@ Last updated: `2026-03-11`
 - [x] Use raw hosted image URLs for inline GitHub markdown rendering
 - [x] Update existing PR bodies on reruns so evidence does not go stale
 - [x] Prove inline rendering live on GitHub issue `#913`
-- [ ] Prove the same inline gallery on a real PR body
+- [x] Prove the same inline gallery on a real PR body
 
 ### Verification
 
@@ -181,7 +182,7 @@ Status: `Partial`
 - [x] Tracker tests for CI/check-run ingestion
 - [x] Loop tests for CI failure remediation
 - [x] Service/dashboard tests for promotion-state surfacing
-- [ ] Live PR smoke with remote CI observed and reflected in status
+- [x] Live PR smoke with remote CI observed and reflected in status
 
 ## Phase 4: Judgment Routing
 
@@ -275,7 +276,7 @@ Status: `Later`
 - [x] Surface current promotion states in dashboard/service/status views
 - [x] Persist explicit promotion-state transitions beyond the current merge gate
 - [x] Require screenshot proof + local validation + green CI before final promotion
-- [ ] Run a live PR-body smoke with inline before/after evidence
+- [x] Run a live PR-body smoke with inline before/after evidence
 
 ### Right after that
 
@@ -301,3 +302,4 @@ Status: `Later`
 - [x] Approval-gated PRs stay out of `promotion_ready` until the human label path resumes them
 - [x] Transient infra CI failures no longer trigger the deterministic repair loop
 - [x] Auto-merge now respects `judgment_reason_code` and stays blocked when human judgment is required
+- [x] Live app-backed smoke issue `#918` opened PR `#919` with inline screenshot evidence and green observed remote CI

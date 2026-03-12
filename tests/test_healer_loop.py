@@ -3698,10 +3698,40 @@ def test_lease_heartbeat_sets_event_when_renewal_fails(tmp_path):
     loop.dispatcher.lease_seconds = 180
     loop.worker_id = "worker-a"
     loop.store.renew_healer_issue_lease.return_value = False
+    loop.store.get_healer_issue.return_value = {"issue_id": "704", "state": "running"}
 
     loop._lease_heartbeat("704", stop_event, lease_lost)  # type: ignore[arg-type]
 
     assert lease_lost.is_set() is True
+
+
+def test_lease_heartbeat_exits_quietly_after_issue_leaves_active_lease_states(tmp_path, caplog):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    class _StopAfterOne:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _interval: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    stop_event = _StopAfterOne()
+    lease_lost = threading.Event()
+    loop.store = MagicMock()
+    loop.dispatcher = MagicMock()
+    loop.dispatcher.lease_seconds = 180
+    loop.worker_id = "worker-a"
+    loop.store.renew_healer_issue_lease.return_value = False
+    loop.store.get_healer_issue.return_value = {"issue_id": "705", "state": "pr_open"}
+
+    with caplog.at_level("WARNING"):
+        loop._lease_heartbeat("705", stop_event, lease_lost)  # type: ignore[arg-type]
+
+    assert lease_lost.is_set() is False
+    assert "Lease heartbeat stopped for issue #705" not in caplog.text
 
 
 def test_process_claimed_issue_requeues_when_lease_is_lost_after_runner(tmp_path):

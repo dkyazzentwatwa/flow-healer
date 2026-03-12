@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from urllib.error import HTTPError
 from pathlib import Path
 
@@ -790,6 +791,28 @@ def test_publish_artifact_files_skips_unsupported_files(monkeypatch, tmp_path):
     assert calls == [
         ("/repos/owner/repo/git/ref/heads/flow-healer-artifacts", "GET", None),
     ]
+
+
+def test_request_json_suppresses_expected_artifact_publish_404_warnings(monkeypatch, caplog):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+
+    def fake_urlopen(_req, timeout=20):
+        raise HTTPError(
+            url="https://api.github.com/repos/owner/repo/git/ref/heads/flow-healer-artifacts",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=io.BytesIO(b'{"message":"Not Found"}'),
+        )
+
+    monkeypatch.setattr("flow_healer.healer_tracker.urlopen", fake_urlopen)
+
+    with caplog.at_level(logging.WARNING, logger="apple_flow.healer_tracker"):
+        payload = tracker._request_json("/repos/owner/repo/git/ref/heads/flow-healer-artifacts")
+
+    assert payload == {}
+    assert "GitHub API GET /repos/owner/repo/git/ref/heads/flow-healer-artifacts failed" not in caplog.text
 
 
 def test_get_pr_ci_status_summary_combines_check_runs_statuses_and_workflows(monkeypatch):

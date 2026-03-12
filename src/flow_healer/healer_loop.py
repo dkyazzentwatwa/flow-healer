@@ -4169,6 +4169,12 @@ class AutonomousHealerLoop:
                 lease_seconds=self.dispatcher.lease_seconds,
             )
             if not renewed:
+                issue_record = self.store.get_healer_issue(issue_id)
+                issue_state = ""
+                if isinstance(issue_record, dict):
+                    issue_state = str(issue_record.get("state") or "").strip().lower()
+                if issue_state and issue_state not in {"claimed", "running", "verify_pending"}:
+                    return
                 logger.warning("Lease heartbeat stopped for issue #%s; lease could not be renewed.", issue_id)
                 lease_lost.set()
                 return
