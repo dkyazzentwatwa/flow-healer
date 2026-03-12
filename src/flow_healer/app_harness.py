@@ -88,6 +88,7 @@ class LocalAppHarness:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         assert process.stdout is not None
 

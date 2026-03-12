@@ -241,6 +241,7 @@ class HealerRunner:
         browser_profile: AppRuntimeProfile | None = None
         browser_artifact_bundle: dict[str, Any] = {}
         browser_artifact_links: list[dict[str, Any]] = []
+        repro_stability: dict[str, Any] = {}
         parsed_repro_steps = parse_repro_steps(task_spec.repro_steps) if task_spec.repro_steps else ()
         browser_artifact_root = Path(
             tempfile.mkdtemp(prefix=f"flow-healer-browser-{issue_id}-", dir=os.getenv("TMPDIR") or None)
@@ -259,7 +260,11 @@ class HealerRunner:
                     diff_files=0,
                     diff_lines=0,
                     test_summary=_with_workspace_status(
-                        {},
+                        _annotate_browser_failure_family(
+                            {},
+                            failure_class="browser_runtime_missing",
+                            failure_reason=browser_reason or "Browser runtime is unavailable.",
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -290,7 +295,11 @@ class HealerRunner:
                     diff_files=0,
                     diff_lines=0,
                     test_summary=_with_workspace_status(
-                        {},
+                        _annotate_browser_failure_family(
+                            {},
+                            failure_class=runtime_failure_class or "app_runtime_profile_missing",
+                            failure_reason=runtime_failure_reason or "App runtime profile is required for browser evidence.",
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -305,6 +314,7 @@ class HealerRunner:
                     "status": "ready",
                     "profile": boot_result.profile.name,
                     "pid": boot_result.pid,
+                    "process": _app_runtime_process_metadata(profile=boot_result.profile, pid=boot_result.pid),
                     "readiness_url": boot_result.readiness_url or task_spec.entry_url,
                     "entry_url": browser_entry_url,
                     "app_target": task_spec.app_target,
@@ -322,6 +332,19 @@ class HealerRunner:
                     phase="failure",
                     expect_failure=True,
                 )
+                if not failure_journey.passed and failure_journey.expected_failure_observed:
+                    confirmatory_failure_journey = self._browser_harness.capture_journey(
+                        profile=browser_profile,
+                        entry_url=browser_entry_url,
+                        repro_steps=parsed_repro_steps,
+                        artifact_root=browser_artifact_root / "failure-replay",
+                        phase="failure-replay",
+                        expect_failure=True,
+                    )
+                    repro_stability = _browser_repro_stability(
+                        initial=failure_journey,
+                        replay=confirmatory_failure_journey,
+                    )
             except Exception as exc:
                 failure_summary = _annotate_test_summary_browser_artifacts(
                     _annotate_test_summary_runtime(
@@ -342,7 +365,11 @@ class HealerRunner:
                     diff_files=0,
                     diff_lines=0,
                     test_summary=_with_workspace_status(
-                        failure_summary,
+                        _annotate_browser_failure_family(
+                            failure_summary,
+                            failure_class="browser_step_failed",
+                            failure_reason=str(exc),
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -358,6 +385,7 @@ class HealerRunner:
             browser_artifact_bundle = _browser_artifact_bundle(
                 profile=browser_profile,
                 entry_url=browser_entry_url,
+                session_root=str(browser_artifact_root),
                 failure_journey=failure_journey,
             )
             browser_artifact_links = _browser_artifact_links(browser_artifact_bundle)
@@ -388,7 +416,14 @@ class HealerRunner:
                     diff_files=0,
                     diff_lines=0,
                     test_summary=_with_workspace_status(
-                        failure_summary,
+                        _annotate_browser_failure_family(
+                            failure_summary,
+                            failure_class="artifacts_missing",
+                            failure_reason=(
+                                "Failure browser evidence is incomplete; required screenshots are missing"
+                                + (f": {missing_artifacts}" if missing_artifacts else ".")
+                            ),
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -425,7 +460,48 @@ class HealerRunner:
                     diff_files=0,
                     diff_lines=0,
                     test_summary=_with_workspace_status(
-                        failure_summary,
+                        _annotate_browser_failure_family(
+                            failure_summary,
+                            failure_class="browser_repro_failed",
+                            failure_reason=failure_reason,
+                        ),
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            replay_reproduced = bool(repro_stability.get("reproduced_on_replay"))
+            if repro_stability and not replay_reproduced:
+                failure_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        {},
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                failure_summary["flaky_repro"] = dict(repro_stability)
+                replay_error = str(repro_stability.get("replay_error") or "").strip()
+                replay_step = str(repro_stability.get("replay_failure_step") or "").strip()
+                failure_reason = replay_error or "Browser repro was unstable on confirmatory replay before the fix."
+                if replay_step:
+                    failure_reason = f"{failure_reason} ({replay_step})"
+                return HealerRunResult(
+                    success=False,
+                    failure_class="browser_repro_failed",
+                    failure_reason=failure_reason,
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        _annotate_browser_failure_family(
+                            failure_summary,
+                            failure_class="browser_repro_failed",
+                            failure_reason=failure_reason,
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -1123,7 +1199,11 @@ class HealerRunner:
                     diff_files=diff_files,
                     diff_lines=diff_lines,
                     test_summary=_with_workspace_status(
-                        {},
+                        _annotate_browser_failure_family(
+                            {},
+                            failure_class="app_runtime_boot_failed",
+                            failure_reason=str(exc),
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -1133,6 +1213,7 @@ class HealerRunner:
                 "status": "ready",
                 "profile": boot_result.profile.name,
                 "pid": boot_result.pid,
+                "process": _app_runtime_process_metadata(profile=boot_result.profile, pid=boot_result.pid),
                 "readiness_url": boot_result.readiness_url or task_spec.entry_url,
                 "entry_url": task_spec.entry_url,
                 "app_target": task_spec.app_target,
@@ -1162,7 +1243,11 @@ class HealerRunner:
                 diff_files=diff_files,
                 diff_lines=diff_lines,
                 test_summary=_with_workspace_status(
-                    {},
+                    _annotate_browser_failure_family(
+                        {},
+                        failure_class=runtime_failure_class,
+                        failure_reason=runtime_failure_reason,
+                    ),
                     workspace_status=workspace_status,
                     failure_fingerprint="",
                 ),
@@ -1236,7 +1321,11 @@ class HealerRunner:
                     diff_files=diff_files,
                     diff_lines=diff_lines,
                     test_summary=_with_workspace_status(
-                        test_summary,
+                        _annotate_browser_failure_family(
+                            test_summary,
+                            failure_class="browser_step_failed",
+                            failure_reason=str(exc),
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -1245,6 +1334,7 @@ class HealerRunner:
             browser_artifact_bundle = _browser_artifact_bundle(
                 profile=runtime_profile,
                 entry_url=browser_entry_url,
+                session_root=str(browser_artifact_root),
                 failure_journey=_browser_bundle_phase_result(browser_artifact_bundle, phase="failure"),
                 resolution_journey=resolution_journey,
             )
@@ -1278,7 +1368,14 @@ class HealerRunner:
                     diff_files=diff_files,
                     diff_lines=diff_lines,
                     test_summary=_with_workspace_status(
-                        test_summary,
+                        _annotate_browser_failure_family(
+                            test_summary,
+                            failure_class="artifacts_missing",
+                            failure_reason=(
+                                "Browser evidence is incomplete; required screenshots are missing"
+                                + (f": {missing_artifacts}" if missing_artifacts else ".")
+                            ),
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -1316,7 +1413,11 @@ class HealerRunner:
                     diff_files=diff_files,
                     diff_lines=diff_lines,
                     test_summary=_with_workspace_status(
-                        test_summary,
+                        _annotate_browser_failure_family(
+                            test_summary,
+                            failure_class="browser_step_failed",
+                            failure_reason=failure_reason,
+                        ),
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -4905,6 +5006,64 @@ def _annotate_app_runtime_status(
     workspace_status["runtime_summary"] = {"app_harness": runtime_copy}
 
 
+def _app_runtime_process_metadata(
+    *,
+    profile: AppRuntimeProfile,
+    pid: int,
+) -> dict[str, Any]:
+    return {
+        "pid": int(pid),
+        "profile": profile.name,
+        "command": list(profile.command),
+        "cwd": str(profile.cwd),
+    }
+
+
+def _annotate_browser_failure_family(
+    summary: dict[str, Any],
+    *,
+    failure_class: str,
+    failure_reason: str | None,
+) -> dict[str, Any]:
+    enriched = dict(summary or {})
+    family = _browser_failure_family(failure_class=failure_class, failure_reason=failure_reason)
+    if family:
+        enriched["browser_failure_family"] = family
+    return enriched
+
+
+def _browser_failure_family(*, failure_class: str, failure_reason: str | None) -> str:
+    normalized_class = str(failure_class or "").strip().lower()
+    normalized_reason = str(failure_reason or "").strip().lower()
+    if normalized_class == "app_runtime_boot_failed":
+        return "runtime_boot"
+    if normalized_class in {
+        "app_runtime_profile_invalid",
+        "app_runtime_profile_missing",
+        "browser_runtime_missing",
+    }:
+        return "runtime_readiness"
+    if normalized_class == "artifacts_missing":
+        return "artifact_publish"
+    if normalized_class == "browser_repro_failed":
+        return "journey_step"
+    if normalized_class == "browser_step_failed":
+        if any(
+            needle in normalized_reason
+            for needle in (
+                "artifact capture",
+                "capture failed",
+                "console log",
+                "network log",
+                "screenshot",
+                "video",
+            )
+        ):
+            return "artifact_capture"
+        return "journey_step"
+    return ""
+
+
 def _annotate_test_summary_runtime(
     summary: dict[str, Any],
     *,
@@ -4953,6 +5112,28 @@ def _annotate_test_summary_browser_artifacts(
         phase_state_map["artifacts_missing"] = not artifact_proof_ready
         enriched["phase_states"] = phase_state_map
     return enriched
+
+
+def _browser_repro_stability(
+    *,
+    initial: BrowserJourneyResult,
+    replay: BrowserJourneyResult,
+) -> dict[str, Any]:
+    replay_reproduced = not replay.passed and replay.expected_failure_observed
+    payload = {
+        "checked": True,
+        "reproduced_on_first_run": (not initial.passed and initial.expected_failure_observed),
+        "reproduced_on_replay": replay_reproduced,
+        "initial_phase": initial.phase,
+        "replay_phase": replay.phase,
+    }
+    if replay.failure_step:
+        payload["replay_failure_step"] = replay.failure_step
+    if replay.error:
+        payload["replay_error"] = replay.error
+    if replay.screenshot_path:
+        payload["replay_screenshot_path"] = replay.screenshot_path
+    return payload
 
 
 def _normalize_app_runtime_profiles(value: Any) -> dict[str, AppRuntimeProfile]:
@@ -5110,6 +5291,7 @@ def _browser_artifact_bundle(
     *,
     profile: AppRuntimeProfile,
     entry_url: str,
+    session_root: str = "",
     failure_journey: BrowserJourneyResult | None = None,
     resolution_journey: BrowserJourneyResult | None = None,
 ) -> dict[str, Any]:
@@ -5121,6 +5303,9 @@ def _browser_artifact_bundle(
         "browser_profile": _browser_profile_summary(profile),
         "entry_url": entry_url,
     }
+    normalized_session_root = str(session_root or "").strip()
+    if normalized_session_root:
+        bundle["browser_session_root"] = normalized_session_root
     journey_transcript: list[dict[str, Any]] = []
     if failure_journey is not None:
         bundle["failure_artifacts"] = _browser_phase_payload(failure_journey)

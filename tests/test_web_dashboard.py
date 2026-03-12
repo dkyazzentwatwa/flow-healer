@@ -223,6 +223,109 @@ def test_overview_payload_preserves_repo_trust_rows(tmp_path: Path) -> None:
     assert payload["rows"][0]["trust"]["recommended_operator_action"] == "inspect_circuit_breaker"
 
 
+def test_overview_and_issue_detail_payloads_surface_harness_health(tmp_path: Path) -> None:
+    config, service = _make_service(tmp_path)
+    store_path = config.repo_db_path("demo")
+
+    from flow_healer.store import SQLiteStore
+
+    store = SQLiteStore(store_path)
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="913",
+        repo="owner/repo",
+        title="Harness issue",
+        body="Validation:\n- pytest",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    store.close()
+
+    harness_health = {
+        "artifact_publish": {"failures": 2, "capture_failures": 1},
+        "browser_failure_families": {"counts": {"runtime_boot": 1}},
+        "stale_runtime_profiles": {"count": 1, "profiles": ["web"]},
+        "orphan_cleanup": {
+            "app_runtimes_reaped": 3,
+            "artifact_roots_cleaned": 4,
+            "browser_sessions_cleaned": 1,
+            "tracked_browser_sessions": 1,
+        },
+        "browser_sessions": {"tracked": 1, "existing_roots": 1, "stale_roots": 0},
+        "runtime_profiles": [
+            {
+                "profile": "web",
+                "configured": True,
+                "status": "stale",
+                "stale": True,
+                "last_seen_at": "2026-03-10 12:30:00",
+                "last_canary_at": "2026-03-10 12:00:00",
+            }
+        ],
+        "canary_profiles": {
+            "failures": 1,
+            "profiles": [
+                {
+                    "profile": "web",
+                    "status": "stale",
+                    "last_seen_at": "2026-03-10 12:30:00",
+                    "last_canary_at": "2026-03-10 12:00:00",
+                }
+            ],
+        },
+    }
+
+    def fake_cached_status_rows(repo_name=None, *, force_refresh=False, probe_connector=False):
+        return [
+            {
+                "repo": "demo",
+                "path": "/tmp/demo",
+                "paused": False,
+                "issues_total": 1,
+                "recent_attempts": [],
+                "issue_explanations": [
+                    {
+                        "issue_id": "913",
+                        "summary": "Harness checks failed on the last attempt.",
+                        "recommended_action": "inspect_recent_failure",
+                    }
+                ],
+                "trust": {"state": "degraded", "summary": "Repo needs harness attention."},
+                "policy": {"summary": "Inspect harness health before retrying."},
+                "harness_health": harness_health,
+                "reliability_daily_rollups": [
+                    {
+                        "day": "2026-03-10",
+                        "sample_size": 2,
+                        "issue_count": 1,
+                        "first_pass_success_rate": 0.0,
+                        "retries_per_success": 0.0,
+                        "wrong_root_execution_rate": 0.0,
+                        "no_op_rate": 0.0,
+                        "mean_time_to_valid_pr_minutes": 0.0,
+                        "harness": {
+                            "artifact_publish_failures": 1,
+                            "artifact_capture_failures": 0,
+                            "browser_failure_families": {"runtime_boot": 1},
+                        },
+                    }
+                ],
+            }
+        ]
+
+    service.cached_status_rows = fake_cached_status_rows  # type: ignore[method-assign]
+
+    overview = _overview_payload(config, service)
+    detail = _issue_detail_payload(config, service, repo_name="demo", issue_id="913")
+
+    assert overview["rows"][0]["harness_health"]["artifact_publish"]["failures"] == 2
+    assert overview["chart_series"]["harness"][0]["artifact_publish_failures"] == 1
+    assert overview["chart_series"]["harness"][0]["browser_failure_total"] == 1
+    assert detail["repo"]["harness_health"]["stale_runtime_profiles"]["profiles"] == ["web"]
+    assert detail["repo"]["harness_health"]["canary_profiles"]["profiles"][0]["profile"] == "web"
+
+
 def test_queue_payload_builds_saved_views_and_issue_rows(tmp_path: Path) -> None:
     config, service = _make_service(tmp_path)
     store_path = config.repo_db_path("demo")
@@ -384,7 +487,18 @@ def test_issue_detail_payload_includes_issue_attempts_and_related_activity(tmp_p
         attempt_id="ha_910_1",
         state="failed",
         actual_diff_set=["e2e-smoke/node/src/add.js"],
-        test_summary={"failed_tests": 1, "validation_commands": ["npm test"]},
+        test_summary={
+            "failed_tests": 1,
+            "validation_commands": ["npm test"],
+            "judgment_summary": {
+                "reason_code": "product_ambiguity",
+                "summary": "The issue needs a human product decision.",
+            },
+            "escalation_packet": {
+                "reason_code": "product_ambiguity",
+                "decision_needed": "Choose whether the dashboard should preserve the old copy or adopt the new wording.",
+            },
+        },
         verifier_summary={"status": "failed"},
         artifact_bundle={
             "status": "captured",
@@ -462,6 +576,8 @@ def test_issue_detail_payload_includes_issue_attempts_and_related_activity(tmp_p
     assert payload["attempts"][0]["artifact_links"][0]["label"] == "failure_screenshot"
     assert payload["attempts"][0]["artifact_links"][0]["web_href"].startswith("/artifact?path=")
     assert payload["attempts"][0]["ci_status_summary"]["overall_state"] == "failure"
+    assert payload["attempts"][0]["judgment_summary"]["reason_code"] == "product_ambiguity"
+    assert payload["attempts"][0]["escalation_packet"]["decision_needed"].startswith("Choose whether the dashboard")
     assert payload["issue"]["promotion_state"] == "merge_blocked"
     assert any(item["issue_id"] == "910" for item in payload["activity"])
     assert payload["repo"]["trust"]["state"] == "degraded"

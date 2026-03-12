@@ -674,3 +674,37 @@ def test_load_reads_github_artifact_publish_settings(tmp_path: Path) -> None:
     repo = config.repos[0]
     assert repo.healer_github_artifact_publish_enabled is False
     assert repo.healer_github_artifact_branch == "healer-proof"
+
+
+def test_load_reads_phase_five_artifact_policy_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    github_artifact_retention_days: 14\n"
+            "    browser_log_publish_mode: failure_only\n"
+            "    github_artifact_max_file_bytes: 1048576\n"
+            "    github_artifact_max_run_bytes: 4194304\n"
+            "    github_artifact_max_branch_bytes: 16777216\n"
+            "    artifact_cleanup_interval_seconds: 900\n"
+            "    app_runtime_stale_days: 21\n"
+            "    harness_canary_interval_seconds: 7200\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_github_artifact_retention_days == 14
+    assert repo.healer_browser_log_publish_mode == "failure_only"
+    assert repo.healer_github_artifact_max_file_bytes == 1_048_576
+    assert repo.healer_github_artifact_max_run_bytes == 4_194_304
+    assert repo.healer_github_artifact_max_branch_bytes == 16_777_216
+    assert repo.healer_artifact_cleanup_interval_seconds == 900
+    assert repo.healer_app_runtime_stale_days == 21
+    assert repo.healer_harness_canary_interval_seconds == 7200

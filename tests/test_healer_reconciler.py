@@ -1,6 +1,9 @@
 from datetime import UTC, datetime, timedelta
+import json
+import os
 from pathlib import Path
 
+from flow_healer.app_harness import AppRuntimeProfile
 from flow_healer import healer_reconciler as reconciler_module
 from flow_healer.healer_reconciler import HealerReconciler
 from flow_healer.healer_workspace import HealerWorkspaceManager
@@ -403,3 +406,240 @@ def test_reconcile_reaps_orphan_swarm_subagent_process_groups(tmp_path, monkeypa
 
     assert summary["reaped_orphan_subagents"] == 1
     assert killed_groups == [101]
+
+
+def test_reconcile_cleans_stale_local_artifact_roots_but_preserves_active_issue_refs(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        artifact_retention_days=30,
+    )
+
+    stale_root = tmp_path / "artifacts" / "issue-41"
+    stale_root.mkdir(parents=True)
+    active_root = tmp_path / "artifacts" / "issue-42"
+    active_root.mkdir(parents=True)
+    old_mtime = (datetime.now(tz=UTC) - timedelta(days=45)).timestamp()
+    os.utime(stale_root, (old_mtime, old_mtime))
+    os.utime(active_root, (old_mtime, old_mtime))
+
+    store.upsert_healer_issue(
+        issue_id="41",
+        repo="owner/repo",
+        title="Issue 41",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="41", state="failed")
+    store.set_state(
+        "healer_artifact_root_ref:41:failure",
+        json.dumps({"issue_id": "41", "path": str(stale_root)}),
+    )
+
+    store.upsert_healer_issue(
+        issue_id="42",
+        repo="owner/repo",
+        title="Issue 42",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="42", state="running")
+    with store._lock:
+        conn = store._connect()
+        conn.execute(
+            "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = ? WHERE issue_id = ?",
+            (
+                "worker-42",
+                (datetime.now(tz=UTC) + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "42",
+            ),
+        )
+        conn.commit()
+    store.set_state(
+        "healer_artifact_root_ref:42:failure",
+        json.dumps({"issue_id": "42", "path": str(active_root)}),
+    )
+
+    summary = reconciler.reconcile()
+
+    assert summary["cleaned_artifact_roots"] == 1
+    assert not stale_root.exists()
+    assert active_root.exists()
+
+
+def test_reconcile_reaps_orphan_app_runtime_process_groups_from_runtime_refs(tmp_path, monkeypatch) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        app_runtime_orphan_ttl_seconds=900,
+    )
+
+    store.upsert_healer_issue(
+        issue_id="51",
+        repo="owner/repo",
+        title="Issue 51",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="51", state="failed")
+    store.set_state(
+        "healer_app_runtime_ref:51:web",
+        json.dumps({"issue_id": "51", "pid": 501, "pgid": 501, "profile": "node-next-web"}),
+    )
+
+    monkeypatch.setattr(
+        reconciler_module,
+        "_list_process_snapshots",
+        lambda: [
+            reconciler_module._ProcessSnapshot(
+                pid=501,
+                ppid=1,
+                pgid=501,
+                elapsed_seconds=1200,
+                command="npm run dev // flow-healer app-runtime profile=node-next-web issue=51",
+            )
+        ],
+    )
+    killed_groups: list[int] = []
+    monkeypatch.setattr(
+        reconciler_module,
+        "_terminate_process_group",
+        lambda pgid: killed_groups.append(pgid) or True,
+    )
+
+    summary = reconciler.reconcile()
+
+    assert summary["reaped_orphan_app_runtimes"] == 1
+    assert killed_groups == [501]
+
+
+def test_reconcile_cleans_stale_browser_session_refs(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        artifact_retention_days=30,
+    )
+
+    stale_phase_root = tmp_path / "artifacts" / "browser" / "issue-61" / "failure"
+    stale_phase_root.mkdir(parents=True)
+    store.upsert_healer_issue(
+        issue_id="61",
+        repo="owner/repo",
+        title="Issue 61",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="61", state="failed")
+    store.set_state(
+        "healer_browser_session_ref:61:attempt-1",
+        json.dumps(
+            {
+                "issue_id": "61",
+                "attempt_id": "attempt-1",
+                "path": str(stale_phase_root),
+                "retention_until": (datetime.now(tz=UTC) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        ),
+    )
+
+    summary = reconciler.reconcile()
+
+    assert summary["cleaned_browser_sessions"] == 1
+    assert not stale_phase_root.exists()
+    assert store.get_state("healer_browser_session_ref:61:attempt-1") == ""
+
+
+def test_reconcile_detects_stale_runtime_profiles(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    fresh_profile_root = repo_path / "fresh"
+    fresh_profile_root.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    stale_seen_at = (datetime.now(tz=UTC) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    fresh_seen_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+    store.set_states(
+        {
+            "healer_app_runtime_profile_last_seen_at:web": stale_seen_at,
+            "healer_app_runtime_profile_last_seen_at:fresh": fresh_seen_at,
+        }
+    )
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        runtime_profiles={
+            "web": AppRuntimeProfile(
+                name="web",
+                command=("npm", "run", "dev"),
+                cwd=repo_path / "missing-web",
+                readiness_url="http://127.0.0.1:3000",
+            ),
+            "fresh": AppRuntimeProfile(
+                name="fresh",
+                command=("npm", "run", "dev"),
+                cwd=fresh_profile_root,
+                readiness_url="http://127.0.0.1:3001",
+            ),
+        },
+        app_runtime_stale_days=14,
+    )
+
+    summary = reconciler.reconcile()
+
+    assert summary["stale_runtime_profiles_detected"] == 1
+    assert json.loads(store.get_state("healer_stale_runtime_profiles") or "[]") == ["web"]
+    assert store.get_state("healer_stale_runtime_profiles_detected") == "1"
+
+
+def test_reconcile_detects_stale_runtime_profiles_for_dict_backed_config(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    fresh_profile_root = repo_path / "web"
+    fresh_profile_root.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    fresh_seen_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+    store.set_state("healer_app_runtime_profile_last_seen_at:web", fresh_seen_at)
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        runtime_profiles={
+            "web": {
+                "name": "web",
+                "working_directory": "web",
+                "start_command": "npm run dev",
+                "readiness_url": "http://127.0.0.1:3000",
+            }
+        },
+        app_runtime_stale_days=14,
+    )
+
+    summary = reconciler.reconcile()
+
+    assert summary["stale_runtime_profiles_detected"] == 0
+    assert json.loads(store.get_state("healer_stale_runtime_profiles") or "[]") == []

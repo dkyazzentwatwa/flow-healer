@@ -1564,6 +1564,7 @@ def _build_score_explainer(scoreboard: dict[str, Any]) -> dict[str, Any]:
 def _build_chart_series(status_rows: list[dict[str, Any]]) -> dict[str, Any]:
     reliability_days: dict[str, dict[str, float]] = {}
     issue_outcome_days: dict[str, dict[str, int]] = {}
+    harness_days: dict[str, dict[str, int]] = {}
     for row in status_rows:
         for item in row.get("reliability_daily_rollups") or []:
             day = str(item.get("day") or "").strip()
@@ -1586,6 +1587,20 @@ def _build_chart_series(status_rows: list[dict[str, Any]]) -> dict[str, Any]:
             bucket["first_pass_weighted"] += float(item.get("first_pass_success_rate") or 0.0) * issue_count
             bucket["no_op_weighted"] += float(item.get("no_op_rate") or 0.0) * sample_size
             bucket["wrong_root_weighted"] += float(item.get("wrong_root_execution_rate") or 0.0) * sample_size
+            harness = item.get("harness") or {}
+            family_counts = harness.get("browser_failure_families") or {}
+            harness_bucket = harness_days.setdefault(
+                day,
+                {
+                    "artifact_publish_failures": 0,
+                    "artifact_capture_failures": 0,
+                    "browser_failure_total": 0,
+                },
+            )
+            harness_bucket["artifact_publish_failures"] += int(harness.get("artifact_publish_failures") or 0)
+            harness_bucket["artifact_capture_failures"] += int(harness.get("artifact_capture_failures") or 0)
+            if isinstance(family_counts, dict):
+                harness_bucket["browser_failure_total"] += sum(int(count or 0) for count in family_counts.values())
 
         outcomes = (row.get("issue_outcomes") or {}).get("daily_terminal_outcomes") or []
         for item in outcomes:
@@ -1623,9 +1638,21 @@ def _build_chart_series(status_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "total": bucket["success"] + bucket["failure"],
             }
         )
+    harness = []
+    for day in sorted(harness_days.keys()):
+        bucket = harness_days[day]
+        harness.append(
+            {
+                "day": day,
+                "artifact_publish_failures": bucket["artifact_publish_failures"],
+                "artifact_capture_failures": bucket["artifact_capture_failures"],
+                "browser_failure_total": bucket["browser_failure_total"],
+            }
+        )
     return {
         "reliability": reliability[-30:],
         "issue_outcomes": issue_outcomes[-30:],
+        "harness": harness[-30:],
     }
 
 

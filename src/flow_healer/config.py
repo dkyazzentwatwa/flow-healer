@@ -107,6 +107,14 @@ class RelaySettings:
     healer_pr_merge_method: str = "squash"
     healer_github_artifact_publish_enabled: bool = True
     healer_github_artifact_branch: str = "flow-healer-artifacts"
+    healer_github_artifact_retention_days: int = 30
+    healer_browser_log_publish_mode: str = "always"
+    healer_github_artifact_max_file_bytes: int = 5 * 1024 * 1024
+    healer_github_artifact_max_run_bytes: int = 25 * 1024 * 1024
+    healer_github_artifact_max_branch_bytes: int = 250 * 1024 * 1024
+    healer_artifact_cleanup_interval_seconds: int = 900
+    healer_app_runtime_stale_days: int = 14
+    healer_harness_canary_interval_seconds: int = 21600
     healer_trusted_actors: list[str] = field(default_factory=list)
     healer_retry_budget: int = 2
     healer_backoff_initial_seconds: int = 60
@@ -267,6 +275,37 @@ class AppConfig:
                     ),
                     healer_github_artifact_branch=str(
                         item.get("github_artifact_branch") or "flow-healer-artifacts"
+                    ),
+                    healer_github_artifact_retention_days=max(
+                        1,
+                        int(item.get("github_artifact_retention_days") or 30),
+                    ),
+                    healer_browser_log_publish_mode=_normalize_browser_log_publish_mode(
+                        item.get("browser_log_publish_mode")
+                    ),
+                    healer_github_artifact_max_file_bytes=max(
+                        1024,
+                        int(item.get("github_artifact_max_file_bytes") or 5 * 1024 * 1024),
+                    ),
+                    healer_github_artifact_max_run_bytes=max(
+                        1024,
+                        int(item.get("github_artifact_max_run_bytes") or 25 * 1024 * 1024),
+                    ),
+                    healer_github_artifact_max_branch_bytes=max(
+                        1024,
+                        int(item.get("github_artifact_max_branch_bytes") or 250 * 1024 * 1024),
+                    ),
+                    healer_artifact_cleanup_interval_seconds=max(
+                        60,
+                        int(item.get("artifact_cleanup_interval_seconds") or 900),
+                    ),
+                    healer_app_runtime_stale_days=max(
+                        1,
+                        int(item.get("app_runtime_stale_days") or 14),
+                    ),
+                    healer_harness_canary_interval_seconds=max(
+                        300,
+                        int(item.get("harness_canary_interval_seconds") or 21600),
                     ),
                     healer_trusted_actors=_list_of_str(item.get("trusted_actors"), []),
                     healer_retry_budget=int(item.get("retry_budget") or 2),
@@ -547,6 +586,13 @@ def _normalize_tracker_backend(value: Any) -> str:
     if raw in {"local", "localfs"}:
         return "local_fs"
     return "github"
+
+
+def _normalize_browser_log_publish_mode(value: Any) -> str:
+    raw = str(value or "always").strip().lower().replace("-", "_")
+    if raw in {"always", "failure_only", "screenshots_only"}:
+        return raw
+    return "always"
 
 
 def _resolve_env_file(config_path: Path, value: Any) -> Path | None:

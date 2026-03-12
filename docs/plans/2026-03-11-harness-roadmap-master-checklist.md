@@ -18,7 +18,7 @@ Update rules:
 
 ## Current Snapshot
 
-Last updated: `2026-03-11`
+Last updated: `2026-03-12`
 
 | Ultimate goal capability | Status | Notes |
 | --- | --- | --- |
@@ -31,8 +31,8 @@ Last updated: `2026-03-11`
 | Open a pull request | Done | Existing PR open/update loop works. |
 | Respond to agent and human feedback | Partial | Core feedback loop exists; app-proof + CI-aware iteration still needs hardening. |
 | Detect and remediate build failures | Partial | Local failures are handled, remote CI is visible, transient infra failures are separated from deterministic code failures, deterministic CI failures now requeue automatically on the same PR, failure buckets are classified, and promotion state now surfaces in status views; live GitHub CI remediation proof is still pending. |
-| Escalate to a human only when judgment is required | Partial | Some pause/block behavior exists; explicit judgment routing is still missing. |
-| Merge the change | Partial | Auto-merge now waits for local promotion readiness, screenshot proof on browser-backed app runs, green remote CI, and the absence of a `judgment_reason_code`, and promotion states are both visible and persisted across attempts, but full judgment routing and live end-to-end promotion proof are still incomplete. |
+| Escalate to a human only when judgment is required | Done | Conservative judgment routing now classifies and persists `judgment_reason_code`, renders escalation packets/comments, pauses or preserves the PR lane appropriately, and now has live GitHub judgment proof via issue `#924`. |
+| Merge the change | Partial | Auto-merge waits for local promotion readiness, screenshot proof on browser-backed app runs, green remote CI, and the absence of a `judgment_reason_code`; judgment-blocked issues now resume cleanly after human issue-body guidance in e2e coverage, and live GitHub judgment blocking is proven via issue `#924`. |
 
 ## Coordination
 
@@ -188,64 +188,78 @@ Status: `Done`
 
 ## Phase 4: Judgment Routing
 
-Status: `Next`
+Status: `Done`
 
 ### Judgment model
 
-- [ ] Add `judgment_reason_code` taxonomy
-- [ ] Define categories: `product_ambiguity`, `unsafe_data_migration`, `non_deterministic_visual_result`, `conflicting_feedback`, `security_or_privacy_risk`, `repro_not_stable`
-- [ ] Separate judgment-required failures from normal deterministic build/test failures
+- [x] Add `judgment_reason_code` taxonomy
+- [x] Define categories: `product_ambiguity`, `unsafe_data_migration`, `non_deterministic_visual_result`, `conflicting_feedback`, `security_or_privacy_risk`, `repro_not_stable`
+- [x] Separate judgment-required failures from normal deterministic build/test failures
 
 ### Escalation packets
 
-- [ ] Generate structured escalation payloads with attempted fixes, evidence, and precise human decision needed
-- [ ] Persist escalation packets in attempt data
-- [ ] Surface escalation packets in dashboard issue detail views
-- [ ] Post human-readable escalation comments back to GitHub when needed
+- [x] Generate structured escalation payloads with attempted fixes, evidence, and precise human decision needed
+- [x] Persist escalation packets in attempt data
+- [x] Surface escalation packets in dashboard issue detail views
+- [x] Post human-readable escalation comments back to GitHub when needed
 
 ### Feedback-loop alignment
 
-- [ ] Ensure review comments, review bodies, and PR comments all re-enter the same healing loop
-- [ ] Carry artifact/evidence context into feedback retries
-- [ ] Prevent escalation when the next deterministic action is obvious
+- [x] Ensure review comments, review bodies, and PR comments all re-enter the same healing loop
+- [x] Carry artifact/evidence context into feedback retries
+- [x] Prevent escalation when the next deterministic action is obvious
 
 ### Verification
 
-- [ ] Focused tests for judgment classification
-- [ ] Focused tests for escalation packet rendering
-- [ ] Live smoke for one judgment-required scenario
+- [x] Focused tests for judgment classification
+- [x] Focused tests for escalation packet rendering
+- [x] E2E resume-after-human-guidance scenario for blocked judgment issues
+- [x] Live smoke for one judgment-required scenario
+- [x] Live GitHub judgment-required smoke: issue `#924` blocked with `judgment_required`, `judgment_reason_code=product_ambiguity`, and the issue-first escalation comment
 
 ## Phase 5: Reliability and Garbage Collection
 
-Status: `Later`
+Status: `Done`
 
 ### Artifact lifecycle
 
-- [ ] Define artifact retention policy
-- [ ] Clean stale local artifact directories
-- [ ] Define cleanup strategy for the remote artifact branch
-- [ ] Add size/volume guardrails for published artifacts
+- [x] Define artifact retention policy
+- [x] Clean stale local artifact directories
+- [x] Define cleanup strategy for the remote artifact branch
+- [x] Add size/volume guardrails for published artifacts
 
 ### Browser/app harness reliability
 
-- [ ] Detect flaky repro journeys
-- [ ] Record browser failure families separately from code-fix failures
-- [ ] Clean orphaned browser sessions and app runtimes
-- [ ] Add canary runs for app harness boot + browser proof
-- [ ] Add alertable counters for artifact publishing failures
+- [x] Detect flaky repro journeys
+- [x] Record browser failure families separately from code-fix failures
+- [x] Clean orphaned browser sessions and app runtimes
+- [x] Add canary runs for app harness boot + browser proof
+- [x] Add alertable counters for artifact publishing failures
 
 ### Ongoing coherence / drift control
 
-- [ ] Detect stale runtime profiles
-- [ ] Detect broken repro contracts in issue templates/examples
-- [ ] Detect doc drift between roadmap, checklist, and actual behavior
-- [ ] Add recurring reliability review of harness metrics
+- [x] Detect stale runtime profiles
+- [x] Detect broken repro contracts in issue templates/examples
+- [x] Detect doc drift between roadmap, checklist, and actual behavior
+- [x] Add recurring reliability review of harness metrics
 
 ### Verification
 
-- [ ] Reliability runbook for harness failures
-- [ ] Periodic smoke checklist for artifact publishing
-- [ ] Canary dashboard surface for harness health
+- [x] Reliability runbook for harness failures
+- [x] Periodic smoke checklist for artifact publishing
+- [x] Canary dashboard surface for harness health
+
+Notes:
+
+- Artifact retention and guardrails now land through config + tracker publication metadata, including per-run `_meta.json` and expired remote evidence pruning.
+- Reconciler cleanup now reaps orphan app-runtime process groups, detects stale runtime profiles, cleans stale local artifact roots, and reports those families in resource audit.
+- Service/dashboard payloads now expose `harness_health`, additive harness rollups, browser failure family counts, and canary-profile state from `kv_state`.
+- Operator docs now live in `docs/harness-reliability-runbook.md` and `docs/harness-smoke-checklist.md`.
+- Repro-contract validation now runs through `scripts/validate_repro_contract_examples.py` against `docs/harness-repro-contract-examples.json`, with focused coverage in `tests/test_harness_validation_scripts.py`.
+- Harness roadmap drift checks now run through `scripts/check_harness_doc_drift.py`, also covered by `tests/test_harness_validation_scripts.py`.
+- Canary dashboard surface remains covered in `tests/test_service.py` and `tests/test_web_dashboard.py`.
+- Browser-session cleanup now tracks and prunes stale browser-session roots alongside app-runtime cleanup, with coverage in `tests/test_healer_reconciler.py`, `tests/test_healer_reconciler_resource_audit.py`, `tests/test_service.py`, and `tests/test_web_dashboard.py`.
+- Live GitHub harness canary proof landed on March 11, 2026 / March 12, 2026 UTC for runtime profile `node-next-web`, publishing screenshot + console + network logs to `flow-healer/evidence/issue-canary-node-next-web/canary-20260312041820` on branch `flow-healer-artifacts`.
 
 ## App Coverage Expansion
 
@@ -262,7 +276,7 @@ Status: `Later`
 
 - [x] Screenshots are required; videos are optional
 - [x] Inline GitHub markdown should use raw hosted asset URLs
-- [ ] Decide whether console/network logs should always be published or remain opt-in later
+- [x] Console/network logs are always published for app-backed runs
 - [ ] Decide how long the artifact branch should retain evidence
 - [ ] Decide whether PR bodies should show a compact gallery or full-size screenshots by default
 - [ ] Decide whether app-scoped issues should require explicit `artifact_requirements` forever or whether screenshots become the default expectation
@@ -282,9 +296,9 @@ Status: `Later`
 
 ### Right after that
 
-- [ ] Implement `judgment_reason_code` routing
-- [ ] Build escalation packet rendering
-- [ ] Add dashboard surfaces for promotion + judgment state
+- [x] Implement `judgment_reason_code` routing
+- [x] Build escalation packet rendering
+- [x] Add dashboard surfaces for promotion + judgment state
 - [ ] Add artifact retention / cleanup policy
 
 ## Done Log
@@ -304,4 +318,5 @@ Status: `Later`
 - [x] Approval-gated PRs stay out of `promotion_ready` until the human label path resumes them
 - [x] Transient infra CI failures no longer trigger the deterministic repair loop
 - [x] Auto-merge now respects `judgment_reason_code` and stays blocked when human judgment is required
+- [x] E2E proof that a judgment-blocked issue resumes after human issue-body guidance and opens a PR cleanly
 - [x] Live app-backed smoke issue `#918` opened PR `#919` with inline screenshot evidence and green observed remote CI

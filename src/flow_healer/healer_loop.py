@@ -9,6 +9,7 @@ import re
 import signal
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -18,8 +19,11 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .config import RelaySettings
+from .app_harness import AppHarnessSession, AppRuntimeProfile, LocalAppHarness
+from .browser_harness import LocalBrowserHarness
 from .docker_runtime import docker_idle_shutdown_enabled, maybe_shutdown_idle_docker_runtime
 from .healer_dispatcher import HealerDispatcher
+from .judgment import JudgmentAssessment, build_judgment_assessment, normalize_reason_code
 from .healer_locks import canonicalize_lock_keys, diff_paths_to_lock_keys, predict_lock_set
 from .healer_memory import HealerMemoryService
 from .healer_preflight import (
@@ -372,6 +376,19 @@ class AutonomousHealerLoop:
                 60,
                 int(getattr(settings, "healer_swarm_orphan_subagent_ttl_seconds", 900)),
             ),
+            artifact_retention_days=max(
+                1,
+                int(getattr(settings, "healer_github_artifact_retention_days", 30)),
+            ),
+            runtime_profiles=(
+                dict(getattr(settings, "healer_app_runtime_profiles", {}) or {})
+                if isinstance(getattr(settings, "healer_app_runtime_profiles", {}), dict)
+                else {}
+            ),
+            app_runtime_stale_days=max(
+                1,
+                int(getattr(settings, "healer_app_runtime_stale_days", 14)),
+            ),
         )
         self.memory = HealerMemoryService(
             store=store,
@@ -501,6 +518,7 @@ class AutonomousHealerLoop:
             self.store.update_runtime_status(status="tracker_unavailable", last_error=failure_reason, touch_tick_finished=True)
             return
         self.store.set_states({"healer_tracker_available": "true"})
+        self._maybe_run_harness_canaries()
         self._maybe_run_scan()
         self._ingest_ready_issues()
         self.preflight.refresh_all(force=False)
@@ -668,6 +686,330 @@ class AutonomousHealerLoop:
         for key, value in summary.items():
             payload[f"healer_reconcile_{key}"] = str(max(0, int(value)))
         self.store.set_states(payload)
+        runtime_reaped = max(0, int(summary.get("reaped_orphan_app_runtimes", 0) or 0))
+        artifact_cleaned = max(0, int(summary.get("cleaned_artifact_roots", 0) or 0))
+        browser_sessions_cleaned = max(0, int(summary.get("cleaned_browser_sessions", 0) or 0))
+        if runtime_reaped:
+            self._increment_state_counter("healer_orphan_runtime_reap_events", amount=runtime_reaped)
+        if artifact_cleaned:
+            self._increment_state_counter("healer_orphan_artifact_cleanup_events", amount=artifact_cleaned)
+        if browser_sessions_cleaned:
+            self._increment_state_counter("healer_browser_session_cleanup_events", amount=browser_sessions_cleaned)
+
+    def _maybe_run_harness_canaries(self, *, force: bool = False) -> dict[str, int] | None:
+        profiles = getattr(self.settings, "healer_app_runtime_profiles", {}) or {}
+        profile_map = dict(profiles) if isinstance(profiles, dict) else {}
+        if not profile_map:
+            return None
+        interval_seconds = max(
+            300,
+            int(getattr(self.settings, "healer_harness_canary_interval_seconds", 21600) or 21600),
+        )
+        now = time.monotonic()
+        last_run = float(getattr(self, "_last_harness_canary_at", 0.0))
+        if not force and last_run and (now - last_run) < interval_seconds:
+            return None
+        self._last_harness_canary_at = now
+        passed = 0
+        failed = 0
+        for profile_name in sorted(profile_map):
+            profile = _coerce_loop_runtime_profile(
+                raw_name=profile_name,
+                raw_profile=profile_map.get(profile_name),
+                repo_path=self.repo_path,
+            )
+            if profile is None:
+                continue
+            if self._run_harness_canary_for_profile(profile=profile):
+                passed += 1
+            else:
+                failed += 1
+        self.store.set_states(
+            {
+                "healer_harness_canary_last_run_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        return {"profiles": passed + failed, "passed": passed, "failed": failed}
+
+    def _run_harness_canary_for_profile(self, *, profile: AppRuntimeProfile) -> bool:
+        profile_name = str(profile.name or "").strip()
+        if not profile_name:
+            return False
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_state(f"healer_app_runtime_canary_last_run_at:{profile_name}", now_str)
+        app_harness = self._new_canary_app_harness()
+        browser_harness = self._new_canary_browser_harness()
+        session: AppHarnessSession | None = None
+        artifact_root: Path | None = None
+        canary_run_key = f"canary-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        try:
+            if not tuple(profile.command):
+                raise RuntimeError("Runtime profile command is empty.")
+            if not Path(profile.cwd).expanduser().exists():
+                raise RuntimeError("Runtime profile working directory does not exist.")
+            entry_url = str(profile.readiness_url or "").strip()
+            if not entry_url:
+                raise RuntimeError("Runtime profile readiness_url is required for harness canary.")
+            browser_ready, browser_reason = browser_harness.check_runtime_available()
+            if not browser_ready:
+                raise RuntimeError(browser_reason or "Browser runtime is unavailable for canary.")
+            _boot_result, session = app_harness.boot(profile)
+            artifact_root = Path(
+                tempfile.mkdtemp(prefix=f"flow-healer-canary-{profile_name}-", dir=os.getenv("TMPDIR") or None)
+            ).resolve()
+            journey = browser_harness.capture_journey(
+                profile=profile,
+                entry_url=entry_url,
+                repro_steps=("goto /",),
+                artifact_root=artifact_root,
+                phase="canary",
+                expect_failure=False,
+            )
+            publish_paths = [
+                Path(path).expanduser()
+                for path in (
+                    journey.screenshot_path,
+                    journey.console_log_path,
+                    journey.network_log_path,
+                )
+                if str(path or "").strip()
+            ]
+            if len(publish_paths) < 3 or not all(path.is_file() for path in publish_paths):
+                raise RuntimeError("Harness canary did not capture screenshot + console/network logs.")
+            published_artifacts = self.tracker.publish_artifact_files(
+                issue_id=f"canary-{profile_name}",
+                files=publish_paths,
+                branch=str(
+                    getattr(self.settings, "healer_github_artifact_branch", "flow-healer-artifacts")
+                    or "flow-healer-artifacts"
+                ).strip()
+                or "flow-healer-artifacts",
+                source_branch=str(getattr(self.settings, "healer_default_branch", "main") or "main").strip() or "main",
+                run_key=canary_run_key,
+                retention_days=int(getattr(self.settings, "healer_github_artifact_retention_days", 30) or 30),
+                metadata={"canary_profile": profile_name, "canary": True},
+                max_file_bytes=int(
+                    getattr(self.settings, "healer_github_artifact_max_file_bytes", 5 * 1024 * 1024)
+                    or 5 * 1024 * 1024
+                ),
+                max_run_bytes=int(
+                    getattr(self.settings, "healer_github_artifact_max_run_bytes", 25 * 1024 * 1024)
+                    or 25 * 1024 * 1024
+                ),
+                max_branch_bytes=int(
+                    getattr(self.settings, "healer_github_artifact_max_branch_bytes", 250 * 1024 * 1024)
+                    or 250 * 1024 * 1024
+                ),
+            )
+            if not isinstance(published_artifacts, list) or not published_artifacts:
+                raise RuntimeError("Harness canary failed to publish browser artifacts.")
+            if artifact_root is not None:
+                canary_bundle = {
+                    "artifact_root": str(artifact_root),
+                    "browser_session_root": str(artifact_root),
+                }
+                self._record_browser_session_reference(
+                    issue_id=f"canary-{profile_name}",
+                    attempt_id=canary_run_key,
+                    artifact_bundle=canary_bundle,
+                )
+                self._record_artifact_root_reference(
+                    issue_id=f"canary-{profile_name}",
+                    attempt_id=canary_run_key,
+                    artifact_bundle=canary_bundle,
+                )
+            self.store.set_states(
+                {
+                    f"healer_app_runtime_canary_last_success_at:{profile_name}": now_str,
+                    f"healer_app_runtime_canary_last_failure_at:{profile_name}": "",
+                    f"healer_app_runtime_canary_last_failure_reason:{profile_name}": "",
+                    f"healer_app_runtime_profile_last_seen_at:{profile_name}": now_str,
+                }
+            )
+            return True
+        except Exception as exc:
+            reason = str(exc).strip() or "Harness canary failed."
+            self._increment_state_counter("healer_harness_canary_failures")
+            if "publish" in reason.lower():
+                self._increment_state_counter("healer_artifact_publish_failures")
+                self.store.set_state("healer_artifact_publish_last_failure_at", now_str)
+            if any(token in reason.lower() for token in ("capture", "screenshot", "console", "network")):
+                self._increment_state_counter("healer_browser_artifact_capture_failures")
+            self.store.set_states(
+                {
+                    f"healer_app_runtime_canary_last_failure_at:{profile_name}": now_str,
+                    f"healer_app_runtime_canary_last_failure_reason:{profile_name}": reason[:500],
+                }
+            )
+            logger.warning("Harness canary failed for runtime profile %s: %s", profile_name, reason)
+            return False
+        finally:
+            if session is not None:
+                try:
+                    session.stop()
+                except Exception as exc:
+                    logger.warning("Failed to stop canary app runtime profile '%s': %s", profile_name, exc)
+
+    @staticmethod
+    def _new_canary_app_harness() -> LocalAppHarness:
+        return LocalAppHarness()
+
+    @staticmethod
+    def _new_canary_browser_harness() -> LocalBrowserHarness:
+        return LocalBrowserHarness()
+
+    def _record_harness_attempt_observability(
+        self,
+        *,
+        issue_id: str,
+        attempt_id: str,
+        test_summary: dict[str, object] | None,
+        workspace_status: dict[str, object] | None,
+        failure_class: str,
+    ) -> None:
+        runtime_summary = self._resolve_attempt_runtime_summary(
+            test_summary=test_summary,
+            workspace_status=workspace_status,
+        )
+        artifact_bundle = self._resolve_attempt_artifact_bundle(
+            test_summary=test_summary,
+            workspace_status=workspace_status,
+        )
+        if runtime_summary:
+            self._record_runtime_profile_activity(
+                issue_id=issue_id,
+                attempt_id=attempt_id,
+                runtime_summary=runtime_summary,
+            )
+        if artifact_bundle:
+            self._record_browser_session_reference(
+                issue_id=issue_id,
+                attempt_id=attempt_id,
+                artifact_bundle=artifact_bundle,
+            )
+            self._record_artifact_root_reference(
+                issue_id=issue_id,
+                attempt_id=attempt_id,
+                artifact_bundle=artifact_bundle,
+            )
+        self._record_harness_failure_counters(
+            test_summary=test_summary,
+            artifact_bundle=artifact_bundle,
+            failure_class=failure_class,
+        )
+
+    def _record_runtime_profile_activity(
+        self,
+        *,
+        issue_id: str,
+        attempt_id: str,
+        runtime_summary: dict[str, object],
+    ) -> None:
+        app_harness = runtime_summary.get("app_harness")
+        runtime_info = dict(app_harness) if isinstance(app_harness, dict) else {}
+        profile_name = str(runtime_info.get("profile") or "").strip()
+        process = runtime_info.get("process")
+        process_info = dict(process) if isinstance(process, dict) else {}
+        pid = self._coerce_int(process_info.get("pid"), default=0)
+        if not profile_name:
+            return
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_state(f"healer_app_runtime_profile_last_seen_at:{profile_name}", now_str)
+        if pid <= 0:
+            return
+        self.store.set_state(
+            f"healer_app_runtime_ref:{issue_id}:{attempt_id}",
+            json.dumps(
+                {
+                    "issue_id": issue_id,
+                    "attempt_id": attempt_id,
+                    "profile": profile_name,
+                    "pid": pid,
+                    "pgid": pid,
+                    "started_at": now_str,
+                }
+            ),
+        )
+
+    def _record_artifact_root_reference(
+        self,
+        *,
+        issue_id: str,
+        attempt_id: str,
+        artifact_bundle: dict[str, object],
+    ) -> None:
+        artifact_root = str(artifact_bundle.get("artifact_root") or "").strip()
+        if not artifact_root:
+            return
+        retention_until = (
+            datetime.now(UTC) + timedelta(days=max(1, int(getattr(self.settings, "healer_github_artifact_retention_days", 30) or 30)))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_state(
+            f"healer_artifact_root_ref:{issue_id}:{attempt_id}",
+            json.dumps(
+                {
+                    "issue_id": issue_id,
+                    "attempt_id": attempt_id,
+                    "path": artifact_root,
+                    "retention_until": retention_until,
+                }
+            ),
+        )
+
+    def _record_browser_session_reference(
+        self,
+        *,
+        issue_id: str,
+        attempt_id: str,
+        artifact_bundle: dict[str, object],
+    ) -> None:
+        browser_session_root = str(
+            artifact_bundle.get("browser_session_root")
+            or artifact_bundle.get("artifact_root")
+            or ""
+        ).strip()
+        if not browser_session_root:
+            return
+        browser_profile = artifact_bundle.get("browser_profile")
+        browser_profile_map = dict(browser_profile) if isinstance(browser_profile, dict) else {}
+        retention_until = (
+            datetime.now(UTC)
+            + timedelta(days=max(1, int(getattr(self.settings, "healer_github_artifact_retention_days", 30) or 30)))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        self.store.set_state(
+            f"healer_browser_session_ref:{issue_id}:{attempt_id}",
+            json.dumps(
+                {
+                    "issue_id": issue_id,
+                    "attempt_id": attempt_id,
+                    "path": browser_session_root,
+                    "browser": str(browser_profile_map.get("browser") or ""),
+                    "retention_until": retention_until,
+                }
+            ),
+        )
+
+    def _record_harness_failure_counters(
+        self,
+        *,
+        test_summary: dict[str, object] | None,
+        artifact_bundle: dict[str, object] | None,
+        failure_class: str,
+    ) -> None:
+        summary = dict(test_summary or {})
+        bundle = dict(artifact_bundle or {})
+        family = str(summary.get("browser_failure_family") or "").strip().lower()
+        publish_status = str(summary.get("artifact_publish_status") or "").strip().lower()
+        bundle_status = str(bundle.get("status") or summary.get("artifact_bundle_status") or "").strip().lower()
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        if family == "artifact_publish" or publish_status in {"failed", "skipped", "rejected"} or failure_class == "artifact_publish_failed":
+            self._increment_state_counter("healer_artifact_publish_failures")
+            self.store.set_state("healer_artifact_publish_last_failure_at", now_str)
+        if family == "artifact_capture" or bundle_status in {"failed", "missing"} or failure_class in {
+            "artifact_capture_failed",
+            "browser_artifact_capture_failed",
+        }:
+            self._increment_state_counter("healer_browser_artifact_capture_failures")
 
     def _maybe_shutdown_idle_docker_runtime(self) -> None:
         if not docker_idle_shutdown_enabled():
@@ -2955,6 +3297,8 @@ class AutonomousHealerLoop:
         logger.info("Claimed issue #%s (%s)", issue.issue_id, issue.title[:120])
         self._record_worker_heartbeat(status="processing", issue_id=issue.issue_id)
         task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
+        existing_pr_number = self._coerce_int(row.get("pr_number"), default=0)
+        existing_pr_state = str(row.get("pr_state") or "").strip()
         clarification_reasons = self._clarification_reasons_for_task_spec(task_spec=task_spec)
         if clarification_reasons:
             clarification_key = f"healer_clarification_posted:{issue.issue_id}"
@@ -3377,6 +3721,32 @@ class AutonomousHealerLoop:
                         if not str(run_result.test_summary or "").strip():
                             test_summary = dict(run_result.test_summary or {})
                 if not run_result.success:
+                    judgment_assessment = self._build_judgment_assessment(
+                        task_spec=task_spec,
+                        feedback_context=feedback_context,
+                        test_summary=test_summary,
+                        verifier_summary=verifier_summary,
+                        workspace_status=run_result.workspace_status,
+                        pr_number=existing_pr_number,
+                        failure_reason=failure_reason,
+                    )
+                    if judgment_assessment.requires_human:
+                        test_summary = self._apply_judgment_assessment(
+                            test_summary=test_summary,
+                            assessment=judgment_assessment,
+                            verifier_summary=verifier_summary,
+                        )
+                        failure_class = "judgment_required"
+                        failure_reason = judgment_assessment.summary
+                        issue_state = self._route_judgment_required(
+                            issue_id=issue.issue_id,
+                            issue_state=str(row.get("state") or issue_state),
+                            pr_number=existing_pr_number,
+                            pr_state=existing_pr_state,
+                            assessment=judgment_assessment,
+                        )
+                        attempt_state = issue_state
+                        return
                     if run_result.failure_fingerprint and not str(test_summary.get("failure_fingerprint") or "").strip():
                         test_summary["failure_fingerprint"] = run_result.failure_fingerprint
                     logger.info(
@@ -3571,6 +3941,32 @@ class AutonomousHealerLoop:
                             swarm_outcome=swarm_outcome,
                         )
                 if _should_block_on_verification(self.settings, verification):
+                    judgment_assessment = self._build_judgment_assessment(
+                        task_spec=task_spec,
+                        feedback_context=feedback_context,
+                        test_summary=test_summary,
+                        verifier_summary=verifier_summary,
+                        workspace_status=run_result.workspace_status,
+                        pr_number=existing_pr_number,
+                        failure_reason=failure_reason or verification.summary,
+                    )
+                    if judgment_assessment.requires_human:
+                        test_summary = self._apply_judgment_assessment(
+                            test_summary=test_summary,
+                            assessment=judgment_assessment,
+                            verifier_summary=verifier_summary,
+                        )
+                        failure_class = "judgment_required"
+                        failure_reason = judgment_assessment.summary
+                        issue_state = self._route_judgment_required(
+                            issue_id=issue.issue_id,
+                            issue_state=str(row.get("state") or issue_state),
+                            pr_number=existing_pr_number,
+                            pr_state=existing_pr_state,
+                            assessment=judgment_assessment,
+                        )
+                        attempt_state = issue_state
+                        return
                     issue_state = self._backoff_or_fail(
                         issue_id=issue.issue_id,
                         attempt_no=attempt_no,
@@ -3589,6 +3985,32 @@ class AutonomousHealerLoop:
                     return
 
             if _abort_for_lost_lease():
+                return
+
+            judgment_assessment = self._build_judgment_assessment(
+                task_spec=task_spec,
+                feedback_context=feedback_context,
+                test_summary=test_summary,
+                verifier_summary=verifier_summary,
+                workspace_status=run_result.workspace_status,
+                pr_number=existing_pr_number,
+            )
+            if judgment_assessment.requires_human:
+                test_summary = self._apply_judgment_assessment(
+                    test_summary=test_summary,
+                    assessment=judgment_assessment,
+                    verifier_summary=verifier_summary,
+                )
+                failure_class = "judgment_required"
+                failure_reason = judgment_assessment.summary
+                issue_state = self._route_judgment_required(
+                    issue_id=issue.issue_id,
+                    issue_state=str(row.get("state") or issue_state),
+                    pr_number=existing_pr_number,
+                    pr_state=existing_pr_state,
+                    assessment=judgment_assessment,
+                )
+                attempt_state = issue_state
                 return
 
             if (
@@ -3760,6 +4182,13 @@ class AutonomousHealerLoop:
             lease_stop.set()
             lease_thread.join(timeout=1.0)
             if attempt_id:
+                self._record_harness_attempt_observability(
+                    issue_id=issue.issue_id,
+                    attempt_id=attempt_id,
+                    test_summary=test_summary,
+                    workspace_status=getattr(run_result, "workspace_status", None),
+                    failure_class=failure_class,
+                )
                 judgment_reason_code = self._resolve_attempt_judgment_reason_code(
                     test_summary=test_summary,
                     workspace_status=getattr(run_result, "workspace_status", None),
@@ -5003,6 +5432,126 @@ class AutonomousHealerLoop:
             "-- Flow Healer"
         )
 
+    def _build_judgment_assessment(
+        self,
+        *,
+        task_spec: HealerTaskSpec,
+        feedback_context: str,
+        test_summary: dict[str, Any] | None,
+        verifier_summary: dict[str, Any] | None,
+        workspace_status: dict[str, Any] | None,
+        pr_number: int,
+        failure_reason: str = "",
+    ) -> JudgmentAssessment:
+        return build_judgment_assessment(
+            task_spec=task_spec,
+            feedback_context=feedback_context,
+            test_summary=test_summary,
+            verifier_summary=verifier_summary,
+            workspace_status=workspace_status,
+            pr_number=pr_number,
+            failure_reason=failure_reason,
+        )
+
+    @classmethod
+    def _apply_judgment_assessment(
+        cls,
+        *,
+        test_summary: dict[str, Any] | None,
+        assessment: JudgmentAssessment,
+        verifier_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        enriched = dict(test_summary or {})
+        if not assessment.requires_human:
+            return enriched
+        packet = dict(assessment.packet or {})
+        packet.setdefault("reason_code", assessment.reason_code)
+        packet.setdefault("summary", assessment.summary)
+        if verifier_summary:
+            packet.setdefault("verifier_summary", dict(verifier_summary))
+        packet.setdefault("resume_hint", packet.get("resume_hint") or "")
+        summary = {
+            "reason_code": assessment.reason_code,
+            "summary": str(packet.get("summary") or assessment.summary).strip(),
+            "decision_needed": str(packet.get("decision_needed") or "").strip(),
+            "resume_hint": str(packet.get("resume_hint") or "").strip(),
+        }
+        enriched["judgment_reason_code"] = assessment.reason_code
+        enriched["judgment_summary"] = summary
+        enriched["escalation_packet"] = packet
+        return enriched
+
+    def _build_judgment_comment(self, packet: dict[str, Any]) -> str:
+        normalized_packet = dict(packet or {})
+        reason_code = normalize_reason_code(normalized_packet.get("reason_code") or "")
+        summary = self._clean_comment_text(normalized_packet.get("summary") or "", max_chars=320)
+        decision_needed = self._clean_comment_text(normalized_packet.get("decision_needed") or "", max_chars=320)
+        resume_hint = self._clean_comment_text(normalized_packet.get("resume_hint") or "", max_chars=240)
+        bullets: list[str] = []
+        if reason_code:
+            bullets.append(f"Reason code: `{reason_code}`")
+        if summary:
+            bullets.append(f"Summary: {summary}")
+        if decision_needed:
+            bullets.append(f"Decision needed: {decision_needed}")
+        attempted_actions = normalized_packet.get("attempted_actions")
+        if isinstance(attempted_actions, list):
+            rendered_actions = [
+                self._clean_comment_text(item, max_chars=180)
+                for item in attempted_actions
+                if self._clean_comment_text(item, max_chars=180)
+            ]
+            if rendered_actions:
+                bullets.append(f"Attempted actions: {' | '.join(rendered_actions[:4])}")
+        evidence_links = normalized_packet.get("evidence_links")
+        if isinstance(evidence_links, list):
+            rendered_links = []
+            for item in evidence_links[:4]:
+                if not isinstance(item, dict):
+                    continue
+                label = self._clean_comment_text(item.get("label") or "", max_chars=80)
+                href = self._clean_comment_text(item.get("href") or "", max_chars=220)
+                if label and href:
+                    rendered_links.append(f"{label}: {href}")
+                elif href:
+                    rendered_links.append(href)
+            if rendered_links:
+                bullets.append(f"Evidence: {' | '.join(rendered_links)}")
+        pr_number = self._coerce_int(normalized_packet.get("pr_number"), default=0)
+        if pr_number > 0:
+            bullets.append(f"PR: `#{pr_number}`")
+        if resume_hint:
+            bullets.append(f"Resume: {resume_hint}")
+        return self._format_flow_status_comment(
+            "Judgment required",
+            "Automation stopped because the next step needs a human decision rather than another deterministic retry.",
+            bullets,
+        )
+
+    def _route_judgment_required(
+        self,
+        *,
+        issue_id: str,
+        issue_state: str,
+        pr_number: int,
+        pr_state: str,
+        assessment: JudgmentAssessment,
+    ) -> str:
+        routed_state = "pr_open" if pr_number > 0 or issue_state in {"pr_open", "pr_pending_approval"} else "blocked"
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state=routed_state,
+            pr_number=pr_number if pr_number > 0 else None,
+            pr_state=pr_state if pr_number > 0 else None,
+            last_failure_class="judgment_required",
+            last_failure_reason=str(assessment.summary or "").strip()[:500],
+            clear_lease=True,
+        )
+        self._sync_blocked_issue_label(issue_id=issue_id, state=routed_state)
+        self._sync_outcome_issue_label(issue_id=issue_id, label="")
+        self._post_issue_status(issue_id=issue_id, body=self._build_judgment_comment(dict(assessment.packet or {})))
+        return routed_state
+
     @staticmethod
     def _format_flow_status_comment(
         title: str,
@@ -5252,18 +5801,46 @@ class AutonomousHealerLoop:
         if transcript_path is not None:
             publish_paths.append(transcript_path)
         if not publish_paths:
+            summary["artifact_publish_status"] = "skipped"
             return summary
         artifact_branch = str(
             getattr(self.settings, "healer_github_artifact_branch", "flow-healer-artifacts") or "flow-healer-artifacts"
         ).strip() or "flow-healer-artifacts"
-        published_artifacts = publish_fn(
-            issue_id=issue_id,
-            files=publish_paths,
-            branch=artifact_branch,
-            source_branch=str(base_branch or "main").strip() or "main",
-            run_key=str(attempt_id or "latest").strip() or "latest",
-        )
+        retention_days = int(getattr(self.settings, "healer_github_artifact_retention_days", 30) or 30)
+        try:
+            published_artifacts = publish_fn(
+                issue_id=issue_id,
+                files=publish_paths,
+                branch=artifact_branch,
+                source_branch=str(base_branch or "main").strip() or "main",
+                run_key=str(attempt_id or "latest").strip() or "latest",
+                retention_days=retention_days,
+                metadata={
+                    "attempt_id": str(attempt_id or "latest").strip() or "latest",
+                    "browser_log_publish_mode": str(
+                        getattr(self.settings, "healer_browser_log_publish_mode", "always") or "always"
+                    ).strip()
+                    or "always",
+                },
+                max_file_bytes=int(
+                    getattr(self.settings, "healer_github_artifact_max_file_bytes", 5 * 1024 * 1024)
+                    or 5 * 1024 * 1024
+                ),
+                max_run_bytes=int(
+                    getattr(self.settings, "healer_github_artifact_max_run_bytes", 25 * 1024 * 1024)
+                    or 25 * 1024 * 1024
+                ),
+                max_branch_bytes=int(
+                    getattr(self.settings, "healer_github_artifact_max_branch_bytes", 250 * 1024 * 1024)
+                    or 250 * 1024 * 1024
+                ),
+            )
+        except Exception as exc:
+            summary["artifact_publish_status"] = "failed"
+            summary["artifact_publish_reason"] = str(exc)[:500]
+            return summary
         if not isinstance(published_artifacts, list) or not published_artifacts:
+            summary["artifact_publish_status"] = "failed"
             return summary
         enriched_links = [dict(item) for item in artifact_links]
         published_root = ""
@@ -5305,6 +5882,11 @@ class AutonomousHealerLoop:
             if published_root:
                 bundle_dict["github_artifact_root"] = published_root
             summary["artifact_bundle"] = bundle_dict
+        summary["artifact_publish_status"] = "published"
+        summary["artifact_retention"] = {
+            "branch": artifact_branch,
+            "retention_days": retention_days,
+        }
         summary["artifact_links"] = enriched_links
         return summary
 
@@ -5961,6 +6543,72 @@ def _strip_execution_root_prefix(*, target: str, execution_root: str) -> str:
     if execution_root and cleaned.startswith(f"{execution_root}/"):
         return cleaned[len(execution_root) + 1 :]
     return cleaned
+
+
+def _coerce_loop_runtime_profile(*, raw_name: str, raw_profile: object, repo_path: Path) -> AppRuntimeProfile | None:
+    if isinstance(raw_profile, AppRuntimeProfile):
+        return raw_profile
+    if not isinstance(raw_profile, dict):
+        return None
+    profile_name = str(raw_profile.get("name") or raw_name).strip()
+    if not profile_name:
+        return None
+    raw_command = raw_profile.get("command") or raw_profile.get("start_command") or raw_profile.get("boot_command") or ()
+    if isinstance(raw_command, str):
+        command = tuple(part for part in raw_command.split() if part)
+    elif isinstance(raw_command, (list, tuple)):
+        command = tuple(str(part).strip() for part in raw_command if str(part).strip())
+    else:
+        command = ()
+    cwd_value = raw_profile.get("cwd") or raw_profile.get("working_directory") or "."
+    cwd_path = Path(str(cwd_value or ".")).expanduser()
+    if not cwd_path.is_absolute():
+        cwd_path = (repo_path / cwd_path).resolve()
+    env_value = raw_profile.get("env") if isinstance(raw_profile.get("env"), dict) else {}
+    viewport_value = raw_profile.get("viewport") if isinstance(raw_profile.get("viewport"), dict) else None
+    return AppRuntimeProfile(
+        name=profile_name,
+        command=command,
+        cwd=cwd_path,
+        env={str(key): str(value) for key, value in dict(env_value or {}).items()},
+        install_command=_normalize_runtime_profile_command(raw_profile.get("install_command")),
+        install_marker_path=str(raw_profile.get("install_marker_path") or "").strip(),
+        readiness_url=str(raw_profile.get("readiness_url") or raw_profile.get("ready_url") or "").strip() or None,
+        readiness_log_text=str(raw_profile.get("readiness_log_text") or raw_profile.get("ready_log_text") or "").strip() or None,
+        browser=str(raw_profile.get("browser") or "").strip(),
+        headless=_coerce_bool(raw_profile.get("headless"), default=True),
+        viewport={str(key): int(value) for key, value in dict(viewport_value or {}).items()} or None,
+        device=str(raw_profile.get("device") or "").strip(),
+        startup_timeout_seconds=_coerce_float(raw_profile.get("startup_timeout_seconds"), default=30.0),
+        shutdown_timeout_seconds=_coerce_float(raw_profile.get("shutdown_timeout_seconds"), default=10.0),
+        poll_interval_seconds=_coerce_float(raw_profile.get("poll_interval_seconds"), default=0.1),
+    )
+
+
+def _normalize_runtime_profile_command(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part for part in value.split() if part)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(part).strip() for part in value if str(part).strip())
+    return ()
+
+
+def _coerce_bool(value: object, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _coerce_float(value: object, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _default_backend_for_connector(connector: ConnectorProtocol) -> str:

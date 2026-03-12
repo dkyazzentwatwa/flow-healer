@@ -138,6 +138,7 @@ def issue_detail_payload(
             "paused": bool(repo_row.get("paused")),
             "trust": dict(repo_row.get("trust") or {}),
             "policy": dict(repo_row.get("policy") or {}),
+            "harness_health": dict(repo_row.get("harness_health") or {}),
         },
         "issue": issue_view,
         "attempts": attempts,
@@ -948,6 +949,13 @@ def _decorate_attempt_record(attempt: dict[str, Any]) -> dict[str, Any]:
     row["artifact_bundle"] = dict(artifact_bundle) if isinstance(artifact_bundle, dict) else {}
     ci_status_summary = row.get("ci_status_summary")
     row["ci_status_summary"] = dict(ci_status_summary) if isinstance(ci_status_summary, dict) else {}
+    test_summary = row.get("test_summary")
+    if isinstance(test_summary, dict):
+        row["judgment_summary"] = _normalized_attempt_dict_field(test_summary, "judgment_summary")
+        row["escalation_packet"] = _normalized_attempt_dict_field(test_summary, "escalation_packet")
+    else:
+        row["judgment_summary"] = {}
+        row["escalation_packet"] = {}
     return row
 
 
@@ -961,6 +969,11 @@ def _decorate_artifact_link(link: dict[str, Any]) -> dict[str, Any]:
     else:
         row["web_href"] = ""
     return row
+
+
+def _normalized_attempt_dict_field(source: dict[str, Any], key: str) -> dict[str, Any]:
+    value = source.get(key)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def render_dashboard(config: AppConfig, service: FlowHealerService, notice: str) -> str:

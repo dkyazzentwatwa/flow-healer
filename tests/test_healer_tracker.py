@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+from datetime import UTC, datetime, timedelta
+from unittest import mock
 from urllib.error import HTTPError
 from pathlib import Path
 
@@ -661,10 +664,16 @@ def test_publish_artifact_files_creates_branch_and_returns_markdown_ready_urls(m
                 "sha": "base123",
             }
             return {"ref": "refs/heads/flow-healer-artifacts"}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return []
         if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure.png?ref=flow-healer-artifacts":
             assert method == "GET"
             return {}
         if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure-console.log?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/_meta.json?ref=flow-healer-artifacts":
             assert method == "GET"
             return {}
         if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/failure.png":
@@ -683,6 +692,13 @@ def test_publish_artifact_files_creates_branch_and_returns_markdown_ready_urls(m
             assert body["content"] == "Y29uc29sZSBvdXRwdXQ="
             assert "sha" not in body
             return {"content": {"path": "flow-healer/evidence/issue-123/attempt-1/failure-console.log", "sha": "logsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-1/_meta.json":
+            assert method == "PUT"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            assert body["message"] == "chore: publish flow-healer evidence for issue #123"
+            assert "sha" not in body
+            return {"content": {"path": "flow-healer/evidence/issue-123/attempt-1/_meta.json", "sha": "metasha"}}
         raise AssertionError(path)
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
@@ -695,13 +711,14 @@ def test_publish_artifact_files_creates_branch_and_returns_markdown_ready_urls(m
         run_key="attempt-1",
     )
 
-    assert [artifact.name for artifact in published] == ["failure.png", "failure-console.log"]
+    assert [artifact.name for artifact in published] == ["failure.png", "failure-console.log", "_meta.json"]
     assert published[0].remote_path == "flow-healer/evidence/issue-123/attempt-1/failure.png"
     assert published[0].html_url == "https://github.com/owner/repo/blob/flow-healer-artifacts/flow-healer/evidence/issue-123/attempt-1/failure.png"
     assert published[0].markdown_url == "https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-123/attempt-1/failure.png"
     assert published[0].download_url == "https://raw.githubusercontent.com/owner/repo/flow-healer-artifacts/flow-healer/evidence/issue-123/attempt-1/failure.png"
     assert published[0].content_type == "image/png"
     assert published[1].content_type == "text/plain"
+    assert published[2].content_type == "application/json"
 
 
 def test_artifact_content_type_prefers_stable_known_text_mappings(monkeypatch):
@@ -724,15 +741,27 @@ def test_publish_artifact_files_updates_existing_artifact_sha(monkeypatch, tmp_p
         if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
             assert method == "GET"
             return {"ref": "refs/heads/flow-healer-artifacts", "object": {"sha": "branchsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return []
         if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png?ref=flow-healer-artifacts":
             assert method == "GET"
             return {"sha": "existingsha"}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
         if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png":
             assert method == "PUT"
             assert body is not None
             assert body["branch"] == "flow-healer-artifacts"
             assert body["sha"] == "existingsha"
             return {"content": {"path": "flow-healer/evidence/issue-123/latest/resolution.png", "sha": "newsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json":
+            assert method == "PUT"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            assert "sha" not in body
+            return {"content": {"path": "flow-healer/evidence/issue-123/latest/_meta.json", "sha": "metasha"}}
         raise AssertionError(path)
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
@@ -743,10 +772,12 @@ def test_publish_artifact_files_updates_existing_artifact_sha(monkeypatch, tmp_p
         branch="flow-healer-artifacts",
     )
 
-    assert len(published) == 1
+    assert len(published) == 2
     assert published[0].sha == "newsha"
+    assert published[1].name == "_meta.json"
     assert calls == [
         ("/repos/owner/repo/git/ref/heads/flow-healer-artifacts", "GET", None),
+        ("/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts", "GET", None),
         (
             "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/resolution.png?ref=flow-healer-artifacts",
             "GET",
@@ -760,6 +791,20 @@ def test_publish_artifact_files_updates_existing_artifact_sha(monkeypatch, tmp_p
                 "content": "iVBORw0KGgp1cGRhdGVk",
                 "branch": "flow-healer-artifacts",
                 "sha": "existingsha",
+            },
+        ),
+        (
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json?ref=flow-healer-artifacts",
+            "GET",
+            None,
+        ),
+        (
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json",
+            "PUT",
+            {
+                "message": "chore: publish flow-healer evidence for issue #123",
+                "content": mock.ANY,
+                "branch": "flow-healer-artifacts",
             },
         ),
     ]
@@ -777,6 +822,17 @@ def test_publish_artifact_files_skips_unsupported_files(monkeypatch, tmp_path):
         if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
             assert method == "GET"
             return {"ref": "refs/heads/flow-healer-artifacts", "object": {"sha": "branchsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return []
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json":
+            assert method == "PUT"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            return {"content": {"path": "flow-healer/evidence/issue-123/latest/_meta.json", "sha": "metasha"}}
         raise AssertionError(path)
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
@@ -787,10 +843,180 @@ def test_publish_artifact_files_skips_unsupported_files(monkeypatch, tmp_path):
         branch="flow-healer-artifacts",
     )
 
-    assert published == []
+    assert [artifact.name for artifact in published] == ["_meta.json"]
     assert calls == [
         ("/repos/owner/repo/git/ref/heads/flow-healer-artifacts", "GET", None),
+        ("/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts", "GET", None),
+        (
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json?ref=flow-healer-artifacts",
+            "GET",
+            None,
+        ),
+        (
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json",
+            "PUT",
+            {
+                "message": "chore: publish flow-healer evidence for issue #123",
+                "content": mock.ANY,
+                "branch": "flow-healer-artifacts",
+            },
+        ),
     ]
+
+
+def test_publish_artifact_files_honors_configured_file_size_limit(monkeypatch, tmp_path):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    artifact = tmp_path / "console.log"
+    artifact.write_text("x" * 32, encoding="utf-8")
+    calls: list[tuple[str, str, object]] = []
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        calls.append((path, method, body))
+        if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
+            assert method == "GET"
+            return {"ref": "refs/heads/flow-healer-artifacts", "object": {"sha": "branchsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return []
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/latest/_meta.json":
+            assert method == "PUT"
+            return {"content": {"path": "flow-healer/evidence/issue-123/latest/_meta.json", "sha": "metasha"}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    published = tracker.publish_artifact_files(
+        issue_id="123",
+        files=[artifact],
+        branch="flow-healer-artifacts",
+        max_file_bytes=16,
+    )
+
+    assert [artifact.name for artifact in published] == ["_meta.json"]
+
+
+def test_publish_artifact_files_publishes_meta_and_prunes_expired_runs(monkeypatch, tmp_path):
+    tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
+    tracker.repo_slug = "owner/repo"
+    screenshot = tmp_path / "failure.png"
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nfresh")
+    expired_meta = {
+        "issue_id": "123",
+        "attempt_id": "attempt-old",
+        "retention_until": (datetime.now(tz=UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    fresh_meta = {
+        "issue_id": "123",
+        "attempt_id": "attempt-fresh",
+        "retention_until": (datetime.now(tz=UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    deleted_paths: list[str] = []
+    put_payloads: dict[str, dict[str, object]] = {}
+
+    def fake_request(path: str, *, method: str = "GET", body=None):
+        if path == "/repos/owner/repo/git/ref/heads/flow-healer-artifacts":
+            assert method == "GET"
+            return {"ref": "refs/heads/flow-healer-artifacts", "object": {"sha": "branchsha"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return [
+                {
+                    "type": "dir",
+                    "name": "attempt-old",
+                    "path": "flow-healer/evidence/issue-123/attempt-old",
+                },
+                {
+                    "type": "dir",
+                    "name": "attempt-fresh",
+                    "path": "flow-healer/evidence/issue-123/attempt-fresh",
+                },
+            ]
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-old/_meta.json?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {
+                "sha": "meta-old-sha",
+                "encoding": "base64",
+                "content": __import__("base64").b64encode(json.dumps(expired_meta).encode("utf-8")).decode("ascii"),
+            }
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-fresh/_meta.json?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {
+                "sha": "meta-fresh-sha",
+                "encoding": "base64",
+                "content": __import__("base64").b64encode(json.dumps(fresh_meta).encode("utf-8")).decode("ascii"),
+            }
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-old?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return [
+                {
+                    "type": "file",
+                    "name": "_meta.json",
+                    "path": "flow-healer/evidence/issue-123/attempt-old/_meta.json",
+                    "sha": "meta-old-sha",
+                },
+                {
+                    "type": "file",
+                    "name": "failure.png",
+                    "path": "flow-healer/evidence/issue-123/attempt-old/failure.png",
+                    "sha": "old-png-sha",
+                },
+            ]
+        if path in {
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-old/_meta.json",
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-old/failure.png",
+        }:
+            assert method == "DELETE"
+            assert body is not None
+            assert body["branch"] == "flow-healer-artifacts"
+            deleted_paths.append(path)
+            return {"commit": {"sha": "deleted"}}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-2/failure.png?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path == "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-2/_meta.json?ref=flow-healer-artifacts":
+            assert method == "GET"
+            return {}
+        if path in {
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-2/failure.png",
+            "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-2/_meta.json",
+        }:
+            assert method == "PUT"
+            assert body is not None
+            put_payloads[path] = body
+            return {
+                "content": {
+                    "path": path.split("/contents/", 1)[1],
+                    "sha": "newsha",
+                }
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(tracker, "_request_json", fake_request)
+
+    published = tracker.publish_artifact_files(
+        issue_id="123",
+        files=[screenshot],
+        branch="flow-healer-artifacts",
+        run_key="attempt-2",
+        retention_days=30,
+        metadata={"attempt_id": "attempt-2", "pr_number": 77},
+    )
+
+    assert deleted_paths == [
+        "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-old/_meta.json",
+        "/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-old/failure.png",
+    ]
+    assert [artifact.name for artifact in published] == ["failure.png", "_meta.json"]
+    meta_body = put_payloads["/repos/owner/repo/contents/flow-healer/evidence/issue-123/attempt-2/_meta.json"]
+    meta_payload = json.loads(__import__("base64").b64decode(meta_body["content"]).decode("utf-8"))
+    assert meta_payload["issue_id"] == "123"
+    assert meta_payload["attempt_id"] == "attempt-2"
+    assert meta_payload["pr_number"] == 77
+    assert meta_payload["retention_until"]
 
 
 def test_request_json_suppresses_expected_artifact_publish_404_warnings(monkeypatch, caplog):

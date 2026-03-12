@@ -1080,6 +1080,142 @@ def test_status_rows_report_reliability_trend_deltas(tmp_path) -> None:
     assert "day" in daily_rollups[0]
 
 
+def test_status_rows_surface_harness_health_and_harness_rollups(tmp_path) -> None:
+    service = _make_demo_service(
+        tmp_path,
+        healer_app_runtime_profiles={
+            "web": {
+                "cwd": ".",
+                "command": ["npm", "run", "dev"],
+                "readiness_url": "http://127.0.0.1:3000",
+            }
+        },
+    )
+    runtime = service.build_runtime(service.config.select_repos("demo")[0])
+    runtime.store.upsert_healer_issue(
+        issue_id="9301",
+        repo="owner/repo",
+        title="Harness issue",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    runtime.store.upsert_healer_issue(
+        issue_id="9302",
+        repo="owner/repo",
+        title="Artifact issue",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=1,
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_9301_1",
+        issue_id="9301",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_9301_1",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={
+            "browser_failure_family": "runtime_boot",
+            "runtime_summary": {"app_harness": {"profile": "web"}},
+        },
+        verifier_summary={},
+        failure_class="app_runtime_boot_failed",
+        failure_reason="App runtime never became ready.",
+    )
+    runtime.store.create_healer_attempt(
+        attempt_id="ha_9302_1",
+        issue_id="9302",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    runtime.store.finish_healer_attempt(
+        attempt_id="ha_9302_1",
+        state="failed",
+        actual_diff_set=[],
+        test_summary={
+            "browser_failure_family": "artifact_publish",
+            "artifact_publish_status": "failed",
+        },
+        verifier_summary={},
+        failure_class="artifact_publish_failed",
+        failure_reason="Remote artifact upload failed.",
+    )
+    runtime.store.set_states(
+        {
+            "healer_artifact_publish_failures": "3",
+            "healer_browser_artifact_capture_failures": "2",
+                "healer_harness_canary_failures": "1",
+                "healer_orphan_runtime_reap_events": "4",
+                "healer_orphan_artifact_cleanup_events": "5",
+                "healer_browser_session_cleanup_events": "2",
+                "healer_stale_runtime_profiles_detected": "1",
+                "healer_stale_runtime_profiles": json.dumps(["web"]),
+            "healer_app_runtime_profile_last_seen_at:web": "2026-03-10 12:30:00",
+            "healer_app_runtime_canary_last_success_at:web": "2026-03-10 12:00:00",
+            "healer_artifact_root_ref:9302:failure": json.dumps(
+                {"issue_id": "9302", "path": str((tmp_path / "artifacts" / "issue-9302").resolve())}
+            ),
+            "healer_app_runtime_ref:9301:web": json.dumps(
+                {"issue_id": "9301", "pid": 901, "pgid": 901, "profile": "web"}
+            ),
+            "healer_browser_session_ref:9302:failure": json.dumps(
+                {"issue_id": "9302", "attempt_id": "failure", "path": str((tmp_path / "artifacts" / "browser" / "issue-9302").resolve())}
+            ),
+        }
+    )
+    (tmp_path / "artifacts" / "issue-9302").mkdir(parents=True)
+    (tmp_path / "artifacts" / "browser" / "issue-9302").mkdir(parents=True)
+    runtime.store.close()
+
+    rows = service.status_rows("demo")
+
+    harness_health = rows[0]["harness_health"]
+    assert harness_health["artifact_publish"]["failures"] == 3
+    assert harness_health["artifact_publish"]["capture_failures"] == 2
+    assert harness_health["browser_failure_families"]["counts"] == {
+        "artifact_publish": 1,
+        "runtime_boot": 1,
+    }
+    assert harness_health["stale_runtime_profiles"]["count"] == 1
+    assert harness_health["stale_runtime_profiles"]["profiles"] == ["web"]
+    assert harness_health["orphan_cleanup"]["app_runtimes_reaped"] == 4
+    assert harness_health["orphan_cleanup"]["artifact_roots_cleaned"] == 5
+    assert harness_health["orphan_cleanup"]["browser_sessions_cleaned"] == 2
+    assert harness_health["orphan_cleanup"]["tracked_app_runtimes"] == 1
+    assert harness_health["orphan_cleanup"]["tracked_artifact_roots"] == 1
+    assert harness_health["browser_sessions"]["tracked"] == 1
+    assert harness_health["orphan_cleanup"]["tracked_browser_sessions"] == 1
+    assert harness_health["browser_sessions"]["existing_roots"] == 1
+    assert harness_health["runtime_profiles"] == [
+        {
+            "profile": "web",
+            "configured": True,
+            "status": "stale",
+            "stale": True,
+            "last_seen_at": "2026-03-10 12:30:00",
+            "last_canary_at": "2026-03-10 12:00:00",
+        }
+    ]
+    assert harness_health["canary_profiles"]["failures"] == 1
+    assert harness_health["canary_profiles"]["profiles"][0]["profile"] == "web"
+    rollup = rows[0]["reliability_daily_rollups"][0]
+    assert rollup["harness"]["artifact_publish_failures"] == 1
+    assert rollup["harness"]["browser_failure_families"] == {
+        "artifact_publish": 1,
+        "runtime_boot": 1,
+    }
+
+
 def test_status_rows_include_cached_preflight_reports(tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -1543,7 +1679,17 @@ def test_status_rows_surface_attempt_observability_fields(tmp_path, monkeypatch)
         attempt_id="ha_302_1",
         state="failed",
         actual_diff_set=["src/demo.py"],
-        test_summary={"failed_tests": 1},
+        test_summary={
+            "failed_tests": 1,
+            "judgment_summary": {
+                "reason_code": "tests_failed",
+                "summary": "Tests failed after validation.",
+            },
+            "escalation_packet": {
+                "reason_code": "tests_failed",
+                "decision_needed": "Review the validation failure before retrying.",
+            },
+        },
         verifier_summary={"summary": "Needs retry"},
         runtime_summary={
             "service": {"status": "degraded", "heartbeat_at": "2026-03-11 10:00:00"},
@@ -1576,6 +1722,8 @@ def test_status_rows_surface_attempt_observability_fields(tmp_path, monkeypatch)
     assert attempt["artifact_links"][0]["label"] == "patch"
     assert attempt["ci_status_summary"]["overall_state"] == "pending"
     assert attempt["judgment_reason_code"] == "tests_failed"
+    assert attempt["judgment_summary"]["reason_code"] == "tests_failed"
+    assert attempt["escalation_packet"]["decision_needed"] == "Review the validation failure before retrying."
 
 
 def test_status_rows_surface_issue_ci_status_summary(tmp_path, monkeypatch) -> None:

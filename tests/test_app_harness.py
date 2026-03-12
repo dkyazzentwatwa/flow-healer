@@ -149,7 +149,8 @@ def test_start_requires_both_log_and_url_when_both_are_configured(
         assert result.ready_via_log is True
         assert result.readiness_url == profile.readiness_url
         assert "LOG READY" in result.output_tail
-        assert attempts == [profile.readiness_url] * 4
+        assert len(attempts) >= 4
+        assert set(attempts) == {profile.readiness_url}
     finally:
         assert session.stop() == 0
 

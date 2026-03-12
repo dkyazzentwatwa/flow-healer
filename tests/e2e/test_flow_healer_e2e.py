@@ -952,6 +952,102 @@ def test_e2e_pr_feedback_requeues_and_updates_existing_pr(tmp_path: Path, monkey
     store.close()
 
 
+def test_e2e_judgment_block_resumes_after_human_guidance(tmp_path: Path, monkeypatch, portable_pytest_gates, fake_github) -> None:
+    repo_path = _build_demo_repo(tmp_path)
+    state = FakeGitHubState(repo_slug="owner/repo")
+    issue_number = state.add_issue(
+        title="Resolve the banner behavior",
+        body=(
+            "Fix demo.py and keep the behavior aligned with product intent.\n\n"
+            "judgment_required_conditions:\n"
+            "- Choose whether save should keep the banner visible or auto-dismiss it.\n"
+        ),
+        labels=["healer:ready", "healer:pr-approved"],
+    )
+
+    def second_fix(prompt: str) -> str:
+        assert "Expected behavior: save should keep the banner visible." in prompt
+        return _make_patch(
+            "demo.py",
+            "def add(a: int, b: int) -> int:\n    return a - b\n",
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+        )
+
+    connector = ScriptedConnector(
+        proposer_outputs={
+            str(issue_number): [
+                _make_patch(
+                    "demo.py",
+                    "def add(a: int, b: int) -> int:\n    return a - b\n",
+                    "def add(a: int, b: int) -> int:\n    return a + b\n",
+                ),
+                second_fix,
+            ]
+        },
+        verifier_outputs={
+            str(issue_number): [
+                json.dumps(
+                    {
+                        "verdict": "pass",
+                        "summary": "Choose whether save should keep the banner visible or auto-dismiss it.",
+                    }
+                ),
+                json.dumps({"verdict": "pass", "summary": "ok"}),
+            ]
+        },
+    )
+    monkeypatch.setattr(service_module, "CodexCliConnector", lambda **kwargs: connector)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    api = fake_github(state)
+    service = _make_service(
+        repo_path,
+        state_root=tmp_path / "state",
+        api_base_url=api.base_url,
+        pr_actions_require_approval=True,
+        pr_auto_merge_clean=False,
+    )
+
+    service.start("demo", once=True)
+
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    issue = store.get_healer_issue(str(issue_number))
+    attempts = store.list_healer_attempts(issue_id=str(issue_number), limit=5)
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["last_failure_class"] == "judgment_required"
+    assert attempts[0]["judgment_reason_code"] == "product_ambiguity"
+    assert any("Judgment required" in comment["body"] for comment in state.issue_comments[issue_number])
+    store.close()
+
+    state.issues[issue_number].body = (
+        "Fix demo.py and keep the behavior aligned with product intent.\n\n"
+        "Expected behavior: save should keep the banner visible.\n\n"
+        "judgment_required_conditions:\n"
+        "- Choose whether save should keep the banner visible or auto-dismiss it.\n"
+    )
+
+    service.start("demo", once=True)
+    service.start("demo", once=True)
+
+    assert len(state.pulls) == 1
+    pr_number = next(iter(state.pulls))
+    assert len(connector.proposer_outputs[str(issue_number)]) == 0
+
+    store = SQLiteStore(service.config.repo_db_path("demo"))
+    store.bootstrap()
+    issue = store.get_healer_issue(str(issue_number))
+    attempts = store.list_healer_attempts(issue_id=str(issue_number), limit=5)
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == pr_number
+    assert [attempt["state"] for attempt in attempts][:2] == ["pr_open", "blocked"]
+    assert attempts[0]["judgment_reason_code"] == ""
+    assert any("Pull request opened or updated" in comment["body"] for comment in state.issue_comments[issue_number])
+    store.close()
+
+
 def test_e2e_ci_failure_requeues_and_updates_existing_pr(tmp_path: Path, monkeypatch, portable_pytest_gates, fake_github) -> None:
     repo_path = _build_demo_repo(tmp_path)
     state = FakeGitHubState(repo_slug="owner/repo")

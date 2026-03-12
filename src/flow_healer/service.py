@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -275,6 +276,17 @@ class FlowHealerService:
                         attempt_row["promotion_state"] = str(test_summary.get("promotion_state") or "")
                         attempt_row["phase_states"] = dict(test_summary.get("phase_states") or {})
                         attempt_row["promotion_transitions"] = list(test_summary.get("promotion_transitions") or [])
+                        attempt_row["judgment_summary"] = _normalized_attempt_dict_field(
+                            test_summary,
+                            "judgment_summary",
+                        )
+                        attempt_row["escalation_packet"] = _normalized_attempt_dict_field(
+                            test_summary,
+                            "escalation_packet",
+                        )
+                    else:
+                        attempt_row["judgment_summary"] = {}
+                        attempt_row["escalation_packet"] = {}
                     attempt_row["issue_promotion_state"] = derive_issue_promotion_state(issue=issue, latest_attempt=attempt)
                     attempt_row["diagnosis"] = route.diagnosis
                     attempt_row["failure_family"] = route.failure_family
@@ -320,6 +332,15 @@ class FlowHealerService:
                 failure_domain_metrics = _failure_domain_metrics(runtime.store)
                 retry_playbook_metrics = _retry_playbook_metrics(runtime.store)
                 reliability_canary = _reliability_canary_metrics(runtime.store)
+                resource_audit = HealerReconciler(
+                    store=runtime.store,
+                    workspace_manager=runtime.loop.workspace_manager,
+                ).resource_audit()
+                harness_health = _build_harness_health(
+                    store=runtime.store,
+                    repo=repo,
+                    resource_audit=resource_audit,
+                )
                 policy = _build_policy_payload(
                     store=runtime.store,
                     paused=runtime.store.get_state("healer_paused") == "true",
@@ -422,10 +443,7 @@ class FlowHealerService:
                             ),
                         },
                         "worker": _worker_runtime_state(runtime.store),
-                        "resource_audit": HealerReconciler(
-                            store=runtime.store,
-                            workspace_manager=runtime.loop.workspace_manager,
-                        ).resource_audit(),
+                        "resource_audit": resource_audit,
                         "preflight": {
                             "gate_mode": repo.healer_test_gate_mode,
                             "summary": preflight_summary,
@@ -442,6 +460,7 @@ class FlowHealerService:
                         "reliability_canary": reliability_canary,
                         "reliability_daily_rollups": _reliability_daily_rollups(runtime.store),
                         "reliability_trends": _reliability_trend_metrics(runtime.store),
+                        "harness_health": harness_health,
                         "issue_outcomes": _issue_outcome_metrics(issues),
                         "recent_attempts": annotated_attempts,
                         "ci_status_summary": repo_ci_status_summary,
@@ -1444,6 +1463,7 @@ def _reliability_daily_rollups(store: SQLiteStore, *, days: int = 30) -> list[di
     rollups: list[dict[str, object]] = []
     for day in sorted(by_day.keys(), reverse=True):
         metrics = _compute_reliability_metrics(by_day[day])
+        harness_metrics = _compute_harness_metrics(by_day[day])
         rollups.append(
             {
                 "day": day,
@@ -1454,6 +1474,11 @@ def _reliability_daily_rollups(store: SQLiteStore, *, days: int = 30) -> list[di
                 "wrong_root_execution_rate": metrics["wrong_root_execution_rate"],
                 "no_op_rate": metrics["no_op_rate"],
                 "mean_time_to_valid_pr_minutes": metrics["mean_time_to_valid_pr_minutes"],
+                "harness": {
+                    "artifact_publish_failures": harness_metrics["artifact_publish_failures"],
+                    "artifact_capture_failures": harness_metrics["artifact_capture_failures"],
+                    "browser_failure_families": dict(harness_metrics["browser_failure_families"]),
+                },
             }
         )
     return rollups[:max(1, int(days))]
@@ -1598,11 +1623,189 @@ def _compute_reliability_metrics(attempts: list[dict[str, object]]) -> dict[str,
     }
 
 
+def _compute_harness_metrics(attempts: list[dict[str, object]]) -> dict[str, object]:
+    browser_failure_families: dict[str, int] = {}
+    artifact_publish_failures = 0
+    artifact_capture_failures = 0
+
+    for attempt in attempts:
+        test_summary = attempt.get("test_summary")
+        summary = dict(test_summary) if isinstance(test_summary, dict) else {}
+        artifact_bundle = attempt.get("artifact_bundle")
+        artifact_map = dict(artifact_bundle) if isinstance(artifact_bundle, dict) else {}
+        failure_class = str(attempt.get("failure_class") or "").strip().lower()
+        family = str(summary.get("browser_failure_family") or "").strip()
+        publish_status = str(summary.get("artifact_publish_status") or "").strip().lower()
+        bundle_status = str(artifact_map.get("status") or summary.get("artifact_bundle_status") or "").strip().lower()
+
+        if family:
+            browser_failure_families[family] = browser_failure_families.get(family, 0) + 1
+        if family == "artifact_publish" or publish_status in {"failed", "skipped", "rejected"} or failure_class == "artifact_publish_failed":
+            artifact_publish_failures += 1
+        if family == "artifact_capture" or bundle_status in {"failed", "missing"} or failure_class in {
+            "artifact_capture_failed",
+            "browser_artifact_capture_failed",
+        }:
+            artifact_capture_failures += 1
+
+    return {
+        "browser_failure_families": browser_failure_families,
+        "browser_failure_total": sum(browser_failure_families.values()),
+        "artifact_publish_failures": artifact_publish_failures,
+        "artifact_capture_failures": artifact_capture_failures,
+    }
+
+
+def _build_harness_health(
+    *,
+    store: SQLiteStore,
+    repo: RelaySettings,
+    resource_audit: dict[str, object],
+    window: int = 50,
+) -> dict[str, object]:
+    attempts = store.list_recent_healer_attempts(limit=max(1, int(window)))
+    harness_metrics = _compute_harness_metrics(attempts)
+    configured_profiles = repo.healer_app_runtime_profiles if isinstance(repo.healer_app_runtime_profiles, dict) else {}
+    last_seen_states = store.list_states(prefix="healer_app_runtime_profile_last_seen_at:", limit=200)
+    canary_success_states = store.list_states(prefix="healer_app_runtime_canary_last_success_at:", limit=200)
+    stale_profile_entries = _parse_profile_name_list(store.get_state("healer_stale_runtime_profiles"))
+    stale_profiles = {name for name in stale_profile_entries if name}
+    profile_names = sorted(
+        {
+            *configured_profiles.keys(),
+            *(_state_suffixes(last_seen_states, "healer_app_runtime_profile_last_seen_at:")),
+            *(_state_suffixes(canary_success_states, "healer_app_runtime_canary_last_success_at:")),
+            *stale_profiles,
+        }
+    )
+    runtime_profiles = []
+    for profile_name in profile_names:
+        last_seen_at = str(last_seen_states.get(f"healer_app_runtime_profile_last_seen_at:{profile_name}") or "").strip()
+        last_canary_at = str(canary_success_states.get(f"healer_app_runtime_canary_last_success_at:{profile_name}") or "").strip()
+        stale = profile_name in stale_profiles
+        status = "stale" if stale else "healthy" if (last_seen_at or last_canary_at) else "unknown"
+        runtime_profiles.append(
+            {
+                "profile": profile_name,
+                "configured": profile_name in configured_profiles,
+                "status": status,
+                "stale": stale,
+                "last_seen_at": last_seen_at,
+                "last_canary_at": last_canary_at,
+            }
+        )
+
+    artifact_audit = resource_audit.get("artifacts")
+    artifact_audit_map = dict(artifact_audit) if isinstance(artifact_audit, dict) else {}
+    runtime_audit = resource_audit.get("app_runtimes")
+    runtime_audit_map = dict(runtime_audit) if isinstance(runtime_audit, dict) else {}
+    browser_session_audit = resource_audit.get("browser_sessions")
+    browser_session_audit_map = dict(browser_session_audit) if isinstance(browser_session_audit, dict) else {}
+
+    canary_profiles = [
+        {
+            "profile": item["profile"],
+            "status": item["status"],
+            "last_seen_at": item["last_seen_at"],
+            "last_canary_at": item["last_canary_at"],
+        }
+        for item in runtime_profiles
+        if bool(item["last_seen_at"]) or bool(item["last_canary_at"]) or bool(item["stale"])
+    ]
+
+    return {
+        "artifact_publish": {
+            "failures": _safe_int(store.get_state("healer_artifact_publish_failures")),
+            "capture_failures": _safe_int(store.get_state("healer_browser_artifact_capture_failures")),
+            "recent_attempt_failures": int(harness_metrics["artifact_publish_failures"]),
+            "last_failure_at": str(store.get_state("healer_artifact_publish_last_failure_at") or "").strip(),
+        },
+        "browser_failure_families": {
+            "total": int(harness_metrics["browser_failure_total"]),
+            "counts": dict(harness_metrics["browser_failure_families"]),
+        },
+        "stale_runtime_profiles": {
+            "count": max(
+                _safe_int(store.get_state("healer_stale_runtime_profiles_detected")),
+                len(stale_profiles),
+            ),
+            "profiles": sorted(stale_profiles),
+        },
+        "orphan_cleanup": {
+            "app_runtimes_reaped": _safe_int(store.get_state("healer_orphan_runtime_reap_events")),
+            "artifact_roots_cleaned": _safe_int(store.get_state("healer_orphan_artifact_cleanup_events")),
+            "browser_sessions_cleaned": _safe_int(store.get_state("healer_browser_session_cleanup_events")),
+            "tracked_app_runtimes": int(runtime_audit_map.get("tracked") or 0),
+            "tracked_artifact_roots": int(artifact_audit_map.get("tracked_roots") or 0),
+            "tracked_browser_sessions": int(browser_session_audit_map.get("tracked") or 0),
+        },
+        "browser_sessions": {
+            "tracked": int(browser_session_audit_map.get("tracked") or 0),
+            "existing_roots": int(browser_session_audit_map.get("existing_roots") or 0),
+            "stale_roots": int(browser_session_audit_map.get("stale_roots") or 0),
+        },
+        "runtime_profiles": runtime_profiles,
+        "canary_profiles": {
+            "failures": _safe_int(store.get_state("healer_harness_canary_failures")),
+            "profiles": canary_profiles,
+        },
+    }
+
+
 def _safe_float(value: object) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(str(value or "").strip() or "0")
+    except (TypeError, ValueError):
+        return 0
+
+
+def _state_suffixes(states: dict[str, str], prefix: str) -> set[str]:
+    suffixes: set[str] = set()
+    for key in states:
+        if key.startswith(prefix):
+            suffixes.add(key[len(prefix) :])
+    return suffixes
+
+
+def _parse_profile_name_list(raw_value: object) -> list[str]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [text]
+    if isinstance(parsed, list):
+        names: list[str] = []
+        for item in parsed:
+            if isinstance(item, str) and item.strip():
+                names.append(item.strip())
+            elif isinstance(item, dict):
+                profile = str(item.get("profile") or item.get("name") or "").strip()
+                if profile:
+                    names.append(profile)
+        return names
+    if isinstance(parsed, dict):
+        names = []
+        for key, value in parsed.items():
+            key_name = str(key or "").strip()
+            if key_name:
+                names.append(key_name)
+            elif isinstance(value, dict):
+                profile = str(value.get("profile") or value.get("name") or "").strip()
+                if profile:
+                    names.append(profile)
+        return names
+    if isinstance(parsed, str) and parsed.strip():
+        return [parsed.strip()]
+    return []
 
 
 def _aggregate_ci_status_summary(issues: list[dict[str, object]]) -> dict[str, object]:
@@ -1761,6 +1964,11 @@ def _attempt_browser_artifact_proof_ready(
         str(failure_artifacts.get("screenshot_path") or "").strip()
         and str(resolution_artifacts.get("screenshot_path") or "").strip()
     )
+
+
+def _normalized_attempt_dict_field(source: dict[str, object], key: str) -> dict[str, object]:
+    value = source.get(key)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _aggregate_promotion_state_counts(

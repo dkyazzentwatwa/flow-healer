@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -5,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from flow_healer.app_harness import AppRuntimeProfile
+from flow_healer.browser_harness import BrowserJourneyResult
 from flow_healer.healer_loop import (
     AutonomousHealerLoop,
     _FAILURE_CLASS_STRATEGY,
@@ -37,7 +40,7 @@ class _HealthyConnector:
 
 def _make_loop(store, **overrides):
     settings = SimpleNamespace(
-        healer_repo_path="/tmp",
+        healer_repo_path=overrides.get("healer_repo_path", "/tmp"),
         enable_autonomous_healer=True,
         healer_poll_interval_seconds=60,
         healer_pulse_interval_seconds=overrides.get("healer_pulse_interval_seconds", 60),
@@ -78,6 +81,16 @@ def _make_loop(store, **overrides):
         healer_pr_merge_method=overrides.get("healer_pr_merge_method", "squash"),
         healer_github_artifact_publish_enabled=overrides.get("healer_github_artifact_publish_enabled", True),
         healer_github_artifact_branch=overrides.get("healer_github_artifact_branch", "flow-healer-artifacts"),
+        healer_github_artifact_retention_days=overrides.get("healer_github_artifact_retention_days", 30),
+        healer_browser_log_publish_mode=overrides.get("healer_browser_log_publish_mode", "always"),
+        healer_github_artifact_max_file_bytes=overrides.get("healer_github_artifact_max_file_bytes", 5 * 1024 * 1024),
+        healer_github_artifact_max_run_bytes=overrides.get("healer_github_artifact_max_run_bytes", 25 * 1024 * 1024),
+        healer_github_artifact_max_branch_bytes=overrides.get(
+            "healer_github_artifact_max_branch_bytes", 250 * 1024 * 1024
+        ),
+        healer_harness_canary_interval_seconds=overrides.get("healer_harness_canary_interval_seconds", 21600),
+        healer_app_runtime_stale_days=overrides.get("healer_app_runtime_stale_days", 14),
+        healer_app_runtime_profiles=overrides.get("healer_app_runtime_profiles", {}),
         healer_default_branch=overrides.get("healer_default_branch", "main"),
         healer_trusted_actors=[],
         healer_scan_enable_issue_creation=overrides.get("healer_scan_enable_issue_creation", False),
@@ -172,6 +185,7 @@ def _make_loop(store, **overrides):
     loop.preflight_by_backend = overrides.get("preflight_by_backend", {"exec": loop.preflight})
     loop._sticky_runtime_status = overrides.get("_sticky_runtime_status", "")
     loop._sticky_runtime_issue_id = overrides.get("_sticky_runtime_issue_id", "")
+    loop._last_harness_canary_at = overrides.get("_last_harness_canary_at", 0.0)
     return loop
 
 
@@ -1497,6 +1511,139 @@ def test_process_claimed_issue_allows_advisory_verifier_failure_by_default(tmp_p
         call.kwargs.get("label") == "healer:done-code"
         for call in loop.tracker.add_issue_label.call_args_list
     )
+
+
+def test_process_claimed_issue_blocks_when_judgment_is_required_before_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50440",
+        repo="owner/repo",
+        title="Issue 50440",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-50440"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50440", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50440")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={
+            "failed_tests": 0,
+            "judgment_reason_code": "product_ambiguity",
+            "judgment_summary": "The issue leaves the expected banner behavior undefined.",
+            "escalation_packet": {
+                "reason_code": "product_ambiguity",
+                "summary": "The issue leaves the expected banner behavior undefined.",
+                "decision_needed": "Choose whether save should keep the banner visible or auto-dismiss it.",
+                "attempted_actions": ["Validated the scoped contract.", "Ran the verifier."],
+            },
+        },
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="A product decision is required before behavior can be changed safely.",
+        verdict="soft_fail",
+        hard_failure=False,
+        parse_error=False,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50440")
+    attempts = store.list_healer_attempts(issue_id="50440")
+    assert issue is not None
+    assert issue["state"] == "blocked"
+    assert issue["last_failure_class"] == "judgment_required"
+    assert "expected banner behavior undefined" in str(issue["last_failure_reason"] or "")
+    assert attempts[-1]["state"] == "blocked"
+    assert attempts[-1]["judgment_reason_code"] == "product_ambiguity"
+    assert attempts[-1]["test_summary"]["escalation_packet"]["decision_needed"].startswith("Choose whether save")
+    loop._commit_and_push.assert_not_called()
+    loop.tracker.open_or_update_pr.assert_not_called()
+    assert "Judgment required" in loop.tracker.add_issue_comment.call_args.kwargs["body"]
+
+
+def test_process_claimed_issue_keeps_existing_pr_open_when_judgment_is_required(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="50441",
+        repo="owner/repo",
+        title="Issue 50441",
+        body="Fix src/flow_healer/service.py",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="50441",
+        state="queued",
+        pr_number=411,
+        pr_state="open",
+        feedback_context=(
+            "PR review (approved) from @alice: Ship this as-is.\n\n"
+            "PR review (changes_requested) from @bob: Please reverse the behavior before merge."
+        ),
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-50441"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "50441", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-50441")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.dispatcher.upgrade_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=True,
+        diff_paths=["src/flow_healer/service.py"],
+        test_summary={"failed_tests": 0},
+        proposer_output="Edited src/flow_healer/service.py",
+        workspace_status={},
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+    )
+    loop.verifier.verify.return_value = SimpleNamespace(
+        passed=True,
+        summary="Verifier passed.",
+        verdict="pass",
+        hard_failure=False,
+        parse_error=False,
+    )
+    loop._commit_and_push = MagicMock(return_value=(True, "ok"))
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("50441")
+    attempts = store.list_healer_attempts(issue_id="50441")
+    assert issue is not None
+    assert issue["state"] == "pr_open"
+    assert issue["pr_number"] == 411
+    assert issue["last_failure_class"] == "judgment_required"
+    assert attempts[-1]["state"] == "pr_open"
+    assert attempts[-1]["judgment_reason_code"] == "conflicting_feedback"
+    assert attempts[-1]["test_summary"]["escalation_packet"]["pr_number"] == 411
+    loop._commit_and_push.assert_not_called()
+    loop.tracker.open_or_update_pr.assert_not_called()
 
 
 def test_process_claimed_issue_swarm_recovers_failed_run(tmp_path):
@@ -2828,6 +2975,156 @@ def test_auto_merge_open_pr_skips_when_judgment_is_required(tmp_path):
 
     assert merged == 0
     loop.tracker.merge_pr.assert_not_called()
+
+
+def test_build_judgment_assessment_uses_explicit_packet_from_test_summary(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/demo.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    assessment = loop._build_judgment_assessment(
+        task_spec=task_spec,
+        feedback_context="",
+        test_summary={
+            "judgment_reason_code": "product_ambiguity",
+            "judgment_summary": "The issue supports two valid UX outcomes.",
+            "escalation_packet": {
+                "reason_code": "product_ambiguity",
+                "summary": "The issue supports two valid UX outcomes.",
+                "decision_needed": "Choose whether the banner should stay persistent or dismiss after save.",
+                "attempted_actions": ["Validated the current issue contract."],
+                "evidence_links": [{"label": "failure_screenshot", "href": "https://example.test/failure.png"}],
+            },
+        },
+        verifier_summary={"summary": "A human decision is required before mutating behavior."},
+        workspace_status={},
+        pr_number=0,
+    )
+
+    assert assessment.requires_human is True
+    assert assessment.reason_code == "product_ambiguity"
+    assert assessment.summary == "The issue supports two valid UX outcomes."
+    assert assessment.packet["decision_needed"] == (
+        "Choose whether the banner should stay persistent or dismiss after save."
+    )
+
+
+def test_build_judgment_assessment_detects_conflicting_feedback_reviews(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/demo.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    assessment = loop._build_judgment_assessment(
+        task_spec=task_spec,
+        feedback_context=(
+            "PR review (approved) from @alice: Ship this as-is.\n\n"
+            "PR review (changes_requested) from @bob: Please reverse the behavior before merge."
+        ),
+        test_summary={"failed_tests": 0},
+        verifier_summary={"summary": "Verifier passed."},
+        workspace_status={},
+        pr_number=222,
+    )
+
+    assert assessment.requires_human is True
+    assert assessment.reason_code == "conflicting_feedback"
+    assert "Conflicting human review states" in assessment.summary
+    assert assessment.packet["pr_number"] == 222
+
+
+def test_build_judgment_assessment_ignores_superseded_review_state_from_same_author(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/demo.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    assessment = loop._build_judgment_assessment(
+        task_spec=task_spec,
+        feedback_context=(
+            "PR review (changes_requested) from @reviewer: Please reverse the behavior.\n\n"
+            "PR review (approved) from @reviewer: The follow-up looks good now."
+        ),
+        test_summary={"failed_tests": 0},
+        verifier_summary={"summary": "Verifier passed."},
+        workspace_status={},
+        pr_number=222,
+    )
+
+    assert assessment.requires_human is False
+
+
+def test_build_judgment_assessment_uses_summary_field_from_dict_shaped_judgment_summary(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    task_spec = HealerTaskSpec(
+        task_kind="fix",
+        output_mode="patch",
+        output_targets=("src/demo.py",),
+        tool_policy="repo_only",
+        validation_profile="code_change",
+    )
+
+    assessment = loop._build_judgment_assessment(
+        task_spec=task_spec,
+        feedback_context="",
+        test_summary={
+            "judgment_reason_code": "product_ambiguity",
+            "judgment_summary": {
+                "reason_code": "product_ambiguity",
+                "summary": "Use the structured summary text instead of the dict repr.",
+            },
+        },
+        verifier_summary={"summary": "A product decision is required before mutating behavior."},
+        workspace_status={},
+        pr_number=0,
+    )
+
+    assert assessment.requires_human is True
+    assert assessment.summary == "Use the structured summary text instead of the dict repr."
+
+
+def test_build_judgment_comment_includes_decision_evidence_and_pr(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    body = loop._build_judgment_comment(
+        {
+            "reason_code": "product_ambiguity",
+            "summary": "The issue supports two valid UX outcomes.",
+            "decision_needed": "Choose the desired post-save banner behavior.",
+            "attempted_actions": ["Validated the issue contract.", "Ran the scoped verifier."],
+            "evidence_links": [{"label": "failure_screenshot", "href": "https://example.test/failure.png"}],
+            "pr_number": 233,
+        }
+    )
+
+    assert "Judgment required" in body
+    assert "Reason code: `product_ambiguity`" in body
+    assert "Choose the desired post-save banner behavior." in body
+    assert "failure_screenshot" in body
+    assert "PR: `#233`" in body
 
 
 def test_with_promotion_transitions_adds_remote_states_for_green_pr(tmp_path):
@@ -4514,6 +4811,218 @@ def test_tick_once_runs_reconciler_before_paused_return(tmp_path):
     loop.dispatcher.claim_next_issue.assert_not_called()
 
 
+def test_record_reconcile_summary_accumulates_cleanup_counters(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+
+    loop._record_reconcile_summary(
+        {
+            "reaped_orphan_app_runtimes": 2,
+            "cleaned_artifact_roots": 3,
+        }
+    )
+
+    assert store.get_state("healer_orphan_runtime_reap_events") == "2"
+    assert store.get_state("healer_orphan_artifact_cleanup_events") == "3"
+
+
+def test_record_harness_attempt_observability_tracks_refs_and_failure_counters(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_github_artifact_retention_days=14)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    loop._record_harness_attempt_observability(
+        issue_id="42",
+        attempt_id="hat_test42",
+        test_summary={
+            "browser_failure_family": "artifact_capture",
+            "artifact_publish_status": "failed",
+            "runtime_summary": {
+                "app_harness": {
+                    "profile": "web",
+                    "process": {"pid": 4321, "profile": "web", "command": ["npm", "run", "dev"], "cwd": str(tmp_path)},
+                }
+            },
+            "artifact_bundle": {"artifact_root": str(artifact_root)},
+        },
+        workspace_status={},
+        failure_class="browser_artifact_capture_failed",
+    )
+
+    assert store.get_state("healer_app_runtime_profile_last_seen_at:web")
+    assert store.get_state("healer_artifact_publish_failures") == "1"
+    assert store.get_state("healer_browser_artifact_capture_failures") == "1"
+    assert "\"path\": \"" in str(store.get_state("healer_artifact_root_ref:42:hat_test42") or "")
+    assert "\"path\": \"" in str(store.get_state("healer_browser_session_ref:42:hat_test42") or "")
+    assert "\"pid\": 4321" in str(store.get_state("healer_app_runtime_ref:42:hat_test42") or "")
+
+
+def test_maybe_run_harness_canaries_records_success(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        readiness_url="http://127.0.0.1:3000/",
+    )
+    loop = _make_loop(
+        store,
+        healer_app_runtime_profiles={"web": profile},
+        healer_harness_canary_interval_seconds=300,
+    )
+    loop.tracker.publish_artifact_files.return_value = [SimpleNamespace(name="canary.png")]
+
+    class _FakeCanarySession:
+        def stop(self) -> int:
+            return 0
+
+    class _FakeCanaryAppHarness:
+        def boot(self, runtime_profile):
+            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+
+    class _FakeCanaryBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, profile, entry_url, repro_steps, artifact_root, phase, expect_failure):
+            phase_root = artifact_root / phase
+            phase_root.mkdir(parents=True, exist_ok=True)
+            screenshot = phase_root / "canary.png"
+            console = phase_root / "canary-console.log"
+            network = phase_root / "canary-network.jsonl"
+            screenshot.write_text("png", encoding="utf-8")
+            console.write_text("console", encoding="utf-8")
+            network.write_text("{}", encoding="utf-8")
+            return BrowserJourneyResult(
+                phase=phase,
+                passed=True,
+                expected_failure_observed=False,
+                final_url=entry_url,
+                screenshot_path=str(screenshot),
+                console_log_path=str(console),
+                network_log_path=str(network),
+            )
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+
+    summary = loop._maybe_run_harness_canaries(force=True)
+
+    assert summary == {"profiles": 1, "passed": 1, "failed": 0}
+    assert store.get_state("healer_app_runtime_canary_last_success_at:web")
+    assert store.get_state("healer_harness_canary_failures") is None
+
+
+def test_maybe_run_harness_canaries_records_failure_counters(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        readiness_url="http://127.0.0.1:3000/",
+    )
+    loop = _make_loop(
+        store,
+        healer_app_runtime_profiles={"web": profile},
+        healer_harness_canary_interval_seconds=300,
+    )
+
+    class _FakeCanarySession:
+        def stop(self) -> int:
+            return 0
+
+    class _FakeCanaryAppHarness:
+        def boot(self, runtime_profile):
+            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+
+    class _FailingCanaryBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, profile, entry_url, repro_steps, artifact_root, phase, expect_failure):
+            raise RuntimeError("artifact capture failed: screenshot missing")
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FailingCanaryBrowserHarness())
+
+    summary = loop._maybe_run_harness_canaries(force=True)
+
+    assert summary == {"profiles": 1, "passed": 0, "failed": 1}
+    assert store.get_state("healer_harness_canary_failures") == "1"
+    assert store.get_state("healer_browser_artifact_capture_failures") == "1"
+    assert "artifact capture failed" in str(store.get_state("healer_app_runtime_canary_last_failure_reason:web") or "")
+
+
+def test_maybe_run_harness_canaries_coerces_dict_backed_profiles(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    repo_path = tmp_path / "repo"
+    runtime_root = repo_path / "runtime"
+    runtime_root.mkdir(parents=True)
+    loop = _make_loop(
+        store,
+        healer_repo_path=str(repo_path),
+        healer_app_runtime_profiles={
+            "web": {
+                "name": "web",
+                "start_command": "npm run dev",
+                "working_directory": "runtime",
+                "ready_url": "http://127.0.0.1:3000/",
+                "browser": "chromium",
+                "headless": True,
+                "viewport": {"width": 1280, "height": 800},
+            }
+        },
+        healer_harness_canary_interval_seconds=300,
+    )
+
+    class _FakeCanarySession:
+        def stop(self) -> int:
+            return 0
+
+    class _FakeCanaryAppHarness:
+        def boot(self, runtime_profile):
+            assert isinstance(runtime_profile, AppRuntimeProfile)
+            assert runtime_profile.command == ("npm", "run", "dev")
+            assert runtime_profile.cwd == runtime_root.resolve()
+            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+
+    class _FakeCanaryBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, profile, entry_url, repro_steps, artifact_root, phase, expect_failure):
+            screenshot = Path(artifact_root) / "canary.png"
+            console = Path(artifact_root) / "canary-console.log"
+            network = Path(artifact_root) / "canary-network.jsonl"
+            screenshot.write_text("png", encoding="utf-8")
+            console.write_text("console", encoding="utf-8")
+            network.write_text("network", encoding="utf-8")
+            return BrowserJourneyResult(
+                phase=phase,
+                passed=True,
+                expected_failure_observed=False,
+                final_url=entry_url,
+                screenshot_path=str(screenshot),
+                console_log_path=str(console),
+                network_log_path=str(network),
+            )
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+    loop.tracker.publish_artifact_files = MagicMock(return_value=[{"label": "canary"}])
+
+    summary = loop._maybe_run_harness_canaries(force=True)
+
+    assert summary == {"profiles": 1, "passed": 1, "failed": 0}
+    assert store.get_state("healer_app_runtime_canary_last_success_at:web")
+
+
 def test_tick_once_defers_helper_recycle_when_idle_only_and_active_issue_exists(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()
@@ -5573,6 +6082,12 @@ def test_publish_pr_artifacts_enriches_links_and_bundle(tmp_path):
     call = loop.tracker.publish_artifact_files.call_args
     assert call.kwargs["issue_id"] == "155"
     assert call.kwargs["branch"] == "flow-healer-artifacts"
+    assert call.kwargs["retention_days"] == 30
+    assert call.kwargs["max_file_bytes"] == 5 * 1024 * 1024
+    assert call.kwargs["max_run_bytes"] == 25 * 1024 * 1024
+    assert call.kwargs["max_branch_bytes"] == 250 * 1024 * 1024
+    assert call.kwargs["metadata"]["browser_log_publish_mode"] == "always"
+    assert call.kwargs["metadata"]["attempt_id"] == "attempt-1"
     assert transcript_path.exists()
     assert summary["artifact_bundle"]["github_artifact_branch"] == "flow-healer-artifacts"
     assert summary["artifact_bundle"]["github_artifact_root"] == "flow-healer/evidence/issue-155/attempt-1"
@@ -5582,6 +6097,163 @@ def test_publish_pr_artifacts_enriches_links_and_bundle(tmp_path):
     assert screenshot_link["href"].startswith("https://github.com/owner/repo/blob/flow-healer-artifacts/")
     assert screenshot_link["raw_href"].startswith("https://raw.githubusercontent.com/owner/repo/")
     assert transcript_link["href"].endswith("/journey-transcript.json")
+
+
+def test_record_harness_observability_tracks_refs_and_failure_counters(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    loop._record_harness_attempt_observability(
+        issue_id="155",
+        attempt_id="hat_observe",
+        failure_class="artifact_publish_failed",
+        test_summary={
+            "browser_failure_family": "artifact_publish",
+            "artifact_publish_status": "failed",
+            "artifact_bundle": {
+                "artifact_root": str(artifact_root),
+                "status": "captured",
+            },
+            "runtime_summary": {
+                "app_harness": {
+                    "profile": "web",
+                    "process": {
+                        "pid": os.getpid(),
+                        "profile": "web",
+                        "command": ["npm", "run", "dev"],
+                        "cwd": str(tmp_path),
+                    },
+                }
+            },
+        },
+        workspace_status={},
+    )
+    loop._record_harness_attempt_observability(
+        issue_id="155",
+        attempt_id="hat_capture",
+        failure_class="browser_artifact_capture_failed",
+        test_summary={
+            "browser_failure_family": "artifact_capture",
+            "artifact_bundle": {
+                "artifact_root": str(artifact_root),
+                "status": "failed",
+            },
+        },
+        workspace_status={},
+    )
+
+    assert store.get_state("healer_artifact_publish_failures") == "1"
+    assert store.get_state("healer_browser_artifact_capture_failures") == "1"
+    assert store.get_state("healer_app_runtime_profile_last_seen_at:web")
+    assert store.get_state("healer_artifact_publish_last_failure_at")
+    artifact_ref = store.get_state("healer_artifact_root_ref:155:hat_observe")
+    runtime_ref = store.get_state("healer_app_runtime_ref:155:hat_observe")
+    assert artifact_ref is not None and str(artifact_root) in artifact_ref
+    assert runtime_ref is not None and '"profile": "web"' in runtime_ref
+
+
+def test_run_runtime_profile_canary_records_success_and_publishes_artifacts(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    profile_root = tmp_path / "app"
+    profile_root.mkdir()
+    profile = SimpleNamespace(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=profile_root,
+        readiness_url="http://127.0.0.1:3000",
+        readiness_log_text=None,
+        browser="chromium",
+        headless=True,
+        viewport=None,
+        device="",
+        startup_timeout_seconds=5.0,
+        shutdown_timeout_seconds=1.0,
+        poll_interval_seconds=0.1,
+    )
+    loop = _make_loop(
+        store,
+        healer_app_runtime_profiles={"web": profile},
+        healer_harness_canary_interval_seconds=3600,
+    )
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.stopped = 0
+
+        def stop(self) -> int:
+            self.stopped += 1
+            return 0
+
+    fake_session = _FakeSession()
+
+    class _FakeAppHarness:
+        def boot(self, runtime_profile):
+            return (
+                SimpleNamespace(
+                    profile=runtime_profile,
+                    pid=os.getpid(),
+                    readiness_url=runtime_profile.readiness_url,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="ready",
+                ),
+                fake_session,
+            )
+
+    class _FakeBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, artifact_root, phase, **_kwargs):
+            phase_root = Path(artifact_root) / phase
+            phase_root.mkdir(parents=True, exist_ok=True)
+            screenshot = phase_root / f"{phase}.png"
+            console = phase_root / f"{phase}-console.log"
+            network = phase_root / f"{phase}-network.jsonl"
+            screenshot.write_bytes(b"png")
+            console.write_text("console", encoding="utf-8")
+            network.write_text("{}\n", encoding="utf-8")
+            return SimpleNamespace(
+                phase=phase,
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="",
+                error="",
+                screenshot_path=str(screenshot),
+                video_path="",
+                console_log_path=str(console),
+                network_log_path=str(network),
+                transcript=(),
+            )
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeBrowserHarness())
+    loop.tracker.publish_artifact_files.return_value = [
+        SimpleNamespace(
+            name="canary.png",
+            branch="flow-healer-artifacts",
+            remote_path="flow-healer/evidence/issue-canary-web/run-1/canary.png",
+            html_url="https://example.test/artifacts/canary.png",
+            download_url="https://example.test/raw/canary.png",
+            markdown_url="https://example.test/raw/canary.png",
+            content_type="image/png",
+            sha="1",
+        )
+    ]
+
+    result = loop._run_harness_canary_for_profile(profile=profile)
+
+    assert result is True
+    assert fake_session.stopped == 1
+    assert store.get_state("healer_app_runtime_canary_last_success_at:web")
+    assert store.get_state("healer_app_runtime_profile_last_seen_at:web")
+    loop.tracker.publish_artifact_files.assert_called_once()
 
 
 def test_reconcile_pr_outcomes_persists_ci_status_summary_for_open_pr(tmp_path):

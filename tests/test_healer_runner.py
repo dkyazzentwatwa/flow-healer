@@ -3479,6 +3479,44 @@ class _FakeBrowserHarness:
         return result
 
 
+class _ExplodingBrowserHarness(_FakeBrowserHarness):
+    def __init__(self, *, message: str, phase: str = "resolution"):
+        super().__init__([])
+        self.message = message
+        self.phase = phase
+
+    def capture_journey(
+        self,
+        *,
+        profile,
+        entry_url: str,
+        repro_steps,
+        artifact_root: Path,
+        phase: str,
+        expect_failure: bool,
+    ):
+        self.calls.append(
+            {
+                "profile": profile,
+                "entry_url": entry_url,
+                "repro_steps": tuple(repro_steps),
+                "artifact_root": artifact_root,
+                "phase": phase,
+                "expect_failure": expect_failure,
+            }
+        )
+        if phase == self.phase:
+            raise RuntimeError(self.message)
+        return super().capture_journey(
+            profile=profile,
+            entry_url=entry_url,
+            repro_steps=repro_steps,
+            artifact_root=artifact_root,
+            phase=phase,
+            expect_failure=expect_failure,
+        )
+
+
 def test_run_attempt_boots_selected_app_runtime_profile_and_stops_session(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -3546,7 +3584,80 @@ def test_run_attempt_boots_selected_app_runtime_profile_and_stops_session(tmp_pa
     assert profile.cwd == workspace
     assert result.workspace_status["app_runtime"]["status"] == "ready"
     assert result.test_summary["runtime_summary"]["app_harness"]["entry_url"] == "http://127.0.0.1:3000"
+    assert result.test_summary["runtime_summary"]["app_harness"]["process"] == {
+        "pid": 4321,
+        "profile": "web",
+        "command": ["npm", "run", "dev"],
+        "cwd": str(workspace),
+    }
     assert app_harness.sessions[0].stop_calls == 1
+
+
+def test_run_attempt_classifies_app_runtime_boot_failures(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+
+    class _FailingAppHarness:
+        def boot(self, profile):
+            raise RuntimeError("dev server failed to boot")
+
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/health",
+                "working_directory": ".",
+            }
+        ],
+        app_harness=_FailingAppHarness(),  # type: ignore[arg-type]
+    )
+
+    result = runner.run_attempt(
+        issue_id="app-101b",
+        issue_title="Fix runtime-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000",
+            runtime_profile="web",
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "app_runtime_boot_failed"
+    assert result.test_summary["browser_failure_family"] == "runtime_boot"
 
 
 def test_run_attempt_fails_when_app_runtime_profile_is_missing(tmp_path):
@@ -3819,6 +3930,19 @@ def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
                 transcript=({"step": "expect_text Broken widget", "status": "failed"},),
             ),
             BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path=str(tmp_path / "before-replay.webm"),
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
                 phase="resolution",
                 passed=True,
                 expected_failure_observed=False,
@@ -3879,7 +4003,7 @@ def test_run_attempt_captures_failure_and_resolution_browser_evidence(tmp_path):
     )
 
     assert result.success is True
-    assert [call["phase"] for call in browser_harness.calls] == ["failure", "resolution"]
+    assert [call["phase"] for call in browser_harness.calls] == ["failure", "failure-replay", "resolution"]
     assert browser_harness.calls[0]["profile"].browser == "chromium"
     assert browser_harness.calls[0]["profile"].headless is True
     assert result.test_summary["browser_evidence_required"] is True
@@ -3965,6 +4089,94 @@ def test_run_attempt_fails_when_browser_bug_is_not_reproduced_before_fix(tmp_pat
     assert result.failure_class == "browser_repro_failed"
 
 
+def test_run_attempt_flags_flaky_browser_repro_before_mutation(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(["not used"])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="failure-replay",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "replay.png"),
+                video_path=str(tmp_path / "replay.webm"),
+                console_log_path=str(tmp_path / "replay-console.log"),
+                network_log_path=str(tmp_path / "replay-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+
+    result = runner.run_attempt(
+        issue_id="app-202b",
+        issue_title="Fix flaky browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "browser_repro_failed"
+    assert [call["phase"] for call in browser_harness.calls] == ["failure", "failure-replay"]
+    assert result.test_summary["flaky_repro"]["checked"] is True
+    assert result.test_summary["flaky_repro"]["reproduced_on_first_run"] is True
+    assert result.test_summary["flaky_repro"]["reproduced_on_replay"] is False
+
+
 def test_run_attempt_allows_missing_failure_video_when_screenshot_exists(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -3998,6 +4210,18 @@ def test_run_attempt_allows_missing_failure_video_when_screenshot_exists(tmp_pat
                 video_path="",
                 console_log_path=str(tmp_path / "before-console.log"),
                 network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path="",
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
                 transcript=({"step": "expect_text Broken widget", "status": "failed"},),
             ),
             BrowserJourneyResult(
@@ -4097,6 +4321,18 @@ def test_run_attempt_fails_when_resolution_browser_evidence_is_incomplete(tmp_pa
                 transcript=({"step": "expect_text Broken widget", "status": "failed"},),
             ),
             BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path=str(tmp_path / "before-replay.webm"),
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
                 phase="resolution",
                 passed=True,
                 expected_failure_observed=False,
@@ -4154,6 +4390,7 @@ def test_run_attempt_fails_when_resolution_browser_evidence_is_incomplete(tmp_pa
 
     assert result.success is False
     assert result.failure_class == "artifacts_missing"
+    assert result.test_summary["browser_failure_family"] == "artifact_publish"
     assert result.test_summary["browser_evidence_required"] is True
     assert result.test_summary["artifact_proof_ready"] is False
     assert "merge_blocked" in result.test_summary["promotion_transitions"]
@@ -4210,7 +4447,214 @@ def test_run_attempt_fails_when_browser_runtime_is_missing(tmp_path):
 
     assert result.success is False
     assert result.failure_class == "browser_runtime_missing"
+    assert result.test_summary["browser_failure_family"] == "runtime_readiness"
     assert "playwright" in result.failure_reason.lower()
+
+
+def test_run_attempt_classifies_browser_journey_step_failures(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                screenshot_path=str(tmp_path / "before.png"),
+                video_path=str(tmp_path / "before.webm"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path=str(tmp_path / "before-replay.webm"),
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=False,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="click button.save",
+                error="Button never became enabled",
+                screenshot_path=str(tmp_path / "after.png"),
+                video_path=str(tmp_path / "after.webm"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "click button.save", "status": "failed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-205",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "browser_step_failed"
+    assert result.test_summary["browser_failure_family"] == "journey_step"
+
+
+def test_run_attempt_classifies_browser_artifact_capture_failures(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    good_patch = (
+        "```diff\n"
+        "diff --git a/demo.py b/demo.py\n"
+        "--- a/demo.py\n"
+        "+++ b/demo.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+        "```\n"
+    )
+    connector = _RetryConnector([good_patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _ExplodingBrowserHarness(message="screenshot capture failed", phase="resolution")
+    browser_harness.results = [
+        BrowserJourneyResult(
+            phase="failure",
+            passed=False,
+            expected_failure_observed=True,
+            final_url="http://127.0.0.1:3000/",
+            failure_step="expect_text Broken widget",
+            screenshot_path=str(tmp_path / "before.png"),
+            video_path=str(tmp_path / "before.webm"),
+            console_log_path=str(tmp_path / "before-console.log"),
+            network_log_path=str(tmp_path / "before-network.jsonl"),
+            transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+        ),
+        BrowserJourneyResult(
+            phase="failure-replay",
+            passed=False,
+            expected_failure_observed=True,
+            final_url="http://127.0.0.1:3000/",
+            failure_step="expect_text Broken widget",
+            screenshot_path=str(tmp_path / "before-replay.png"),
+            video_path=str(tmp_path / "before-replay.webm"),
+            console_log_path=str(tmp_path / "before-replay-console.log"),
+            network_log_path=str(tmp_path / "before-replay-network.jsonl"),
+            transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+        ),
+    ]
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-206",
+        issue_title="Fix browser-backed regression",
+        issue_body="Fix demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="fix",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Broken widget"),
+            artifact_requirements=("failure_video", "resolution_video"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "browser_step_failed"
+    assert result.test_summary["browser_failure_family"] == "artifact_capture"
 
 
 def test_run_attempt_allows_missing_resolution_video_when_screenshots_exist(tmp_path):
@@ -4247,6 +4691,19 @@ def test_run_attempt_allows_missing_resolution_video_when_screenshots_exist(tmp_
                 video_path=str(tmp_path / "before.webm"),
                 console_log_path=str(tmp_path / "before-console.log"),
                 network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Broken widget", "status": "failed"},),
+            ),
+            BrowserJourneyResult(
+                phase="failure-replay",
+                passed=False,
+                expected_failure_observed=True,
+                final_url="http://127.0.0.1:3000/",
+                failure_step="expect_text Broken widget",
+                error="Expected text missing",
+                screenshot_path=str(tmp_path / "before-replay.png"),
+                video_path=str(tmp_path / "before-replay.webm"),
+                console_log_path=str(tmp_path / "before-replay-console.log"),
+                network_log_path=str(tmp_path / "before-replay-network.jsonl"),
                 transcript=({"step": "expect_text Broken widget", "status": "failed"},),
             ),
             BrowserJourneyResult(

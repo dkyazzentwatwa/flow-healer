@@ -1,0 +1,36 @@
+{
+  "contract_mode": "strict",
+  "parse_confidence_threshold": 0.3,
+  "examples": [
+    {
+      "name": "healer-js-framework-template",
+      "source": ".github/ISSUE_TEMPLATE/healer-js-framework.yml",
+      "source_kind": "github_issue_form",
+      "title": "JS framework task: keep next smoke green",
+      "field_values": {
+        "framework": "next"
+      }
+    },
+    {
+      "name": "usage-node-sandbox-example",
+      "source": "docs/usage.md",
+      "source_kind": "inline_body",
+      "title": "Node sandbox regression",
+      "body": "Required code outputs:\n- e2e-smoke/node/src/add.js\n- e2e-smoke/node/test/add.test.js\n\nValidation:\n- cd e2e-smoke/node && npm test -- --passWithNoTests\n"
+    },
+    {
+      "name": "sandbox-helper-js-body",
+      "source": "tests/test_create_sandbox_issues.py",
+      "source_kind": "inline_body",
+      "title": "Sandbox JS parser contract",
+      "body": "Required code outputs:\n- e2e-smoke/js-remix/app/utils/add.server.js\n\nValidation:\n- cd e2e-smoke/js-remix && npm test -- --passWithNoTests\n"
+    },
+    {
+      "name": "issue-generation-prosper-chat-db",
+      "source": "tests/test_issue_generation.py",
+      "source_kind": "inline_body",
+      "title": "Prosper chat DB task",
+      "body": "Required code outputs:\n- e2e-apps/prosper-chat/supabase/migrations/20260302101500_7f8d9de2-cb2b-4f35-b3b8-6d8a8f519e7e.sql\n- e2e-apps/prosper-chat/supabase/assertions/anon_access_controls.sql\n\nValidation:\n- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db\n"
+    }
+  ]
+}

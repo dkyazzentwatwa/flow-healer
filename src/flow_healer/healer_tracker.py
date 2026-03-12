@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
@@ -505,6 +505,11 @@ class GitHubHealerTracker:
         branch: str = "flow-healer-artifacts",
         source_branch: str = "main",
         run_key: str = "latest",
+        retention_days: int = 30,
+        metadata: dict[str, Any] | None = None,
+        max_file_bytes: int | None = None,
+        max_run_bytes: int | None = None,
+        max_branch_bytes: int | None = None,
     ) -> list[PublishedArtifact]:
         normalized_issue = self._sanitize_artifact_segment(issue_id)
         normalized_branch = str(branch or "").strip().strip("/")
@@ -514,19 +519,48 @@ class GitHubHealerTracker:
             return []
         if not self._ensure_branch_exists(branch=normalized_branch, source_branch=normalized_source_branch):
             return []
+        self._prune_expired_artifact_runs(
+            branch=normalized_branch,
+            issue_id=normalized_issue,
+        )
+        file_size_limit = max(1, int(max_file_bytes or _MAX_ARTIFACT_BYTES))
+        run_size_limit = max(0, int(max_run_bytes or 0))
+        branch_size_limit = max(0, int(max_branch_bytes or 0))
+        artifact_candidates: list[tuple[Path, str, int]] = []
+        run_total_bytes = 0
         published: list[PublishedArtifact] = []
         for raw_file in files:
             local_path = Path(raw_file).expanduser()
             if not local_path.exists() or not local_path.is_file():
                 logger.warning("Skipping missing artifact publish candidate: %s", local_path)
                 continue
-            if not self._artifact_file_is_publishable(local_path):
+            if not self._artifact_file_is_publishable(local_path, max_bytes=file_size_limit):
                 logger.warning("Skipping unsupported artifact publish candidate: %s", local_path)
                 continue
             artifact_name = self._sanitize_artifact_filename(local_path.name)
             if not artifact_name:
                 logger.warning("Skipping artifact with unsupported name: %s", local_path)
                 continue
+            artifact_size = int(local_path.stat().st_size)
+            run_total_bytes += artifact_size
+            artifact_candidates.append((local_path, artifact_name, artifact_size))
+        if run_size_limit and run_total_bytes > run_size_limit:
+            logger.warning(
+                "Artifact run for issue #%s exceeds configured run-size guardrail (%s > %s bytes).",
+                normalized_issue,
+                run_total_bytes,
+                run_size_limit,
+            )
+        if branch_size_limit:
+            projected_branch_bytes = self._artifact_branch_total_bytes(branch=normalized_branch) + run_total_bytes
+            if projected_branch_bytes > branch_size_limit:
+                logger.warning(
+                    "Artifact branch %s exceeds configured size guardrail (%s > %s bytes).",
+                    normalized_branch,
+                    projected_branch_bytes,
+                    branch_size_limit,
+                )
+        for local_path, artifact_name, _artifact_size in artifact_candidates:
             remote_path = (
                 f"flow-healer/evidence/issue-{normalized_issue}/{normalized_run_key}/{artifact_name}"
             )
@@ -568,6 +602,28 @@ class GitHubHealerTracker:
                     sha=sha,
                 )
             )
+        metadata_payload = dict(metadata or {})
+        metadata_payload["issue_id"] = normalized_issue
+        metadata_payload.setdefault("attempt_id", normalized_run_key)
+        metadata_payload["run_key"] = normalized_run_key
+        metadata_payload["generated_at"] = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        metadata_payload["retention_until"] = (
+            datetime.now(tz=UTC) + timedelta(days=max(1, int(retention_days or 30)))
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if published:
+            metadata_payload["artifacts"] = [
+                {"name": artifact.name, "remote_path": artifact.remote_path, "content_type": artifact.content_type}
+                for artifact in published
+            ]
+        meta_remote_path = f"flow-healer/evidence/issue-{normalized_issue}/{normalized_run_key}/_meta.json"
+        published_meta = self._publish_artifact_content(
+            branch=normalized_branch,
+            issue_id=normalized_issue,
+            remote_path=meta_remote_path,
+            content=json.dumps(metadata_payload, sort_keys=True, indent=2).encode("utf-8"),
+        )
+        if published_meta is not None:
+            published.append(published_meta)
         return published
 
     def get_pr_state(self, *, pr_number: int) -> str:
@@ -866,6 +922,123 @@ class GitHubHealerTracker:
             return ""
         return str(payload.get("sha") or "").strip()
 
+    def _publish_artifact_content(
+        self,
+        *,
+        branch: str,
+        issue_id: str,
+        remote_path: str,
+        content: bytes,
+    ) -> PublishedArtifact | None:
+        existing_sha = self._get_content_sha(branch=branch, remote_path=remote_path)
+        payload: dict[str, Any] = {
+            "message": f"chore: publish flow-healer evidence for issue #{issue_id}",
+            "content": base64.b64encode(content).decode("ascii"),
+            "branch": branch,
+        }
+        if existing_sha:
+            payload["sha"] = existing_sha
+        response = self._request_json(
+            f"/repos/{self.repo_slug}/contents/{quote(remote_path)}",
+            method="PUT",
+            body=payload,
+        )
+        if not isinstance(response, dict):
+            return None
+        content_payload = response.get("content")
+        if not isinstance(content_payload, dict):
+            return None
+        published_path = str(content_payload.get("path") or remote_path).strip() or remote_path
+        artifact_name = Path(published_path).name
+        sha = str(content_payload.get("sha") or "").strip()
+        return PublishedArtifact(
+            name=artifact_name,
+            branch=branch,
+            remote_path=published_path,
+            html_url=self._artifact_blob_url(branch=branch, remote_path=published_path),
+            download_url=str(content_payload.get("download_url") or "").strip()
+            or self._artifact_download_url(branch=branch, remote_path=published_path),
+            markdown_url=str(content_payload.get("download_url") or "").strip()
+            or self._artifact_download_url(branch=branch, remote_path=published_path),
+            content_type=self._artifact_content_type(artifact_name),
+            sha=sha,
+        )
+
+    def _prune_expired_artifact_runs(self, *, branch: str, issue_id: str) -> None:
+        issue_root = f"flow-healer/evidence/issue-{issue_id}"
+        for entry in self._list_artifact_directory(branch=branch, remote_path=issue_root):
+            if str(entry.get("type") or "").strip().lower() != "dir":
+                continue
+            run_root = str(entry.get("path") or "").strip()
+            if not run_root:
+                continue
+            meta_path = f"{run_root}/_meta.json"
+            meta_payload = self._request_json(
+                f"/repos/{self.repo_slug}/contents/{quote(meta_path)}?ref={quote(branch)}"
+            )
+            retention_until = self._artifact_retention_until(meta_payload)
+            if retention_until is None or datetime.now(tz=UTC) < retention_until:
+                continue
+            for run_entry in self._list_artifact_directory(branch=branch, remote_path=run_root):
+                if str(run_entry.get("type") or "").strip().lower() != "file":
+                    continue
+                file_path = str(run_entry.get("path") or "").strip()
+                file_sha = str(run_entry.get("sha") or "").strip()
+                if not file_path or not file_sha:
+                    continue
+                self._request_json(
+                    f"/repos/{self.repo_slug}/contents/{quote(file_path)}",
+                    method="DELETE",
+                    body={
+                        "message": f"chore: prune expired flow-healer evidence for issue #{issue_id}",
+                        "sha": file_sha,
+                        "branch": branch,
+                    },
+                )
+
+    def _artifact_branch_total_bytes(self, *, branch: str) -> int:
+        total = 0
+        pending = ["flow-healer/evidence"]
+        while pending:
+            current = pending.pop()
+            for entry in self._list_artifact_directory(branch=branch, remote_path=current):
+                entry_type = str(entry.get("type") or "").strip().lower()
+                entry_path = str(entry.get("path") or "").strip()
+                if entry_type == "dir" and entry_path:
+                    pending.append(entry_path)
+                    continue
+                if entry_type == "file":
+                    total += int(entry.get("size") or 0)
+        return total
+
+    def _list_artifact_directory(self, *, branch: str, remote_path: str) -> list[dict[str, Any]]:
+        payload = self._request_json(
+            f"/repos/{self.repo_slug}/contents/{quote(remote_path)}?ref={quote(branch)}"
+        )
+        if isinstance(payload, list):
+            return [dict(item) for item in payload if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _artifact_retention_until(payload: Any) -> datetime | None:
+        if not isinstance(payload, dict):
+            return None
+        raw_content = payload.get("content")
+        if not raw_content:
+            return None
+        try:
+            decoded = base64.b64decode(str(raw_content).encode("ascii")).decode("utf-8")
+            meta = json.loads(decoded)
+        except (ValueError, OSError, json.JSONDecodeError):
+            return None
+        raw_until = str(meta.get("retention_until") or "").strip()
+        if not raw_until:
+            return None
+        try:
+            return datetime.strptime(raw_until, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        except ValueError:
+            return None
+
     def _artifact_blob_url(self, *, branch: str, remote_path: str) -> str:
         web_base = self._repo_web_base_url().rstrip("/")
         quoted_path = "/".join(quote(part, safe="") for part in remote_path.split("/") if part)
@@ -922,12 +1095,12 @@ class GitHubHealerTracker:
         return str(content_type or "application/octet-stream")
 
     @staticmethod
-    def _artifact_file_is_publishable(path: Path) -> bool:
+    def _artifact_file_is_publishable(path: Path, *, max_bytes: int = _MAX_ARTIFACT_BYTES) -> bool:
         suffix = path.suffix.strip().lower()
         if suffix not in _ALLOWED_ARTIFACT_SUFFIXES:
             return False
         try:
-            return path.stat().st_size <= _MAX_ARTIFACT_BYTES
+            return path.stat().st_size <= max(1, int(max_bytes))
         except OSError:
             return False
 
