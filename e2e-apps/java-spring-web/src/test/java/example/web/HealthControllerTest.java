@@ -4,6 +4,7 @@ public class HealthControllerTest {
     public static void main(String[] args) {
         healthEndpointReturnsOk();
         loginEndpointIssuesCookieBackedSession();
+        loginEndpointFallsBackForBlankEmailInput();
         dashboardRendersFixtureCookieIdentity();
     }
 
@@ -21,6 +22,15 @@ public class HealthControllerTest {
             response.headers().get("Set-Cookie"),
             "healer_session=seeded-admin@example.com",
             "login cookie"
+        );
+    }
+
+    private static void loginEndpointFallsBackForBlankEmailInput() {
+        ResponsePlan response = new LoginController().createSession("   ");
+        assertContains(
+            response.headers().get("Set-Cookie"),
+            "healer_session=admin@example.com",
+            "blank email cookie fallback"
         );
     }
 
