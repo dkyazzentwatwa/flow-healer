@@ -444,11 +444,19 @@ def _first_defined(mapping: dict[str, Any], *keys: str) -> Any:
 
 
 def _normalize_app_runtime_profiles(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
+    normalized: dict[str, Any] = {}
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, list):
+        items = (
+            (str(item.get("name") or "").strip(), item)
+            for item in value
+            if isinstance(item, dict)
+        )
+    else:
         return {}
 
-    normalized: dict[str, Any] = {}
-    for raw_name, raw_profile in value.items():
+    for raw_name, raw_profile in items:
         profile_name = str(raw_name).strip()
         if not profile_name or not isinstance(raw_profile, dict):
             continue

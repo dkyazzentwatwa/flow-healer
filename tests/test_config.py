@@ -611,6 +611,49 @@ def test_load_reads_app_runtime_profile_settings(tmp_path: Path) -> None:
     }
 
 
+def test_load_reads_app_runtime_profile_settings_from_list(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    config_path.write_text(
+        (
+            "repos:\n"
+            "  - name: demo\n"
+            f"    path: {repo_path}\n"
+            "    healer_app_default_runtime_profile: desktop\n"
+            "    healer_app_runtime_profiles:\n"
+            "      - name: desktop\n"
+            "        browser: chromium\n"
+            "        headless: true\n"
+            "        viewport:\n"
+            "          width: 1440\n"
+            "          height: 900\n"
+            "      - name: mobile\n"
+            "        browser: webkit\n"
+            "        device: iPhone 15\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path)
+
+    repo = config.repos[0]
+    assert repo.healer_app_default_runtime_profile == "desktop"
+    assert repo.healer_app_runtime_profiles == {
+        "desktop": {
+            "name": "desktop",
+            "browser": "chromium",
+            "headless": True,
+            "viewport": {"width": 1440, "height": 900},
+        },
+        "mobile": {
+            "name": "mobile",
+            "browser": "webkit",
+            "device": "iPhone 15",
+        },
+    }
+
+
 def test_load_reads_github_artifact_publish_settings(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     repo_path = tmp_path / "repo"
