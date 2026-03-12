@@ -33,6 +33,17 @@ _ALLOWED_ARTIFACT_SUFFIXES = {
     ".webp",
 }
 _MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
+_ARTIFACT_CONTENT_TYPES = {
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".json": "application/json",
+    ".jsonl": "application/x-ndjson",
+    ".log": "text/plain",
+    ".png": "image/png",
+    ".txt": "text/plain",
+    ".webp": "image/webp",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -904,6 +915,9 @@ class GitHubHealerTracker:
 
     @staticmethod
     def _artifact_content_type(filename: str) -> str:
+        suffix = Path(filename).suffix.strip().lower()
+        if suffix in _ARTIFACT_CONTENT_TYPES:
+            return _ARTIFACT_CONTENT_TYPES[suffix]
         content_type, _ = mimetypes.guess_type(filename)
         return str(content_type or "application/octet-stream")
 

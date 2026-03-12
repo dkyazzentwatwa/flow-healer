@@ -117,10 +117,7 @@ function throwVariadicOverflowUnsafeIntegerError() {
   throw new RangeError(VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE);
 }
 
-function addPair(a, b) {
-  const normalizedA = normalizeAddOperand(a);
-  const normalizedB = normalizeAddOperand(b);
-
+function addNormalizedPair(normalizedA, normalizedB) {
   const canPromoteOperandsToBigInt =
     canConvertToBigInt(normalizedA) && canConvertToBigInt(normalizedB);
 
@@ -141,6 +138,10 @@ function addPair(a, b) {
   }
 
   return normalizeZero(normalizedA + normalizedB);
+}
+
+function addPair(a, b) {
+  return addNormalizedPair(normalizeAddOperand(a), normalizeAddOperand(b));
 }
 
 function isVariadicOverflowPromotion(accumulatedSum, operand) {
@@ -199,7 +200,7 @@ function sumOperands(operands) {
       || isVariadicOverflowPromotion(accumulatedSum, operand);
     hasExplicitBigIntOperand = hasExplicitBigIntOperand || typeof operand === 'bigint';
     hasUnsafeIntegerOperand = hasUnsafeIntegerOperand || isUnsafeIntegerNumber(operand);
-    accumulatedSum = addPair(accumulatedSum, operand);
+    accumulatedSum = addNormalizedPair(accumulatedSum, operand);
 
     if (
       shouldDemoteOverflowPromotedBigInt(

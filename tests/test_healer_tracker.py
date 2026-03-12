@@ -703,6 +703,14 @@ def test_publish_artifact_files_creates_branch_and_returns_markdown_ready_urls(m
     assert published[1].content_type == "text/plain"
 
 
+def test_artifact_content_type_prefers_stable_known_text_mappings(monkeypatch):
+    monkeypatch.setattr("flow_healer.healer_tracker.mimetypes.guess_type", lambda filename: (None, None))
+
+    assert GitHubHealerTracker._artifact_content_type("failure-console.log") == "text/plain"
+    assert GitHubHealerTracker._artifact_content_type("network.jsonl") == "application/x-ndjson"
+    assert GitHubHealerTracker._artifact_content_type("resolution.png") == "image/png"
+
+
 def test_publish_artifact_files_updates_existing_artifact_sha(monkeypatch, tmp_path):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
