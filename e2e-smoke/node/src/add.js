@@ -189,6 +189,10 @@ function sumOperands(operands) {
       return Number.NaN;
     }
 
+    if (typeof operand === 'number' && Number.isNaN(operand)) {
+      return Number.NaN;
+    }
+
     if (typeof operand === 'bigint' && hasUnsafeIntegerOperand) {
       throwBigIntUnsafeIntegerError();
     }
