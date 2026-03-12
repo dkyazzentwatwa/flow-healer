@@ -209,6 +209,7 @@ const ChatWidget = ({
   const [step, setStep] = useState<Step>("intent");
   const [isStreaming, setIsStreaming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const nextMessageIdRef = useRef(2);
 
   // Booking state
   const [selectedService, setSelectedService] = useState<ServiceItem | null>(null);
@@ -252,12 +253,18 @@ const ChatWidget = ({
   ]);
   const [input, setInput] = useState("");
 
+  const nextMessageId = useCallback(() => {
+    const id = nextMessageIdRef.current;
+    nextMessageIdRef.current += 1;
+    return id.toString();
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, step]);
 
   const addMessage = (role: "bot" | "user", text: string) => {
-    setMessages((prev) => [...prev, { id: Date.now().toString(), role, text }]);
+    setMessages((prev) => [...prev, { id: nextMessageId(), role, text }]);
   };
 
   const toApiMessages = useCallback((msgs: Message[]) => {
@@ -273,7 +280,7 @@ const ChatWidget = ({
     async (allMessages: Message[]) => {
       setIsStreaming(true);
       let assistantSoFar = "";
-      const assistantId = Date.now().toString();
+      const assistantId = nextMessageId();
 
       setMessages((prev) => [...prev, { id: assistantId, role: "bot", text: "" }]);
 
@@ -295,7 +302,7 @@ const ChatWidget = ({
         },
       });
     },
-    [businessContext, toApiMessages]
+    [businessContext, nextMessageId, toApiMessages]
   );
 
   const resetToMenu = () => {
@@ -321,7 +328,7 @@ const ChatWidget = ({
         return;
       }
       if (!widgetToken || !activeServices.some((s) => Boolean(s.id))) {
-        const userMsg: Message = { id: Date.now().toString(), role: "user", text: "I'd like to book an appointment" };
+        const userMsg: Message = { id: nextMessageId(), role: "user", text: "I'd like to book an appointment" };
         setMessages((prev) => [...prev, userMsg]);
         setStep("conversation");
         setTimeout(() => sendToAI([...messages, userMsg]), 100);
@@ -337,7 +344,7 @@ const ChatWidget = ({
         setStep("faq-list");
       }, 500);
     } else if (intent === "existing") {
-      const userMsg: Message = { id: Date.now().toString(), role: "user", text: "I want to check on my appointment" };
+      const userMsg: Message = { id: nextMessageId(), role: "user", text: "I want to check on my appointment" };
       setMessages((prev) => [...prev, userMsg]);
       setStep("conversation");
       setTimeout(() => sendToAI([...messages, userMsg]), 100);
@@ -460,7 +467,7 @@ const ChatWidget = ({
 
   const handleSend = () => {
     if (!input.trim() || isStreaming) return;
-    const userMsg: Message = { id: Date.now().toString(), role: "user", text: input.trim() };
+    const userMsg: Message = { id: nextMessageId(), role: "user", text: input.trim() };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
 

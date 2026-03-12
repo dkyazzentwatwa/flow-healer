@@ -277,13 +277,12 @@ def test_resume_local_database_container_unpauses_and_waits(monkeypatch) -> None
 
 def test_pause_local_database_container_pauses_when_enabled(monkeypatch) -> None:
     calls: list[list[str]] = []
+    monkeypatch.setenv("FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE", "1")
+    monkeypatch.setattr("flow_healer.sql_validation.database_container_is_paused", lambda *, project_id: False)
+    monkeypatch.setattr("flow_healer.sql_validation.database_container_for_project", lambda *, project_id: "supabase_db_demo123")
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        if cmd[:3] == ["docker", "ps", "--format"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="supabase_db_demo123\n", stderr="")
-        if cmd[:3] == ["docker", "inspect", "-f"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="false\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -295,6 +294,7 @@ def test_pause_local_database_container_pauses_when_enabled(monkeypatch) -> None
 def test_run_sql_checks_auto_pauses_after_work(monkeypatch, tmp_path: Path) -> None:
     paused: list[str] = []
     resumed: list[str] = []
+    monkeypatch.setenv("FLOW_HEALER_SQL_AUTO_PAUSE_SUPABASE", "1")
     check_file = tmp_path / "supabase" / "assertions" / "schema.sql"
     check_file.parent.mkdir(parents=True)
     check_file.write_text("select 1;\n", encoding="utf-8")

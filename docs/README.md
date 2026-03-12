@@ -24,6 +24,7 @@ flow-healer start --once
 - [plans/2026-03-12-continuous-improvement-loop.md](plans/2026-03-12-continuous-improvement-loop.md): always-on bugfix loop charter, progress score, and running execution log
 - [plans/2026-03-12-mastery-weekly-note-01.md](plans/2026-03-12-mastery-weekly-note-01.md): first fixed-pack weekly note for mastery scorecard deltas
 - [plans/2026-03-12-ralph-prd-horizontal-mastery.md](plans/2026-03-12-ralph-prd-horizontal-mastery.md): PRD used to drive Ralph autonomous completion loop
+- [plans/2026-03-12-ralph-major-audit-master-checklist.md](plans/2026-03-12-ralph-major-audit-master-checklist.md): findings-first audit tracker for the March 12 repo review and follow-up fixes
 - [plans/2026-03-12-java-go-rust-toolchain-smoke-followup.md](plans/2026-03-12-java-go-rust-toolchain-smoke-followup.md): native toolchain smoke proof and follow-up automation plan
 - [app-target-onboarding.md](app-target-onboarding.md): checklist for adding a new browser-backed app target or runtime profile
 - [fixture-profile-guidance.md](fixture-profile-guidance.md): deterministic fixture and auth-state conventions for app-backed repro flows

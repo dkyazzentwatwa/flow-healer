@@ -4160,6 +4160,7 @@ _GENERIC_ARTIFACT_SUFFIXES = {
 _LANGUAGE_ARTIFACT_DIRS = {
     "python": {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", "env", "dist", "build", "pip-wheel-metadata"},
     "node": {"node_modules", "dist", "build", "coverage", ".next", ".nuxt"},
+    "rust": {"target"},
     "swift": {".build", ".swiftpm"},
 }
 _LOCKFILE_GROUPS = {
@@ -4167,6 +4168,7 @@ _LOCKFILE_GROUPS = {
     "pnpm-lock.yaml": {"package.json", "dependency", "dependencies", "lockfile"},
     "yarn.lock": {"package.json", "dependency", "dependencies", "lockfile"},
     "gemfile.lock": {"gemfile", "dependency", "dependencies", "lockfile"},
+    "cargo.lock": {"cargo.toml", "dependency", "dependencies", "lockfile"},
 }
 _RUBY_BUNDLE_BINSTUB_FILES = {"rspec"}
 _DEFAULT_BUNDLE_PATH = str((Path.home() / ".flow-healer" / "bundle").resolve())
@@ -4463,6 +4465,7 @@ def _is_tolerated_runtime_artifact(path: str, *, language: str) -> bool:
         return (
             (effective_language == "node" and lockfile_name == "package-lock.json")
             or (effective_language == "ruby" and lockfile_name == "gemfile.lock")
+            or (effective_language == "rust" and lockfile_name == "cargo.lock")
         )
     if _is_ruby_bundle_binstub_path(normalized, language=effective_language):
         return True

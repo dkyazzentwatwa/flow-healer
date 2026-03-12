@@ -3,6 +3,7 @@ package example.web;
 public class HealthControllerTest {
     public static void main(String[] args) {
         healthEndpointReturnsOk();
+        loginFormRendersDeterministicEvidenceMarker();
         loginEndpointIssuesCookieBackedSession();
         loginEndpointFallsBackForBlankEmailInput();
         dashboardRendersFixtureCookieIdentity();
@@ -12,6 +13,12 @@ public class HealthControllerTest {
         ResponsePlan response = new HealthController().health();
         assertEquals(200, response.status(), "health status");
         assertContains(response.body(), "\"status\":\"ok\"", "health body");
+    }
+
+    private static void loginFormRendersDeterministicEvidenceMarker() {
+        ResponsePlan response = new LoginController().loginForm("");
+        assertEquals(200, response.status(), "login form status");
+        assertContains(response.body(), "Evidence TC 3", "login form evidence marker");
     }
 
     private static void loginEndpointIssuesCookieBackedSession() {

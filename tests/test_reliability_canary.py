@@ -9,9 +9,11 @@ from flow_healer.reliability_canary import (
     STALE_PROFILE_DAYS,
     check_profile_freshness,
     evaluate_canary_report,
+    load_profile_last_success_from_config,
     render_markdown_summary,
     run_canary_suite,
 )
+from flow_healer.store import SQLiteStore
 
 
 def test_run_canary_suite_builds_summary_from_group_results() -> None:
@@ -195,6 +197,35 @@ def test_run_canary_suite_includes_runtime_profile_freshness() -> None:
     assert runtime_profiles["node-next-web"]["within_window"] is True
     assert runtime_profiles["ruby-rails-web"]["stale"] is True
     assert runtime_profiles["java-spring-web"]["stale"] is True
+
+
+def test_load_profile_last_success_from_config_reads_repo_state(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "service:",
+                f"  state_root: {tmp_path / '.flow-healer'}",
+                "repos:",
+                "  - name: flow-healer-self",
+                f"    path: {tmp_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    store = SQLiteStore(tmp_path / ".flow-healer" / "repos" / "flow-healer-self" / "state.db")
+    store.bootstrap()
+    store.set_state("healer_app_runtime_canary_last_success_at:node-next-web", "2026-03-12 16:06:41")
+    store.set_state("healer_app_runtime_canary_last_success_at:ruby-rails-web", "2026-03-12 16:07:21")
+    store.close()
+
+    freshness = load_profile_last_success_from_config(config_path)
+
+    assert freshness["node-next-web"] == "2026-03-12 16:06:41"
+    assert freshness["ruby-rails-web"] == "2026-03-12 16:07:21"
+    assert "java-spring-web" not in freshness
 
 
 def test_evaluate_canary_report_warns_on_stale_runtime_profile() -> None:
