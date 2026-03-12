@@ -34,7 +34,7 @@ function readSessionFromRequest(request) {
     return null;
   }
 
-  const rawValue = sessionCookie.slice("session=".length).trim();
+  const rawValue = normalizeCookieValue(sessionCookie.slice("session=".length));
   if (!rawValue) {
     return null;
   }
@@ -54,6 +54,21 @@ function readSessionFromRequest(request) {
   } catch {
     return null;
   }
+}
+
+function normalizeCookieValue(value) {
+  const trimmedValue = typeof value === "string" ? value.trim() : "";
+  if (!trimmedValue) {
+    return "";
+  }
+
+  const hasWrappingQuotes =
+    trimmedValue.startsWith('"') && trimmedValue.endsWith('"') && trimmedValue.length >= 2;
+  if (!hasWrappingQuotes) {
+    return trimmedValue;
+  }
+
+  return trimmedValue.slice(1, -1).trim();
 }
 
 function normalizeUser(user) {

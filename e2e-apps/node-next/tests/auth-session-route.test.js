@@ -61,3 +61,33 @@ test("GET ignores malformed session cookies instead of throwing", async () => {
     session: null,
   });
 });
+
+test("GET normalizes quoted session cookies before parsing the session payload", async () => {
+  const response = await GET(
+    new Request("http://localhost/api/auth/session", {
+      headers: {
+        cookie: `session="${encodeURIComponent(
+          JSON.stringify({
+            user: {
+              name: "  Taylor  ",
+              email: "  taylor@example.com  ",
+            },
+            expires: " 2026-03-10T12:00:00.000Z ",
+          }),
+        )}"`,
+      },
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    authenticated: true,
+    session: {
+      user: {
+        name: "Taylor",
+        email: "taylor@example.com",
+      },
+      expires: "2026-03-10T12:00:00.000Z",
+    },
+  });
+});
