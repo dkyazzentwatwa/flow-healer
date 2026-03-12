@@ -1,0 +1,5 @@
+Browser smoke pass for http://127.0.0.1:3000/
+GET http://127.0.0.1:3000/ 200
+GET http://127.0.0.1:3000/_next/static/chunks/webpack.js?v=1773347608890 200
+GET http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1773347608890 200
+GET http://127.0.0.1:3000/_next/static/chunks/app-pages-internals.js 200
