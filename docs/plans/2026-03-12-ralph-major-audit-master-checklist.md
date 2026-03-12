@@ -25,7 +25,7 @@ Last updated: `2026-03-12`
 | Save one repo-tracked audit checklist | Done | This file is the source of truth for the audit follow-up. |
 | Stabilize `prosper-chat` chat widget identity handling | Done | Duplicate-key regression test added and the full `prosper-chat` suite is green. |
 | Remove `prosper-chat` formatter flake symptoms | Done | The formatter lane is green and now fails on any unexpected `console.error`. |
-| Add tracked app/frontend tests to CI | Partial | Workflow jobs added, `prosper-chat` lockfile refreshed, and the `node-next` lane now uses `npm install` because its lockfile is intentionally gitignored; needs final GitHub runner proof. |
+| Add tracked app/frontend tests to CI | Done | Workflow jobs added, `prosper-chat` lockfile refreshed, `node-next` uses `npm install` because its lockfile is intentionally gitignored, and PR `#952` proved the jobs on real GitHub runners. |
 | Harden the SQL auto-pause test lane | Done | Targeted SQL tests and the full root `pytest -q` lane are green. |
 | Fix app-backed text determinism for `#941/#942/#943` | Done | Node Next, Ruby Rails, and Java Spring now expose deterministic `Evidence TC` text on the verified routes. |
 | Fix Rust lockfile/scope suppression for `#945` | Done | `Cargo.lock` is filtered like other generated lockfiles and the smoke lane now covers `add_many`. |
@@ -46,6 +46,7 @@ Last updated: `2026-03-12`
 - `cd e2e-apps/prosper-chat && npm test` now passes
 - isolated worktree reran the dashboard, node-next, and prosper-chat CI install/test lanes successfully
 - `pytest tests/test_e2e_apps_sandboxes.py -q` passed
+- GitHub PR `#952` completed `dashboard-tests`, `node-next-tests`, `prosper-chat-tests`, `package`, `test (3.11)`, `test (3.12)`, and `reliability-canary` successfully
 - `pytest tests/test_reliability_canary.py -q` passed with the new config-backed runtime freshness coverage
 - `python scripts/run_reliability_canary.py --output /tmp/flow-healer-reliability-canary-report.json --config config.yaml --repo flow-healer-self` passed with no stale runtime profiles
 - `python scripts/evaluate_reliability_canary_gate.py --report /tmp/flow-healer-reliability-canary-report.json --policy .github/reliability-canary-policy.json --mode enforce --summary-output /tmp/flow-healer-reliability-canary-summary.md` passed
@@ -68,7 +69,7 @@ Last updated: `2026-03-12`
 - [x] Confirm tracked test commands exist for `apps/dashboard`, `e2e-apps/node-next`, and `e2e-apps/prosper-chat`
 - [x] Add separate GitHub Actions jobs for each app/frontend lane
 - [x] Fix job assumptions around package-lock state (`node-next` uses `npm install`, `prosper-chat` lockfile refreshed)
-- [ ] Verify the new jobs in GitHub after push/PR
+- [x] Verify the new jobs in GitHub after push/PR
 
 ### Finding 3: SQL auto-pause test was sensitive to ambient suite state
 
@@ -92,8 +93,7 @@ Last updated: `2026-03-12`
 
 ## Immediate Next Tasks
 
-- [ ] Verify the new GitHub Actions app/frontend jobs on a real runner after push/PR
-- [ ] Close the loop on the temporary verification branch/PR after the real GitHub runner results are captured
+- [ ] Decide whether to merge or close PR `#952` now that the runner verification is complete
 
 ## Verification Log
 
@@ -117,3 +117,4 @@ Last updated: `2026-03-12`
 - [x] `python scripts/evaluate_reliability_canary_gate.py --report /tmp/flow-healer-reliability-canary-report.json --policy .github/reliability-canary-policy.json --mode enforce --summary-output /tmp/flow-healer-reliability-canary-summary.md`
 - [x] `flow-healer --config config.yaml status --repo flow-healer-self`
 - [x] `flow-healer --config config.yaml doctor --repo flow-healer-self`
+- [x] `GitHub PR #952: dashboard-tests, node-next-tests, prosper-chat-tests, package, test (3.11), test (3.12), reliability-canary`
