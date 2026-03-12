@@ -1,0 +1,45 @@
+[
+  {
+    "phase": "failure",
+    "transcript": [
+      {
+        "step": "goto /",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Browser smoke ready",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Available todo routes",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Artifact Proof D1",
+        "status": "failed",
+        "error": "Locator.wait_for: Timeout 30000ms exceeded.\nCall log:\n  - waiting for get_by_text(\"Artifact Proof D1\") to be visible\n"
+      }
+    ]
+  },
+  {
+    "phase": "resolution",
+    "transcript": [
+      {
+        "step": "goto /",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Browser smoke ready",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Available todo routes",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Artifact Proof D1",
+        "status": "passed"
+      }
+    ]
+  }
+]
