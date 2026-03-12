@@ -2618,6 +2618,63 @@ def test_auto_merge_open_pr_skips_when_ci_is_pending(tmp_path):
     loop.tracker.merge_pr.assert_not_called()
 
 
+def test_auto_merge_open_pr_refreshes_stale_pending_ci_before_merging(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="60131b",
+        repo="owner/repo",
+        title="Issue 60131b",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="60131b",
+        state="pr_open",
+        pr_number=2301,
+        pr_state="open",
+        ci_status_summary={"overall_state": "pending", "pending_contexts": ["CI"]},
+    )
+    store.create_healer_attempt(
+        attempt_id="ha_60131b_1",
+        issue_id="60131b",
+        attempt_no=1,
+        state="running",
+        prediction_source="path_level",
+        predicted_lock_set=["repo:*"],
+    )
+    store.finish_healer_attempt(
+        attempt_id="ha_60131b_1",
+        state="pr_open",
+        actual_diff_set=["src/demo.py"],
+        test_summary={"promotion_state": "promotion_ready"},
+        verifier_summary={},
+    )
+
+    loop = _make_loop(store)
+    loop.tracker.get_pr_details.return_value = PullRequestDetails(
+        number=2301,
+        state="open",
+        html_url="https://github.com/owner/repo/pull/2301",
+        mergeable_state="clean",
+        author="healer-service",
+        head_sha="abc123",
+    )
+    loop.tracker.get_pr_ci_status_summary.return_value = {
+        "overall_state": "success",
+        "head_sha": "abc123",
+    }
+    loop.tracker.merge_pr.return_value = True
+
+    merged = loop._auto_merge_open_prs()
+
+    assert merged == 1
+    loop.tracker.get_pr_ci_status_summary.assert_called_once_with(pr_number=2301, head_sha="abc123")
+    loop.tracker.merge_pr.assert_called_once_with(pr_number=2301, merge_method="squash")
+
+
 def test_auto_merge_open_pr_skips_when_local_promotion_is_blocked(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

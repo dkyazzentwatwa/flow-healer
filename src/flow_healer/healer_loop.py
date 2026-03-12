@@ -2241,7 +2241,7 @@ class AutonomousHealerLoop:
         if details.mergeable_state not in {"clean", "has_hooks", "unstable"}:
             return False
         resolved_ci_status_summary = dict(ci_status_summary or {})
-        if not resolved_ci_status_summary:
+        if self._ci_overall_state(resolved_ci_status_summary) != "success":
             resolved_ci_status_summary = self._resolve_pr_ci_status_summary(
                 issue_id=issue_id,
                 pr_number=pr_number,
