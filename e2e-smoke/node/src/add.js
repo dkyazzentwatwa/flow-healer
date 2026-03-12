@@ -1,3 +1,4 @@
+// Promote safe integer sums to bigint when a numeric result would overflow safe precision.
 function isIntegerNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
 }
