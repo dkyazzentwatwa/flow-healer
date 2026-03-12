@@ -55,7 +55,7 @@ def _normalize_integral_operand(value: Integral) -> int:
     """Coerce exact integer operands without consulting lossy __int__ hooks."""
     try:
         return operator.index(value)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except Exception as exc:
         raise _operand_type_error(cause=exc)
 
 

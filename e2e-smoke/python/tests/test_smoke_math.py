@@ -41,6 +41,13 @@ class IndexOnlyInt:
         return 11
 
 
+class ExplodingIndex:
+    """Exercise stable error mapping when __index__ itself is broken."""
+
+    def __index__(self) -> int:
+        raise RuntimeError("boom")
+
+
 def _load_smoke_math_module() -> ModuleType:
     spec = spec_from_file_location("smoke_math", SMOKE_MATH_PATH)
     assert spec is not None and spec.loader is not None
@@ -341,6 +348,14 @@ def test_coerce_operands_ignores_overflowing_int_hook_for_integral_subclass() ->
 def test_add_accepts_exact_index_operands_without_integral_registration() -> None:
     """Index-only operands should be accepted as exact integers."""
     assert _call_add(IndexOnlyInt(), "4") == 15
+
+
+def test_add_maps_broken_index_operands_to_stable_type_error() -> None:
+    """Broken __index__ hooks should not leak arbitrary exceptions."""
+    with pytest.raises(TypeError) as exc_info:
+        _call_add(ExplodingIndex(), 1)
+
+    assert str(exc_info.value) == SMOKE_MATH_MODULE.ERROR_MESSAGE
 
 
 def test_add3_preserves_identity_across_signed_inputs() -> None:
