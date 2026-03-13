@@ -33,6 +33,7 @@ from .language_strategies import (
 )
 from .protocols import ConnectorProtocol, ConnectorTurnResult
 from .healer_task_spec import HealerTaskSpec, resolve_browser_repro_mode, task_spec_to_prompt_block
+from .healer_workspace import HealerWorkspaceManager
 
 logger = logging.getLogger("apple_flow.healer_runner")
 _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
@@ -417,6 +418,8 @@ class HealerRunner:
         browser_harness: LocalBrowserHarness | None = None,
         completion_artifact_mode: str = "fallback_only",
         auto_clean_generated_artifacts: bool = True,
+        workspace_manager: HealerWorkspaceManager | None = None,
+        base_branch: str = "main",
     ) -> None:
         self.connector = connector
         self.timeout_seconds = max(30, int(timeout_seconds))
@@ -432,6 +435,8 @@ class HealerRunner:
         self._app_harness = app_harness or LocalAppHarness()
         self._browser_harness = browser_harness or LocalBrowserHarness()
         self.auto_clean_generated_artifacts = bool(auto_clean_generated_artifacts)
+        self._workspace_manager = workspace_manager
+        self._base_branch = str(base_branch or "main").strip() or "main"
         self.max_proposer_retries = 1
         self.max_code_proposer_retries = 3
         self.max_artifact_proposer_retries = 2
@@ -495,6 +500,62 @@ class HealerRunner:
         if not profile.command:
             return None, "app_runtime_profile_invalid", f"Runtime profile '{selected_name}' does not define a start command."
         return profile, "", ""
+
+    def _ensure_runtime_workspace_ready(
+        self,
+        *,
+        issue_id: str,
+        issue_title: str,
+        task_spec: HealerTaskSpec,
+        workspace: Path,
+    ) -> tuple[Path, AppRuntimeProfile | None, str, str, bool]:
+        profile, failure_class, failure_reason = self._resolve_app_runtime_profile(
+            task_spec=task_spec,
+            workspace=workspace,
+        )
+        if profile is None:
+            return workspace, None, failure_class, failure_reason, False
+        if profile.cwd.exists():
+            return workspace, profile, "", "", False
+        if self._workspace_manager is None:
+            return (
+                workspace,
+                None,
+                "app_runtime_root_missing",
+                f"Runtime profile '{profile.name}' working directory is missing in workspace: {profile.cwd}",
+                False,
+            )
+
+        logger.warning(
+            "Runtime profile '%s' root %s is missing for issue #%s; rebuilding workspace before app launch.",
+            profile.name,
+            profile.cwd,
+            issue_id,
+        )
+        rebuilt_workspace = self._workspace_manager.rebuild_workspace(
+            issue_id=issue_id,
+            title=issue_title,
+            base_branch=self._base_branch,
+            existing_path=workspace,
+        )
+        rebuilt_profile, rebuilt_failure_class, rebuilt_failure_reason = self._resolve_app_runtime_profile(
+            task_spec=task_spec,
+            workspace=rebuilt_workspace.path,
+        )
+        if rebuilt_profile is None:
+            return rebuilt_workspace.path, None, rebuilt_failure_class, rebuilt_failure_reason, True
+        if not rebuilt_profile.cwd.exists():
+            return (
+                rebuilt_workspace.path,
+                None,
+                "app_runtime_root_missing",
+                (
+                    f"Runtime profile '{rebuilt_profile.name}' working directory is still missing after workspace rebuild: "
+                    f"{rebuilt_profile.cwd}"
+                ),
+                True,
+            )
+        return rebuilt_workspace.path, rebuilt_profile, "", "", True
 
     def _run_fixture_driver(
         self,
@@ -635,10 +696,19 @@ class HealerRunner:
                     ),
                     workspace_status=workspace_status,
                 )
-            browser_profile, runtime_failure_class, runtime_failure_reason = self._resolve_app_runtime_profile(
-                task_spec=task_spec,
-                workspace=workspace,
+            workspace, browser_profile, runtime_failure_class, runtime_failure_reason, runtime_workspace_rebuilt = (
+                self._ensure_runtime_workspace_ready(
+                    issue_id=issue_id,
+                    issue_title=issue_title,
+                    task_spec=task_spec,
+                    workspace=workspace,
+                )
             )
+            if runtime_workspace_rebuilt:
+                self._bind_connector_workspace(workspace)
+                resolved_execution = self.resolve_execution(workspace=workspace, task_spec=task_spec)
+                workspace_status["app_runtime_workspace_rebuilt"] = True
+                workspace_status["app_runtime_workspace_path"] = str(workspace)
             if browser_profile is None:
                 if runtime_failure_class:
                     browser_runtime_status = {

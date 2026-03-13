@@ -114,6 +114,26 @@ class HealerWorkspaceManager:
                 f"{(ignored_clean.stderr or ignored_clean.stdout).strip()}"
             )
 
+    def rebuild_workspace(
+        self,
+        *,
+        issue_id: str,
+        title: str,
+        base_branch: str = "main",
+        existing_path: Path | None = None,
+    ) -> WorkspaceInfo:
+        if existing_path is not None:
+            existing = Path(existing_path).expanduser().absolute()
+            if existing.exists():
+                self.remove_workspace(workspace_path=existing)
+        workspace = self.ensure_workspace(issue_id=issue_id, title=title)
+        self.prepare_workspace(
+            workspace_path=workspace.path,
+            branch=workspace.branch,
+            base_branch=base_branch,
+        )
+        return workspace
+
     def remove_workspace(self, *, workspace_path: Path) -> None:
         ws = Path(workspace_path).expanduser().absolute()
         if not self._is_under_root(ws):
@@ -219,6 +239,9 @@ class HealerWorkspaceManager:
 
     def is_safe_workspace_path(self, path: Path) -> bool:
         return self._is_under_root(Path(path).expanduser().absolute())
+
+    def is_valid_workspace(self, path: Path) -> bool:
+        return self._is_git_worktree(Path(path).expanduser().absolute())
 
     def _is_under_root(self, path: Path) -> bool:
         try:

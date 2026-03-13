@@ -324,6 +324,8 @@ class AutonomousHealerLoop:
                 default_runtime_profile=str(getattr(settings, "healer_app_default_runtime_profile", "") or ""),
                 app_runtime_profiles=getattr(settings, "healer_app_runtime_profiles", {}),
                 auto_clean_generated_artifacts=settings.healer_auto_clean_generated_artifacts,
+                workspace_manager=self.workspace_manager,
+                base_branch=str(getattr(settings, "healer_default_branch", "main") or "main"),
             )
             self.runners_by_backend[backend] = runner
             self.verifiers_by_backend[backend] = HealerVerifier(connector=backend_connector, timeout_seconds=300)

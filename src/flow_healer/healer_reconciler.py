@@ -226,6 +226,14 @@ class HealerReconciler:
             lease_owner = str(row.get("lease_owner") or "").strip()
             if not issue_id or not lease_owner or lease_owner == self.current_worker_id:
                 continue
+            workspace_raw = str(row.get("workspace_path") or "").strip()
+            workspace_reason_suffix = ""
+            if workspace_raw:
+                workspace_path = Path(workspace_raw).expanduser().absolute()
+                workspace_missing = not workspace_path.exists()
+                workspace_invalid = workspace_path.exists() and not self.workspace_manager.is_valid_workspace(workspace_path)
+                if workspace_missing or workspace_invalid:
+                    workspace_reason_suffix = " Missing workspace will be rebuilt on retry."
             updated = self.store.set_healer_issue_state(
                 issue_id=issue_id,
                 state="queued",
@@ -235,6 +243,7 @@ class HealerReconciler:
                 last_failure_class="interrupted",
                 last_failure_reason=(
                     f"Recovered stale active issue from previous worker session '{lease_owner}'."
+                    f"{workspace_reason_suffix}"
                 ),
                 expected_lease_owner=lease_owner,
             )

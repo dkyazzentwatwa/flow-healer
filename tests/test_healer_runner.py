@@ -2,6 +2,7 @@ import subprocess
 import sys
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 from flow_healer.app_harness import AppHarnessBootResult
 from flow_healer.browser_harness import BrowserJourneyResult
@@ -5186,6 +5187,182 @@ def test_run_attempt_allows_constructive_browser_tasks_to_mutate_when_initial_jo
     assert len(connector.turns) == 1
     assert [call["phase"] for call in browser_harness.calls] == ["failure", "resolution"]
     assert browser_harness.calls[0]["expect_failure"] is False
+
+
+def test_run_attempt_rebuilds_workspace_when_app_runtime_root_is_missing(tmp_path):
+    workspace = tmp_path / "broken-workspace"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    rebuilt_workspace = tmp_path / "rebuilt-workspace"
+    rebuilt_workspace.mkdir()
+    _init_git_repo(rebuilt_workspace)
+    rebuilt_app_root = rebuilt_workspace / "e2e-apps" / "node-next"
+    rebuilt_app_root.mkdir(parents=True, exist_ok=True)
+    (rebuilt_app_root / "package.json").write_text('{"name":"node-next"}\n', encoding="utf-8")
+
+    connector = _RetryConnector(["not used"])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "before.png"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Artifact Proof Node R2", "status": "passed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/",
+                screenshot_path=str(tmp_path / "after.png"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Artifact Proof Node R2", "status": "passed"},),
+            ),
+        ]
+    )
+
+    class _FakeWorkspaceManager:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, str]] = []
+
+        def rebuild_workspace(self, *, issue_id: str, title: str, base_branch: str = "main", existing_path: Path | None = None):
+            self.calls.append(
+                {
+                    "issue_id": issue_id,
+                    "title": title,
+                    "base_branch": base_branch,
+                    "existing_path": str(existing_path),
+                }
+            )
+            return SimpleNamespace(
+                issue_id=issue_id,
+                branch=f"healer/issue-{issue_id}",
+                path=rebuilt_workspace,
+            )
+
+    workspace_manager = _FakeWorkspaceManager()
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": "e2e-apps/node-next",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+        workspace_manager=workspace_manager,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-runtime-rebuild-1",
+        issue_title="Node browser smoke",
+        issue_body="Update the landing page.",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/node-next/app/page.js",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="node",
+            execution_root="e2e-apps/node-next",
+            app_target="node-next",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Artifact Proof Node R2"),
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/demo.png",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert workspace_manager.calls == [
+        {
+            "issue_id": "app-runtime-rebuild-1",
+            "title": "Node browser smoke",
+            "base_branch": "main",
+            "existing_path": str(workspace),
+        }
+    ]
+    assert app_harness.boot_calls[0].cwd == rebuilt_app_root
+
+
+def test_run_attempt_fails_fast_when_app_runtime_root_is_missing_and_no_workspace_manager(tmp_path):
+    workspace = tmp_path / "broken-workspace"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+
+    connector = _RetryConnector(["not used"])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness([])
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": "e2e-apps/node-next",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+
+    result = runner.run_attempt(
+        issue_id="app-runtime-rebuild-2",
+        issue_title="Node browser smoke",
+        issue_body="Update the landing page.",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/node-next/app/page.js",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="node",
+            execution_root="e2e-apps/node-next",
+            app_target="node-next",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /", "expect_text Artifact Proof Node R2"),
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/demo.png",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "app_runtime_root_missing"
+    assert "working directory is missing in workspace" in result.failure_reason
+    assert app_harness.boot_calls == []
 
 
 def test_run_attempt_widens_scope_for_unrelated_baseline_validation_failures(tmp_path):

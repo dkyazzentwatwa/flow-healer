@@ -6272,6 +6272,8 @@ def test_loop_passes_app_runtime_profiles_to_runner(monkeypatch, tmp_path):
                     "working_directory": "e2e-apps/node-next",
                 }
             ],
+            "workspace_manager": loop.workspace_manager,
+            "base_branch": "main",
         }
     ]
 

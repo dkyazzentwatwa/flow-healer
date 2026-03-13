@@ -250,6 +250,56 @@ def test_reconcile_recovers_stale_active_issue_from_previous_worker_session(tmp_
     assert not stale_workspace.exists()
 
 
+def test_reconcile_notes_missing_workspace_when_recovering_stale_issue(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    workspace_manager = HealerWorkspaceManager(repo_path=repo_path)
+    missing_workspace = workspace_manager.worktrees_root / "issue-8-missing"
+    reconciler = HealerReconciler(
+        store=store,
+        workspace_manager=workspace_manager,
+        current_worker_id="healer_new",
+    )
+
+    store.upsert_healer_issue(
+        issue_id="8",
+        repo="owner/repo",
+        title="Issue 8",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(
+        issue_id="8",
+        state="running",
+        workspace_path=str(missing_workspace),
+        branch_name="healer/issue-8-missing",
+    )
+    with store._lock:
+        conn = store._connect()
+        conn.execute(
+            "UPDATE healer_issues SET lease_owner = ?, lease_expires_at = ? WHERE issue_id = ?",
+            (
+                "healer_old",
+                (datetime.now(tz=UTC) + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"),
+                "8",
+            ),
+        )
+        conn.commit()
+
+    summary = reconciler.reconcile()
+    issue = store.get_healer_issue("8")
+
+    assert summary["recovered_stale_active_issues"] == 1
+    assert issue is not None
+    assert issue["state"] == "queued"
+    assert issue["workspace_path"] == ""
+    assert "Missing workspace will be rebuilt on retry." in str(issue["last_failure_reason"] or "")
+
+
 def test_reconcile_requeues_active_issue_without_any_lease(tmp_path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
