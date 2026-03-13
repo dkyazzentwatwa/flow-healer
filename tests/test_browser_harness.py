@@ -37,6 +37,22 @@ def test_parse_repro_steps_supports_core_browser_actions() -> None:
     )
 
 
+def test_parse_repro_steps_supports_state_tolerant_browser_actions() -> None:
+    steps = parse_repro_steps(
+        (
+            "expect_any_text Winner: X || Start game",
+            "expect_text_absent Current turn: X",
+            "expect_url /game",
+        )
+    )
+
+    assert steps == (
+        BrowserStep(kind="expect_any_text", subject="Winner: X || Start game", argument=""),
+        BrowserStep(kind="expect_text_absent", subject="Current turn: X", argument=""),
+        BrowserStep(kind="expect_url", subject="/game", argument=""),
+    )
+
+
 def test_check_runtime_available_reports_missing_playwright(monkeypatch: pytest.MonkeyPatch) -> None:
     harness = LocalBrowserHarness()
 
@@ -49,19 +65,48 @@ def test_check_runtime_available_reports_missing_playwright(monkeypatch: pytest.
 
 
 class _FakeBrowserSession:
-    def __init__(self, *, fail_expect_text: bool = False):
+    def __init__(
+        self,
+        *,
+        fail_expect_text: bool = False,
+        visible_texts: set[str] | None = None,
+        current_url: str = "",
+    ):
         self.fail_expect_text = fail_expect_text
-        self.current_url = ""
+        self.current_url = current_url
         self.visited: list[str] = []
         self.fetch_calls: list[tuple[str, str, str]] = []
+        self.visible_texts = visible_texts
+        self.clicked: list[str] = []
 
     def goto(self, url: str) -> None:
         self.current_url = url
         self.visited.append(url)
 
+    def click(self, selector: str) -> None:
+        self.clicked.append(selector)
+
     def expect_text(self, text: str) -> None:
         if self.fail_expect_text:
             raise AssertionError(text)
+        if self.visible_texts is not None and text not in self.visible_texts:
+            raise AssertionError(text)
+
+    def expect_any_text(self, texts: tuple[str, ...]) -> None:
+        if self.fail_expect_text:
+            raise AssertionError(" || ".join(texts))
+        if self.visible_texts is None:
+            return
+        if not any(text in self.visible_texts for text in texts):
+            raise AssertionError(" || ".join(texts))
+
+    def expect_text_absent(self, text: str) -> None:
+        if self.visible_texts is not None and text in self.visible_texts:
+            raise AssertionError(text)
+
+    def expect_url(self, url: str) -> None:
+        if self.current_url != url:
+            raise AssertionError(f"{self.current_url} != {url}")
 
     def fetch(self, method: str, path: str, payload: str = "") -> None:
         self.fetch_calls.append((method, path, payload))
@@ -124,6 +169,82 @@ def test_capture_journey_runs_fetch_steps_and_passes_resolution_flow(tmp_path: P
     assert result.expected_failure_observed is False
     assert session.fetch_calls == [("POST", "/api/todos", '{"title":"Ship browser proof"}')]
     assert result.final_url == "http://127.0.0.1:3000/"
+
+
+def test_capture_journey_runs_state_tolerant_assertions(tmp_path: Path) -> None:
+    session = _FakeBrowserSession(
+        visible_texts={"Start game", "Board ready"},
+        current_url="http://127.0.0.1:3000/game",
+    )
+    harness = LocalBrowserHarness(session_factory=lambda profile, entry_url, artifact_root, phase: session)
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        browser="chromium",
+    )
+
+    result = harness.capture_journey(
+        profile=profile,
+        entry_url="http://127.0.0.1:3000",
+        repro_steps=(
+            "goto /game",
+            "expect_any_text Winner: X || Start game",
+            "expect_text_absent Current turn: X",
+            "expect_url http://127.0.0.1:3000/game",
+        ),
+        artifact_root=tmp_path / "artifacts",
+        phase="resolution",
+        expect_failure=False,
+    )
+
+    assert result.passed is True
+    assert result.final_url == "http://127.0.0.1:3000/game"
+
+
+def test_capture_journey_handles_completed_state_then_restart_to_fresh_state(tmp_path: Path) -> None:
+    class _RestartSession(_FakeBrowserSession):
+        def __init__(self) -> None:
+            super().__init__(
+                visible_texts={"Winner: X", "Play again"},
+                current_url="http://127.0.0.1:3000/game",
+            )
+
+        def click(self, selector: str) -> None:
+            super().click(selector)
+            if selector == "button.restart":
+                self.visible_texts = {"Start game", "Board ready"}
+
+    session = _RestartSession()
+    harness = LocalBrowserHarness(session_factory=lambda profile, entry_url, artifact_root, phase: session)
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        browser="chromium",
+    )
+
+    result = harness.capture_journey(
+        profile=profile,
+        entry_url="http://127.0.0.1:3000",
+        repro_steps=(
+            "goto /game",
+            "expect_any_text Winner: X || Start game",
+            "click button.restart",
+            "expect_text Start game",
+            "expect_text_absent Winner: X",
+            "expect_url http://127.0.0.1:3000/game",
+        ),
+        artifact_root=tmp_path / "artifacts",
+        phase="resolution",
+        expect_failure=False,
+    )
+
+    assert result.passed is True
+    assert session.clicked == ["button.restart"]
+    assert Path(result.screenshot_path).exists()
+    assert Path(result.console_log_path).exists()
+    assert Path(result.network_log_path).exists()
 
 
 def test_capture_journey_accepts_preparsed_browser_steps(tmp_path: Path) -> None:

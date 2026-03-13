@@ -8,6 +8,7 @@ class _CaptureConnector:
     def __init__(self, response: str) -> None:
         self.response = response
         self.timeout_seconds: int | None = None
+        self.last_prompt = ""
 
     def get_or_create_thread(self, sender: str) -> str:
         return f"thread:{sender}"
@@ -17,6 +18,7 @@ class _CaptureConnector:
 
     def run_turn(self, thread_id: str, prompt: str, *, timeout_seconds: int | None = None) -> str:
         self.timeout_seconds = timeout_seconds
+        self.last_prompt = prompt
         return self.response
 
     def ensure_started(self) -> None:
@@ -137,3 +139,42 @@ def test_healer_verifier_marks_unknown_verdict_as_hard_failure() -> None:
     assert result.verdict == "hard_fail"
     assert result.hard_failure is True
     assert result.parse_error is False
+
+
+def test_healer_verifier_includes_structured_browser_contract_context() -> None:
+    connector = _CaptureConnector('{"verdict":"pass","summary":"Looks good."}')
+    verifier = HealerVerifier(connector=connector)
+
+    verifier.verify(
+        issue_id="806",
+        issue_title="Browser artifact smoke",
+        issue_body="Body",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            browser_repro_mode="allow_success",
+            repro_steps=("goto /dashboard", "expect_text Artifact Proof Java E1"),
+            artifact_requirements=("screenshot: artifacts/demo.png", "console log", "network log"),
+        ),
+        diff_paths=[],
+        test_summary={
+            "browser_repro_mode": "allow_success",
+            "browser_evidence_required": True,
+            "artifact_proof_ready": True,
+            "promotion_transitions": ["failure_artifacts_captured", "resolution_artifacts_captured", "local_validated"],
+            "flaky_repro": {
+                "checked": True,
+                "reproduced_on_first_run": False,
+                "reproduced_on_replay": False,
+            },
+        },
+        proposer_output="No code changes were needed.",
+    )
+
+    assert "Browser contract summary:" in connector.last_prompt
+    assert "browser_repro_mode=allow_success" in connector.last_prompt
+    assert "artifact_proof_ready=true" in connector.last_prompt
+    assert "promotion_transitions=failure_artifacts_captured,resolution_artifacts_captured,local_validated" in connector.last_prompt
