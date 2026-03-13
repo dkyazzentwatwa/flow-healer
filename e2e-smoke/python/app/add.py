@@ -20,3 +20,8 @@ def _coerce_int(value: int | str) -> int:
 def add(left: int | str, right: int | str) -> int:
     """Return the arithmetic sum for integer-like inputs, rejecting invalid inputs."""
     return _coerce_int(left) + _coerce_int(right)
+
+
+def add_many(first: int | str, second: int | str, third: int | str) -> int:
+    """Return the arithmetic sum for three integer-like inputs."""
+    return _coerce_int(first) + _coerce_int(second) + _coerce_int(third)
