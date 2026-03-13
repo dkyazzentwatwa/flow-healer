@@ -1,0 +1,4 @@
+reqid=1 GET http://127.0.0.1:3201/dashboard [200]
+reqid=2 GET http://127.0.0.1:3201/favicon.ico [404]
+reqid=3 GET http://127.0.0.1:3201/dashboard [200]
+reqid=4 GET http://127.0.0.1:3201/favicon.ico [404]
