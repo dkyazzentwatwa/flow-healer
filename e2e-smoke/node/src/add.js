@@ -12,6 +12,9 @@ const VARIADIC_OVERFLOW_UNSAFE_INTEGER_MESSAGE =
 const STRING_OPERAND_TYPE_ERROR_MESSAGE =
   'add() does not accept string operands.';
 
+const FINITE_NUMBER_OPERAND_TYPE_ERROR_MESSAGE =
+  'addMany() requires finite numeric operands.';
+
 function isUnsafeIntegerNumber(value) {
   return isIntegerNumber(value) && !Number.isSafeInteger(value);
 }
@@ -90,6 +93,10 @@ function throwStringOperandTypeError() {
   throw new TypeError(STRING_OPERAND_TYPE_ERROR_MESSAGE);
 }
 
+function throwFiniteNumberOperandTypeError() {
+  throw new TypeError(FINITE_NUMBER_OPERAND_TYPE_ERROR_MESSAGE);
+}
+
 function assertNoStringOperands(operands) {
   if (operands.some(isStringOperand)) {
     throwStringOperandTypeError();
@@ -143,6 +150,17 @@ function addNormalizedPair(normalizedA, normalizedB) {
 
 function addPair(a, b) {
   return addNormalizedPair(normalizeAddOperand(a), normalizeAddOperand(b));
+}
+
+function normalizeFiniteNumberOperand(value) {
+  const primitive = toAddPrimitive(value);
+  const numericValue = typeof primitive === 'string' ? Number(primitive) : primitive;
+
+  if (typeof numericValue !== 'number' || !Number.isFinite(numericValue)) {
+    throwFiniteNumberOperandTypeError();
+  }
+
+  return normalizeZero(numericValue);
 }
 
 function isVariadicOverflowPromotion(accumulatedSum, operand) {
@@ -234,6 +252,14 @@ export function add(...operands) {
   }
 
   return sumOperands(operands.map(normalizeAddOperand));
+}
+
+export function addMany(a, b, c) {
+  return (
+    normalizeFiniteNumberOperand(a)
+    + normalizeFiniteNumberOperand(b)
+    + normalizeFiniteNumberOperand(c)
+  );
 }
 
 export default add;
