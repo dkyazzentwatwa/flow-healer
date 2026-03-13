@@ -39,3 +39,26 @@ func TestAutonomousGitHubAgentSummaryMentionsAutonomousGitHubAgents(t *testing.T
 		t.Fatalf("AutonomousGitHubAgentSummary() = %q, want mention of autonomous GitHub agents", summary)
 	}
 }
+
+func TestAutonomousGitHubAgentBriefHasThreeParagraphs(t *testing.T) {
+	brief := AutonomousGitHubAgentBrief()
+	paragraphs := strings.Split(brief, "\n\n")
+
+	if len(paragraphs) != 3 {
+		t.Fatalf("AutonomousGitHubAgentBrief() returned %d paragraphs, want 3", len(paragraphs))
+	}
+
+	for i, paragraph := range paragraphs {
+		if strings.TrimSpace(paragraph) == "" {
+			t.Fatalf("AutonomousGitHubAgentBrief() paragraph %d is empty", i+1)
+		}
+	}
+}
+
+func TestAutonomousGitHubAgentBriefMentionsAutonomousGitHubAgents(t *testing.T) {
+	brief := strings.ToLower(AutonomousGitHubAgentBrief())
+
+	if !strings.Contains(brief, "autonomous github agents") {
+		t.Fatalf("AutonomousGitHubAgentBrief() = %q, want mention of autonomous GitHub agents", brief)
+	}
+}
