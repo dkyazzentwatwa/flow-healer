@@ -83,3 +83,15 @@ private let commutativePairs: [(left: Int, right: Int)] = [
         #expect(add(pair.left, pair.right) == 0)
     }
 }
+
+@Test func addManyAddsThreePositiveOperands() {
+    #expect(addMany(2, 3, 4) == 9)
+}
+
+@Test func addManyAddsMixedSignOperands() {
+    #expect(addMany(-4, 9, -2) == 3)
+}
+
+@Test func addManyTreatsZeroAsTheAdditiveIdentity() {
+    #expect(addMany(0, 7, 0) == 7)
+}
