@@ -1,0 +1,41 @@
+[
+  {
+    "phase": "failure",
+    "transcript": [
+      {
+        "step": "goto /",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Browser smoke ready",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Artifact Proof E3",
+        "status": "failed",
+        "error": "Locator.wait_for: Timeout 30000ms exceeded.\nCall log:\n  - waiting for get_by_text(\"Artifact Proof E3\") to be visible\n"
+      }
+    ]
+  },
+  {
+    "phase": "resolution",
+    "transcript": [
+      {
+        "step": "goto /",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Browser smoke ready",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text Artifact Proof E3",
+        "status": "passed"
+      },
+      {
+        "step": "expect_text AI autonomous GitHub agents are software workers that inspect repositories, propose changes, run validation, and report results back on GitHub.",
+        "status": "passed"
+      }
+    ]
+  }
+]
