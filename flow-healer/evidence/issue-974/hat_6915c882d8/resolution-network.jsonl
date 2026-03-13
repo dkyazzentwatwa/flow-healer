@@ -1,0 +1,2 @@
+{"event": "request", "method": "GET", "url": "http://127.0.0.1:3201/dashboard"}
+{"event": "response", "status": 200, "url": "http://127.0.0.1:3201/dashboard"}
