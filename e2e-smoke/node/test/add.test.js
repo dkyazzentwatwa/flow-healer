@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 
-import addDefault, { add } from '../src/add.js';
+import addDefault, { add, addMany } from '../src/add.js';
 
 const addTestCases = [
   { name: 'returns 5 for two positive numbers', left: 2, right: 3, expected: 5 },
@@ -121,6 +121,20 @@ test('add returns the expected sum for each named scenario', async (t) => {
 test('add keeps default and named exports aligned', () => {
   assert.equal(addDefault, add);
   assert.equal(addDefault(2, 3), 5);
+});
+
+test('addMany adds three numeric operands', () => {
+  assert.equal(addMany(1, 2, 3), 6);
+});
+
+test('addMany normalizes numeric string operands like add input normalization', () => {
+  assert.equal(addMany('1', '2', '3'), 6);
+});
+
+test('addMany rejects one invalid operand', () => {
+  assert.throws(() => addMany(1, Number.POSITIVE_INFINITY, 3), {
+    name: 'TypeError',
+  });
 });
 
 test('add preserves regular number semantics for non-integer inputs', () => {
