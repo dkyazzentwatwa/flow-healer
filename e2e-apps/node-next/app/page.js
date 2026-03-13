@@ -1,44 +1,58 @@
 export default function HomePage() {
   return (
     <section
-      aria-labelledby="todo-routes-heading"
+      aria-labelledby="agent-brief-heading"
       style={{
-        backgroundColor: '#f2e6d8',
+        background:
+          'linear-gradient(180deg, #f8f1e4 0%, #efe3cf 52%, #e5d4bd 100%)',
         minHeight: '100vh',
-        padding: '3rem 2rem',
-        color: '#2f241d',
+        padding: '3rem 1.5rem',
+        color: '#3d3027',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
       }}
     >
-      <div style={{ fontSize: '0.95rem', fontWeight: 600, letterSpacing: '0.08em' }}>
-        Browser smoke ready
-      </div>
-      <h1
-        id="todo-routes-heading"
-        style={{ fontSize: '2.5rem', margin: '1rem 0 0.5rem' }}
+      <div
+        style={{
+          width: 'min(100%, 52rem)',
+          backgroundColor: 'rgba(255, 251, 244, 0.78)',
+          border: '1px solid rgba(125, 99, 76, 0.18)',
+          borderRadius: '28px',
+          boxShadow: '0 24px 60px rgba(94, 73, 52, 0.14)',
+          padding: '2.75rem',
+          backdropFilter: 'blur(2px)',
+        }}
       >
-        Artifact Proof E3
-      </h1>
-      <div style={{ maxWidth: '48rem', lineHeight: 1.7 }}>
-        <p>
-          AI autonomous GitHub agents are software workers that inspect
-          repositories, propose changes, run validation, and report results back
-          on GitHub. They usually start from an issue or task contract, gather
-          the local context they need, and prepare a narrow fix instead of
-          making broad repo changes.
-        </p>
-        <p>
-          A typical run follows the same loop each time: read the target files,
-          update the implementation, execute the required checks, and capture
-          evidence such as logs or screenshots when the task asks for browser
-          proof. That keeps the workflow understandable for reviewers because
-          each step is tied to a clear instruction and a concrete output.
-        </p>
-        <p>
-          This approach is useful because teams get faster issue handling
-          without losing control of quality. People can review a small patch,
-          see what validation passed, and merge with more confidence when the
-          agent leaves behind readable summaries and repeatable artifacts.
-        </p>
+        <div style={{ fontSize: '0.85rem', fontWeight: 700, letterSpacing: '0.12em' }}>
+          Autonomous agent briefing
+        </div>
+        <h1
+          id="agent-brief-heading"
+          style={{ fontSize: '2.75rem', lineHeight: 1.1, margin: '0.9rem 0 1rem' }}
+        >
+          Artifact Proof Node R2
+        </h1>
+        <div style={{ maxWidth: '44rem', lineHeight: 1.75, fontSize: '1.05rem' }}>
+          <p>
+            AI autonomous GitHub agents help teams triage issues, prepare small
+            repository changes, run validation, and report the result with
+            evidence. They keep each pass focused by following a written task
+            contract instead of improvising broad changes across the repo.
+          </p>
+          <p>
+            An effective agent brief reads like a calm operations card: it
+            points to the target surface, names the proof that needs to be
+            captured, and reminds reviewers what success should look like once
+            the browser check is complete.
+          </p>
+          <p>
+            That rhythm gives maintainers a warmer handoff at the end of every
+            run, because the patch, the validation result, and the captured
+            evidence all arrive together in a format that is easy to review and
+            easy to trust.
+          </p>
+        </div>
       </div>
     </section>
   );
