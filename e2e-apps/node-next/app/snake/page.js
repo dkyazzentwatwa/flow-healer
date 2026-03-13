@@ -69,6 +69,35 @@ function isOnSnake(snake, x, y) {
 export default function SnakePage() {
   const [game, setGame] = useState(createInitialGame);
   const pendingDirectionRef = useRef(null);
+  const gameSurfaceRef = useRef(null);
+
+  const handleDirectionInput = useCallback((key) => {
+    const nextDirection = DIRECTION_BY_KEY[key];
+    if (!nextDirection) {
+      return false;
+    }
+
+    setGame((current) => {
+      if (current.gameOver) {
+        return current;
+      }
+
+      if (OPPOSITE[current.direction] === nextDirection && current.started) {
+        return current;
+      }
+
+      pendingDirectionRef.current = nextDirection;
+
+      return {
+        ...current,
+        direction: nextDirection,
+        started: true,
+        lastMove: nextDirection,
+      };
+    });
+
+    return true;
+  }, []);
 
   const restart = useCallback(() => {
     pendingDirectionRef.current = null;
@@ -76,37 +105,21 @@ export default function SnakePage() {
   }, []);
 
   useEffect(() => {
+    gameSurfaceRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     function onKeyDown(event) {
-      const nextDirection = DIRECTION_BY_KEY[event.key];
-      if (!nextDirection) {
+      if (!handleDirectionInput(event.key)) {
         return;
       }
+
       event.preventDefault();
-
-      setGame((current) => {
-        if (current.gameOver) {
-          return current;
-        }
-
-        if (OPPOSITE[current.direction] === nextDirection && current.started) {
-          return current;
-        }
-
-        pendingDirectionRef.current = nextDirection;
-
-        // Update movement status immediately so browser repro can assert key intent.
-        return {
-          ...current,
-          direction: nextDirection,
-          started: true,
-          lastMove: nextDirection,
-        };
-      });
     }
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [handleDirectionInput]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -211,6 +224,15 @@ export default function SnakePage() {
 
         <div
           aria-label="Snake game board"
+          onKeyDown={(event) => {
+            if (!handleDirectionInput(event.key)) {
+              return;
+            }
+
+            event.preventDefault();
+          }}
+          ref={gameSurfaceRef}
+          tabIndex={0}
           style={{
             display: 'grid',
             gridTemplateColumns: `repeat(${BOARD_SIZE}, minmax(0, 1fr))`,
