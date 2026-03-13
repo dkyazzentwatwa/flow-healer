@@ -5,7 +5,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.add import add
+from app.add import add, add_many
 
 
 def test_add() -> None:
@@ -81,3 +81,16 @@ def test_add_uses_native_add_for_pandas_objects_only() -> None:
 
     assert result.value == 103
     assert result.used_native_add is True
+
+
+def test_add_many_with_scalars() -> None:
+    assert add_many(2, 3, 4) == 9
+
+
+def test_add_many_preserves_pandas_dataframe_behavior() -> None:
+    values = pd.DataFrame({"value": [1, 2, 3]})
+
+    result = add_many(values, 10, 100)
+
+    expected = pd.DataFrame({"value": [111, 112, 113]})
+    pd.testing.assert_frame_equal(result, expected)
