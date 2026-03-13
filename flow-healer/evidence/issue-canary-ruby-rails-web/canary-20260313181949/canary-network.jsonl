@@ -1,0 +1,2 @@
+{"event": "request", "method": "GET", "url": "http://127.0.0.1:3101/healthz/"}
+{"event": "response", "status": 404, "url": "http://127.0.0.1:3101/healthz/"}
