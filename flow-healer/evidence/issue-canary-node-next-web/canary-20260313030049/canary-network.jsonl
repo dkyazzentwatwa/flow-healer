@@ -1,0 +1,8 @@
+{"event": "request", "method": "GET", "url": "http://127.0.0.1:3000/"}
+{"event": "response", "status": 200, "url": "http://127.0.0.1:3000/"}
+{"event": "request", "method": "GET", "url": "http://127.0.0.1:3000/_next/static/chunks/webpack.js?v=1773370854112"}
+{"event": "request", "method": "GET", "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1773370854112"}
+{"event": "request", "method": "GET", "url": "http://127.0.0.1:3000/_next/static/chunks/app-pages-internals.js"}
+{"event": "response", "status": 200, "url": "http://127.0.0.1:3000/_next/static/chunks/webpack.js?v=1773370854112"}
+{"event": "response", "status": 200, "url": "http://127.0.0.1:3000/_next/static/chunks/app-pages-internals.js"}
+{"event": "response", "status": 200, "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1773370854112"}
