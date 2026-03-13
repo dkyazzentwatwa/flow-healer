@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "content_type": "image/png",
+      "name": "canary.png",
+      "remote_path": "flow-healer/evidence/issue-canary-node-next-web/canary-20260313031127/canary.png"
+    },
+    {
+      "content_type": "text/plain",
+      "name": "canary-console.log",
+      "remote_path": "flow-healer/evidence/issue-canary-node-next-web/canary-20260313031127/canary-console.log"
+    },
+    {
+      "content_type": "application/x-ndjson",
+      "name": "canary-network.jsonl",
+      "remote_path": "flow-healer/evidence/issue-canary-node-next-web/canary-20260313031127/canary-network.jsonl"
+    }
+  ],
+  "attempt_id": "canary-20260313031127",
+  "canary": true,
+  "canary_profile": "node-next-web",
+  "generated_at": "2026-03-13T03:12:37Z",
+  "issue_id": "canary-node-next-web",
+  "retention_until": "2026-04-12T03:12:37Z",
+  "run_key": "canary-20260313031127"
+}
