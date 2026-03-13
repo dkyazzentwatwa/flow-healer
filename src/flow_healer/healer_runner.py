@@ -32,7 +32,7 @@ from .language_strategies import (
     is_removed_language,
 )
 from .protocols import ConnectorProtocol, ConnectorTurnResult
-from .healer_task_spec import HealerTaskSpec, task_spec_to_prompt_block
+from .healer_task_spec import HealerTaskSpec, resolve_browser_repro_mode, task_spec_to_prompt_block
 
 logger = logging.getLogger("apple_flow.healer_runner")
 _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
@@ -320,6 +320,8 @@ class HealerRunner:
         browser_artifact_bundle: dict[str, Any] = {}
         browser_artifact_links: list[dict[str, Any]] = []
         repro_stability: dict[str, Any] = {}
+        browser_repro_mode = resolve_browser_repro_mode(task_spec)
+        browser_contract_already_satisfied = False
         parsed_repro_steps = parse_repro_steps(task_spec.repro_steps) if task_spec.repro_steps else ()
         browser_artifact_root = Path(
             tempfile.mkdtemp(prefix=f"flow-healer-browser-{issue_id}-", dir=os.getenv("TMPDIR") or None)
@@ -387,6 +389,7 @@ class HealerRunner:
             pre_fix_session: AppHarnessSession | None = None
             browser_entry_url = _resolve_browser_entry_url(task_spec.entry_url, browser_profile.readiness_url or "")
             try:
+                expect_pre_fix_failure = browser_repro_mode != "allow_success"
                 self._run_fixture_driver(
                     profile=browser_profile,
                     fixture_profile=task_spec.fixture_profile,
@@ -420,10 +423,13 @@ class HealerRunner:
                     repro_steps=parsed_repro_steps,
                     artifact_root=browser_artifact_root / "failure",
                     phase="failure",
-                    expect_failure=True,
+                    expect_failure=expect_pre_fix_failure,
                     storage_state_path=pre_fix_storage_state_path,
                 )
-                if not failure_journey.passed and failure_journey.expected_failure_observed:
+                browser_contract_already_satisfied = (
+                    browser_repro_mode == "allow_success" and failure_journey.passed
+                )
+                if expect_pre_fix_failure and not failure_journey.passed and failure_journey.expected_failure_observed:
                     confirmatory_failure_journey = self._browser_harness.capture_journey(
                         profile=browser_profile,
                         entry_url=browser_entry_url,
@@ -531,39 +537,40 @@ class HealerRunner:
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
                 )
-                failure_reason = str(failure_journey.error or "").strip()
-                if failure_journey.failure_step:
-                    if failure_reason:
-                        failure_reason = f"{failure_reason} ({failure_journey.failure_step})"
-                    else:
-                        failure_reason = (
-                            "Browser journey did not reproduce the reported bug before the fix "
-                            f"at step '{failure_journey.failure_step}'."
-                        )
-                if not failure_reason:
-                    failure_reason = "Browser journey did not reproduce the reported bug before the fix."
-                return HealerRunResult(
-                    success=False,
-                    failure_class="browser_repro_failed",
-                    failure_reason=failure_reason,
-                    failure_fingerprint="",
-                    proposer_output="",
-                    diff_paths=[],
-                    diff_files=0,
-                    diff_lines=0,
-                    test_summary=_with_workspace_status(
-                        _annotate_browser_failure_family(
-                            failure_summary,
-                            failure_class="browser_repro_failed",
-                            failure_reason=failure_reason,
+                if browser_repro_mode != "allow_success":
+                    failure_reason = str(failure_journey.error or "").strip()
+                    if failure_journey.failure_step:
+                        if failure_reason:
+                            failure_reason = f"{failure_reason} ({failure_journey.failure_step})"
+                        else:
+                            failure_reason = (
+                                "Browser journey did not reproduce the reported bug before the fix "
+                                f"at step '{failure_journey.failure_step}'."
+                            )
+                    if not failure_reason:
+                        failure_reason = "Browser journey did not reproduce the reported bug before the fix."
+                    return HealerRunResult(
+                        success=False,
+                        failure_class="browser_repro_failed",
+                        failure_reason=failure_reason,
+                        failure_fingerprint="",
+                        proposer_output="",
+                        diff_paths=[],
+                        diff_files=0,
+                        diff_lines=0,
+                        test_summary=_with_workspace_status(
+                            _annotate_browser_failure_family(
+                                failure_summary,
+                                failure_class="browser_repro_failed",
+                                failure_reason=failure_reason,
+                            ),
+                            workspace_status=workspace_status,
+                            failure_fingerprint="",
                         ),
                         workspace_status=workspace_status,
-                        failure_fingerprint="",
-                    ),
-                    workspace_status=workspace_status,
-                )
+                    )
             replay_reproduced = bool(repro_stability.get("reproduced_on_replay"))
-            if repro_stability and not replay_reproduced:
+            if browser_repro_mode != "allow_success" and repro_stability and not replay_reproduced:
                 failure_summary = _annotate_test_summary_browser_artifacts(
                     _annotate_test_summary_runtime(
                         {},
@@ -640,6 +647,8 @@ class HealerRunner:
             code_change_retries=self.max_code_proposer_retries,
             artifact_retries=self.max_artifact_proposer_retries,
         )
+        if browser_contract_already_satisfied:
+            max_retries = -1
         turn_timeout_seconds = _turn_timeout_seconds_for_task(
             task_spec=task_spec,
             default_timeout_seconds=self.timeout_seconds,
@@ -1203,7 +1212,7 @@ class HealerRunner:
 
         diff_paths = _changed_paths(workspace)
         diff_files, diff_lines = _diff_stats(workspace)
-        if not diff_paths:
+        if not diff_paths and not browser_contract_already_satisfied:
             return HealerRunResult(
                 success=False,
                 failure_class="no_workspace_change:connector_noop",
@@ -1216,7 +1225,11 @@ class HealerRunner:
                 test_summary={},
                 workspace_status=workspace_status,
             )
-        if _requires_non_artifact_diff(task_spec=task_spec) and not _has_non_artifact_diff(diff_paths):
+        if (
+            _requires_non_artifact_diff(task_spec=task_spec)
+            and not _has_non_artifact_diff(diff_paths)
+            and not browser_contract_already_satisfied
+        ):
             return HealerRunResult(
                 success=False,
                 failure_class="no_code_diff",
@@ -1618,7 +1631,7 @@ class HealerRunner:
                 )
             diff_paths = _changed_paths(workspace)
             diff_files, diff_lines = _diff_stats(workspace)
-            if not diff_paths:
+            if not diff_paths and not browser_contract_already_satisfied:
                 _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
@@ -1984,7 +1997,7 @@ class HealerRunner:
 
         diff_paths = _changed_paths(workspace)
         diff_files, diff_lines = _diff_stats(workspace)
-        if not diff_paths:
+        if not diff_paths and not browser_contract_already_satisfied:
             return HealerRunResult(
                 success=False,
                 failure_class="no_workspace_change:swarm_repair_noop",
@@ -2005,7 +2018,11 @@ class HealerRunner:
                 ),
                 workspace_status=current_workspace_status,
             )
-        if _requires_non_artifact_diff(task_spec=task_spec) and not _has_non_artifact_diff(diff_paths):
+        if (
+            _requires_non_artifact_diff(task_spec=task_spec)
+            and not _has_non_artifact_diff(diff_paths)
+            and not browser_contract_already_satisfied
+        ):
             return HealerRunResult(
                 success=False,
                 failure_class="no_code_diff",
@@ -2137,7 +2154,7 @@ class HealerRunner:
                 )
             diff_paths = _changed_paths(workspace)
             diff_files, diff_lines = _diff_stats(workspace)
-            if not diff_paths:
+            if not diff_paths and not browser_contract_already_satisfied:
                 return HealerRunResult(
                     success=False,
                     failure_class="no_workspace_change:swarm_repair_noop",
@@ -5423,11 +5440,14 @@ def _annotate_test_summary_runtime(
     task_spec: HealerTaskSpec,
 ) -> dict[str, Any]:
     enriched = dict(summary or {})
+    browser_repro_mode = resolve_browser_repro_mode(task_spec)
     runtime_summary = workspace_status.get("runtime_summary")
     if isinstance(runtime_summary, dict) and runtime_summary:
         enriched["runtime_summary"] = dict(runtime_summary)
     if task_spec.artifact_requirements:
         enriched["artifact_requirements"] = list(task_spec.artifact_requirements)
+    if browser_repro_mode:
+        enriched["browser_repro_mode"] = browser_repro_mode
     browser_evidence_required = bool(task_spec.repro_steps) and any(
         (
             task_spec.app_target,
@@ -5440,6 +5460,8 @@ def _annotate_test_summary_runtime(
         phase_states = enriched.get("phase_states")
         phase_state_map = dict(phase_states) if isinstance(phase_states, dict) else {}
         phase_state_map["browser_evidence_required"] = True
+        if browser_repro_mode:
+            phase_state_map["browser_repro_mode"] = browser_repro_mode
         enriched["phase_states"] = phase_state_map
     return enriched
 

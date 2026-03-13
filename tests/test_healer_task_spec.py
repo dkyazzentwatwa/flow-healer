@@ -685,6 +685,7 @@ def test_compile_task_spec_parses_explicit_app_contract_fields() -> None:
         issue_body=(
             "Task kind: fix\n"
             "app_target: web\n"
+            "browser_repro_mode: allow_success\n"
             "entry_url: /dashboard?tab=activity\n"
             "fixture_profile: seeded-team-admin\n"
             "runtime_profile: desktop-chromium\n\n"
@@ -702,6 +703,7 @@ def test_compile_task_spec_parses_explicit_app_contract_fields() -> None:
     )
 
     assert spec.app_target == "web"
+    assert spec.browser_repro_mode == "allow_success"
     assert spec.entry_url == "/dashboard?tab=activity"
     assert spec.fixture_profile == "seeded-team-admin"
     assert spec.runtime_profile == "desktop-chromium"
@@ -726,6 +728,7 @@ def test_task_spec_prompt_block_includes_app_contract_fields() -> None:
         issue_body=(
             "Task kind: fix\n"
             "app_target: web\n"
+            "browser_repro_mode: allow_success\n"
             "entry_url: /dashboard?tab=activity\n"
             "fixture_profile: seeded-team-admin\n"
             "runtime_profile: desktop-chromium\n"
@@ -742,6 +745,7 @@ def test_task_spec_prompt_block_includes_app_contract_fields() -> None:
     prompt_block = task_spec_to_prompt_block(spec)
 
     assert "- App target: web" in prompt_block
+    assert "- Browser repro mode: allow_success" in prompt_block
     assert "- Entry URL: /dashboard?tab=activity" in prompt_block
     assert "- Fixture profile: seeded-team-admin" in prompt_block
     assert "- Runtime profile: desktop-chromium" in prompt_block
@@ -783,6 +787,44 @@ def test_compile_task_spec_does_not_truncate_browser_artifact_paths_into_code_ta
         "console log",
         "network log",
     )
+
+
+def test_compile_task_spec_infers_require_failure_for_browser_fix_issues() -> None:
+    spec = compile_task_spec(
+        issue_title="Fix dashboard browser regression",
+        issue_body=(
+            "app_target: web\n"
+            "entry_url: /dashboard\n"
+            "repro_steps:\n"
+            "- goto /dashboard\n"
+            "- expect_text Broken widget\n"
+        ),
+    )
+
+    assert spec.browser_repro_mode == "require_failure"
+
+
+def test_compile_task_spec_infers_allow_success_for_browser_smoke_issues() -> None:
+    spec = compile_task_spec(
+        issue_title="Java Spring browser artifact smoke: beige landing proof",
+        issue_body=(
+            "app_target: web\n"
+            "entry_url: /dashboard\n"
+            "Required code outputs:\n"
+            "- e2e-apps/java-spring-web/src/main/java/example/web/DashboardController.java\n"
+            "- e2e-apps/java-spring-web/artifacts/java-spring-proof.png\n"
+            "repro_steps:\n"
+            "- goto /dashboard\n"
+            "- expect_text Artifact Proof Java E1\n"
+            "artifact_requirements:\n"
+            "- screenshot: artifacts/java-spring-proof.png\n"
+            "judgment_required_conditions:\n"
+            "- the page uses a beige background\n"
+        ),
+    )
+
+    assert spec.task_kind == "edit"
+    assert spec.browser_repro_mode == "allow_success"
 
 
 def test_compile_task_spec_infers_node_execution_root_for_e2e_apps() -> None:

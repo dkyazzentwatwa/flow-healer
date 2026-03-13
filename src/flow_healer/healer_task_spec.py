@@ -22,6 +22,7 @@ class HealerTaskSpec:
     app_target: str = ""
     entry_url: str = ""
     repro_steps: tuple[str, ...] = ()
+    browser_repro_mode: str = ""
     fixture_profile: str = ""
     artifact_requirements: tuple[str, ...] = ()
     runtime_profile: str = ""
@@ -80,6 +81,7 @@ _LIST_ITEM_PREFIX_RE = re.compile(r"^(?:[-*]\s+|\d+[.)]\s+)")
 
 _CONTRACT_SCALAR_FIELD_NAMES: tuple[str, ...] = (
     "app_target",
+    "browser_repro_mode",
     "entry_url",
     "execution_root",
     "fixture_profile",
@@ -205,6 +207,7 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
     explicit_directories = tuple(_explicit_directories(issue_text))
     validation_commands = _extract_validation_commands(issue_body)
     app_target = _extract_explicit_scalar_field(issue_body=issue_body, field_name="app_target")
+    browser_repro_mode = _extract_explicit_scalar_field(issue_body=issue_body, field_name="browser_repro_mode")
     entry_url = _extract_explicit_scalar_field(issue_body=issue_body, field_name="entry_url")
     explicit_execution_root = _extract_explicit_scalar_field(issue_body=issue_body, field_name="execution_root")
     repro_steps = _extract_explicit_list_field(issue_body=issue_body, field_name="repro_steps")
@@ -224,6 +227,16 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         input_context_paths = tuple(path for path in output_targets if _is_artifact_path(path))
         output_targets = tuple(path for path in output_targets if path not in input_context_paths)
     task_kind = task_kind_hint or _classify_task_kind(issue_text=issue_text, output_targets=output_targets)
+    resolved_browser_repro_mode = _resolve_browser_repro_mode(
+        explicit_mode=browser_repro_mode,
+        issue_text=issue_text,
+        task_kind=task_kind,
+        app_target=app_target,
+        entry_url=entry_url,
+        repro_steps=repro_steps,
+        artifact_requirements=artifact_requirements,
+        judgment_required_conditions=judgment_required_conditions,
+    )
     inferred_targets = output_targets or _default_targets(issue_title=issue_title, task_kind=task_kind)
     tool_policy = "repo_plus_web" if task_kind == "research" else "repo_only"
     validation_profile = _validation_profile(task_kind=task_kind, output_targets=inferred_targets)
@@ -268,6 +281,7 @@ def compile_task_spec(*, issue_title: str, issue_body: str, language: str = "") 
         execution_root=inferred_execution_root,
         validation_commands=validation_commands,
         app_target=app_target,
+        browser_repro_mode=resolved_browser_repro_mode,
         entry_url=entry_url,
         repro_steps=repro_steps,
         fixture_profile=fixture_profile,
@@ -354,6 +368,8 @@ def task_spec_to_prompt_block(spec: HealerTaskSpec) -> str:
         lines.append(f"- App target: {spec.app_target}")
     if spec.entry_url:
         lines.append(f"- Entry URL: {spec.entry_url}")
+    if spec.browser_repro_mode:
+        lines.append(f"- Browser repro mode: {spec.browser_repro_mode}")
     if spec.fixture_profile:
         lines.append(f"- Fixture profile: {spec.fixture_profile}")
     if spec.runtime_profile:
@@ -415,6 +431,58 @@ def _classify_task_kind(*, issue_text: str, output_targets: tuple[str, ...]) -> 
     if _EDIT_HINT_RE.search(lowered):
         return "edit"
     return "fix"
+
+
+def resolve_browser_repro_mode(spec: HealerTaskSpec) -> str:
+    return _resolve_browser_repro_mode(
+        explicit_mode=spec.browser_repro_mode,
+        issue_text="",
+        task_kind=spec.task_kind,
+        app_target=spec.app_target,
+        entry_url=spec.entry_url,
+        repro_steps=spec.repro_steps,
+        artifact_requirements=spec.artifact_requirements,
+        judgment_required_conditions=spec.judgment_required_conditions,
+    )
+
+
+def _resolve_browser_repro_mode(
+    *,
+    explicit_mode: str,
+    issue_text: str,
+    task_kind: str,
+    app_target: str,
+    entry_url: str,
+    repro_steps: tuple[str, ...],
+    artifact_requirements: tuple[str, ...],
+    judgment_required_conditions: tuple[str, ...],
+) -> str:
+    normalized_explicit_mode = str(explicit_mode or "").strip().lower()
+    if normalized_explicit_mode in {"require_failure", "allow_success"}:
+        return normalized_explicit_mode
+    if not _has_browser_repro_contract(
+        app_target=app_target,
+        entry_url=entry_url,
+        repro_steps=repro_steps,
+    ):
+        return ""
+    lowered_issue_text = str(issue_text or "").strip().lower()
+    if task_kind == "fix" or _FIX_HINT_RE.search(lowered_issue_text):
+        return "require_failure"
+    if task_kind in {"build", "edit"}:
+        if artifact_requirements or judgment_required_conditions:
+            return "allow_success"
+        return "allow_success"
+    return "require_failure"
+
+
+def _has_browser_repro_contract(
+    *,
+    app_target: str,
+    entry_url: str,
+    repro_steps: tuple[str, ...],
+) -> bool:
+    return bool(repro_steps) and any((app_target, entry_url))
 
 
 def _extract_task_kind_hint(*, issue_text: str) -> str | None:
