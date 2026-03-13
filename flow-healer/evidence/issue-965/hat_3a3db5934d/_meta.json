@@ -1,0 +1,45 @@
+{
+  "artifacts": [
+    {
+      "content_type": "image/png",
+      "name": "failure.png",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/failure.png"
+    },
+    {
+      "content_type": "text/plain",
+      "name": "failure-console.log",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/failure-console.log"
+    },
+    {
+      "content_type": "application/x-ndjson",
+      "name": "failure-network.jsonl",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/failure-network.jsonl"
+    },
+    {
+      "content_type": "image/png",
+      "name": "resolution.png",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/resolution.png"
+    },
+    {
+      "content_type": "text/plain",
+      "name": "resolution-console.log",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/resolution-console.log"
+    },
+    {
+      "content_type": "application/x-ndjson",
+      "name": "resolution-network.jsonl",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/resolution-network.jsonl"
+    },
+    {
+      "content_type": "application/json",
+      "name": "journey-transcript.json",
+      "remote_path": "flow-healer/evidence/issue-965/hat_3a3db5934d/journey-transcript.json"
+    }
+  ],
+  "attempt_id": "hat_3a3db5934d",
+  "browser_log_publish_mode": "always",
+  "generated_at": "2026-03-13T00:23:49Z",
+  "issue_id": "965",
+  "retention_until": "2026-04-12T00:23:49Z",
+  "run_key": "hat_3a3db5934d"
+}
