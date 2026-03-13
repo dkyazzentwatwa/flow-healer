@@ -201,6 +201,15 @@ class LocalBrowserHarness:
         if kind == "expect_text":
             session.expect_text(step.subject)
             return
+        if kind == "expect_any_text":
+            session.expect_any_text(_parse_any_text_subject(step.subject))
+            return
+        if kind == "expect_text_absent":
+            session.expect_text_absent(step.subject)
+            return
+        if kind == "expect_url":
+            session.expect_url(_resolve_url(entry_url, step.subject))
+            return
         if kind == "fetch":
             method, path = _split_fetch_subject(step.subject)
             payload = step.argument[len("json="):] if step.argument.startswith("json=") else step.argument
@@ -324,6 +333,25 @@ class _PlaywrightBrowserSession:
     def expect_text(self, text: str) -> None:
         locator = self._page.get_by_text(text)
         locator.wait_for(state="visible")
+
+    def expect_any_text(self, texts: tuple[str, ...]) -> None:
+        for text in texts:
+            locator = self._page.get_by_text(text)
+            try:
+                locator.wait_for(state="visible", timeout=1000)
+                return
+            except Exception:
+                continue
+        raise AssertionError(f"None of the expected texts were visible: {' || '.join(texts)}")
+
+    def expect_text_absent(self, text: str) -> None:
+        locator = self._page.get_by_text(text)
+        locator.wait_for(state="hidden", timeout=1000)
+
+    def expect_url(self, url: str) -> None:
+        current = str(self._page.url or self._entry_url or "").strip()
+        if current != url:
+            raise AssertionError(f"Expected URL {url}, got {current}")
 
     def fetch(self, method: str, path: str, payload: str = "") -> None:
         parsed_payload: object | None = None
@@ -501,6 +529,10 @@ def _split_fetch_subject(subject: str) -> tuple[str, str]:
     if not method or not path:
         raise ValueError(f"Invalid fetch step: {subject}")
     return method, path
+
+
+def _parse_any_text_subject(subject: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in str(subject or "").split("||") if part.strip())
 
 
 def _resolve_url(entry_url: str, path_or_url: str) -> str:

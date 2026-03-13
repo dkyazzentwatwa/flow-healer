@@ -31,6 +31,13 @@
       "source_kind": "inline_body",
       "title": "Prosper chat DB task",
       "body": "Required code outputs:\n- e2e-apps/prosper-chat/supabase/migrations/20260302101500_7f8d9de2-cb2b-4f35-b3b8-6d8a8f519e7e.sql\n- e2e-apps/prosper-chat/supabase/assertions/anon_access_controls.sql\n\nValidation:\n- cd e2e-apps/prosper-chat && ./scripts/healer_validate.sh db\n"
+    },
+    {
+      "name": "browser-allow-success-outcome-assertions",
+      "source": "docs/issue-contracts.md",
+      "source_kind": "inline_body",
+      "title": "Node restart-state browser contract",
+      "body": "Required code outputs:\n- e2e-apps/node-next/app/page.js\n\nExecution root:\n- e2e-apps/node-next\n\napp_target: node-next\nruntime_profile: web\nbrowser_repro_mode: allow_success\n\nrepro_steps:\n- goto /game\n- expect_any_text Winner: X || Start game\n- click button.restart\n- expect_text Start game\n- expect_text_absent Winner: X\n- expect_url /game\n\nartifact_requirements:\n- screenshot: artifacts/game-board.png\n- console log\n- network log\n\nValidation:\n- cd e2e-apps/node-next && npm test -- --passWithNoTests\n"
     }
   ]
 }

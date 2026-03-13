@@ -5091,6 +5091,92 @@ def test_run_attempt_allows_constructive_browser_tasks_to_skip_mutation_when_ini
     assert result.test_summary["browser_repro_mode"] == "allow_success"
 
 
+def test_run_attempt_blocks_promotion_when_declared_browser_logs_are_missing(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "demo.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(["not used"])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/dashboard",
+                screenshot_path=str(tmp_path / "before.png"),
+                console_log_path="",
+                network_log_path="",
+                transcript=({"step": "expect_text Artifact Proof Java E1", "status": "passed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3000/dashboard",
+                screenshot_path=str(tmp_path / "after.png"),
+                console_log_path="",
+                network_log_path="",
+                transcript=({"step": "expect_text Artifact Proof Java E1", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "npm run dev",
+                "ready_url": "http://127.0.0.1:3000/",
+                "working_directory": ".",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {"failed_tests": 0}  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-constructive-logs-1",
+        issue_title="Java browser artifact smoke",
+        issue_body="Update demo.py",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("demo.py",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            app_target="demo-web",
+            entry_url="http://127.0.0.1:3000/",
+            runtime_profile="web",
+            repro_steps=("goto /dashboard", "expect_text Artifact Proof Java E1"),
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/demo.png", "console log", "network log"),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "artifacts_missing"
+    assert result.test_summary["artifact_proof_ready"] is False
+    assert "merge_blocked" in result.test_summary["promotion_transitions"]
+    assert "console" in result.failure_reason.lower()
+    assert "network" in result.failure_reason.lower()
+
+
 def test_run_attempt_allows_constructive_browser_tasks_to_mutate_when_initial_journey_still_fails(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

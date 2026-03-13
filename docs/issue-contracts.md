@@ -74,6 +74,10 @@ Supported values:
 
 Ordered browser actions and assertions for the browser harness.
 
+Prefer outcome assertions over progress assertions. Stable outcomes such as the final route, winner text, visible board or reset state, and declared artifact presence are stronger than transient copy like `Current turn: X`.
+
+When a browser task has a small set of known-valid UI states, use an explicit enumerated assertion such as `expect_any_text A || B`. Use this sparingly and only for clearly bounded valid states; do not use it as a generic fuzzy matcher.
+
 ### `artifact_requirements`
 
 Explicit evidence requirements such as screenshots, console logs, network logs, or other named artifacts. See [docs/evidence-contract.md](/Users/cypher-server/Documents/code/flow-healer/docs/evidence-contract.md).
@@ -103,6 +107,36 @@ artifact_requirements:
 
 Validation:
 - cd e2e-apps/ruby-rails-web && bundle exec rspec
+```
+
+## Outcome-Oriented Browser Example
+
+```md
+Required code outputs:
+- e2e-apps/node-next/app/page.js
+
+Execution root:
+- e2e-apps/node-next
+
+app_target: node-next
+runtime_profile: web
+browser_repro_mode: allow_success
+
+repro_steps:
+- goto /game
+- expect_any_text Winner: X || Start game
+- click button.restart
+- expect_text Start game
+- expect_text_absent Winner: X
+- expect_url /game
+
+artifact_requirements:
+- screenshot: artifacts/game-board.png
+- console log
+- network log
+
+Validation:
+- cd e2e-apps/node-next && npm test -- --passWithNoTests
 ```
 
 ## Bad Example

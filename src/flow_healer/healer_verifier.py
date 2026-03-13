@@ -52,6 +52,10 @@ class HealerVerifier:
             )
         thread_id = self.connector.get_or_create_thread(f"healer-verify:{issue_id}")
         guardrails = _build_guardrails(diff_paths=diff_paths, task_spec=task_spec)
+        browser_contract_summary = _build_browser_contract_summary(
+            task_spec=task_spec,
+            test_summary=test_summary,
+        )
         language_line = f"Repository language: {language}\n" if language and language != "unknown" else ""
         prompt = (
             "You are the verifier agent for autonomous code healing.\n"
@@ -67,6 +71,7 @@ class HealerVerifier:
             + f"Changed files: {', '.join(diff_paths) if diff_paths else '(none)'}\n"
             + f"Workspace status: {json.dumps(workspace_status or {}, ensure_ascii=True)}\n"
             + f"Staged diff metadata: {json.dumps(staged_diff_metadata or {}, ensure_ascii=True)}\n"
+            + (f"{browser_contract_summary}\n" if browser_contract_summary else "")
             + f"Test summary: {json.dumps(test_summary, ensure_ascii=True)}\n\n"
             + (
                 f"Staged diff content (truncated):\n{staged_diff_content[:6000]}\n\n"
@@ -166,6 +171,14 @@ def _build_guardrails(*, diff_paths: list[str], task_spec: HealerTaskSpec) -> st
         lines.append(
             "- For code-change tasks, treat named output targets as required anchors, not an exclusive allowlist. Additional nearby source, test, or config files may be necessary for a safe fix."
         )
+    browser_repro_mode = str(getattr(task_spec, "browser_repro_mode", "") or "").strip().lower()
+    if browser_repro_mode == "allow_success":
+        lines.extend(
+            [
+                "- For browser tasks with browser_repro_mode=allow_success, do not fail only because the initial browser journey already passes.",
+                "- If browser_evidence_required=true and artifact_proof_ready=true, complete outcome assertions can justify success even when no code diff was needed.",
+            ]
+        )
     if classification == "docs-only":
         lines.extend(
             [
@@ -262,3 +275,39 @@ def _can_short_circuit_artifact_verification(*, task_spec: HealerTaskSpec, diff_
     if not normalized:
         return False
     return all(_is_docs_path(path) or _is_config_path(path) for path in normalized)
+
+
+def _build_browser_contract_summary(*, task_spec: HealerTaskSpec, test_summary: dict[str, Any]) -> str:
+    if not (getattr(task_spec, "repro_steps", ()) or test_summary.get("browser_evidence_required")):
+        return ""
+    browser_repro_mode = str(
+        test_summary.get("browser_repro_mode") or getattr(task_spec, "browser_repro_mode", "") or ""
+    ).strip() or "require_failure"
+    artifact_requirements = getattr(task_spec, "artifact_requirements", ()) or ()
+    promotion_transitions = test_summary.get("promotion_transitions") or []
+    flaky_repro = test_summary.get("flaky_repro") if isinstance(test_summary.get("flaky_repro"), dict) else {}
+    lines = [
+        "Browser contract summary:",
+        f"- browser_repro_mode={browser_repro_mode}",
+        f"- browser_evidence_required={'true' if bool(test_summary.get('browser_evidence_required')) else 'false'}",
+        f"- artifact_proof_ready={'true' if bool(test_summary.get('artifact_proof_ready')) else 'false'}",
+    ]
+    if artifact_requirements:
+        lines.append(f"- artifact_requirements={','.join(str(item) for item in artifact_requirements)}")
+    if isinstance(promotion_transitions, list) and promotion_transitions:
+        lines.append(
+            "  promotion_transitions="
+            + ",".join(str(item).strip() for item in promotion_transitions if str(item).strip())
+        )
+    if flaky_repro:
+        lines.append(
+            "  repro_stability="
+            + ",".join(
+                [
+                    f"checked={'true' if bool(flaky_repro.get('checked')) else 'false'}",
+                    f"reproduced_on_first_run={'true' if bool(flaky_repro.get('reproduced_on_first_run')) else 'false'}",
+                    f"reproduced_on_replay={'true' if bool(flaky_repro.get('reproduced_on_replay')) else 'false'}",
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"

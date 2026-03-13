@@ -807,6 +807,7 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 return HealerRunResult(
                     success=False,
@@ -842,11 +843,19 @@ class HealerRunner:
                 failure_journey=failure_journey,
             )
             browser_artifact_links = _browser_artifact_links(browser_artifact_bundle)
+            failure_phase_missing_artifacts = _browser_phase_missing_artifacts(
+                browser_artifact_bundle,
+                phase="failure_artifacts",
+                artifact_requirements=task_spec.artifact_requirements,
+            )
+            if failure_phase_missing_artifacts:
+                browser_artifact_bundle["missing_artifacts"] = list(failure_phase_missing_artifacts)
             if browser_evidence_requested and not _browser_phase_artifacts_ready(
                 browser_artifact_bundle,
                 phase="failure_artifacts",
+                artifact_requirements=task_spec.artifact_requirements,
             ):
-                missing_artifacts = ", ".join(_browser_missing_artifacts(browser_artifact_bundle))
+                missing_artifacts = ", ".join(failure_phase_missing_artifacts)
                 failure_summary = _annotate_test_summary_browser_artifacts(
                     _annotate_test_summary_runtime(
                         {},
@@ -855,12 +864,13 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 return HealerRunResult(
                     success=False,
                     failure_class="artifacts_missing",
                     failure_reason=(
-                        "Failure browser evidence is incomplete; required screenshots are missing"
+                        "Failure browser evidence is incomplete; required browser artifacts are missing"
                         + (f": {missing_artifacts}" if missing_artifacts else ".")
                     ),
                     failure_fingerprint="",
@@ -873,7 +883,7 @@ class HealerRunner:
                             failure_summary,
                             failure_class="artifacts_missing",
                             failure_reason=(
-                                "Failure browser evidence is incomplete; required screenshots are missing"
+                                "Failure browser evidence is incomplete; required browser artifacts are missing"
                                 + (f": {missing_artifacts}" if missing_artifacts else ".")
                             ),
                         ),
@@ -891,6 +901,7 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 if browser_repro_mode != "allow_success":
                     failure_reason = str(failure_journey.error or "").strip()
@@ -934,6 +945,7 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 failure_summary["flaky_repro"] = dict(repro_stability)
                 replay_error = str(repro_stability.get("replay_error") or "").strip()
@@ -984,6 +996,7 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 failure_summary["baseline_validation"] = baseline_validation_summary
                 return HealerRunResult(
@@ -1852,6 +1865,7 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 _stop_app_runtime()
                 return HealerRunResult(
@@ -1882,12 +1896,25 @@ class HealerRunner:
                 resolution_journey=resolution_journey,
             )
             browser_artifact_links = _browser_artifact_links(browser_artifact_bundle)
+            missing_browser_artifacts = _browser_missing_artifacts(
+                browser_artifact_bundle,
+                artifact_requirements=task_spec.artifact_requirements,
+            )
+            if missing_browser_artifacts:
+                browser_artifact_bundle["missing_artifacts"] = list(missing_browser_artifacts)
+                browser_artifact_bundle["status"] = "artifacts_missing"
             app_runtime_status["browser_profile"] = _browser_profile_summary(runtime_profile)
-            app_runtime_status["artifacts_ready"] = _browser_artifacts_ready(browser_artifact_bundle)
+            app_runtime_status["artifacts_ready"] = _browser_artifacts_ready(
+                browser_artifact_bundle,
+                artifact_requirements=task_spec.artifact_requirements,
+            )
             app_runtime_status["bundle_status"] = str(browser_artifact_bundle.get("status") or "")
             _annotate_app_runtime_status(workspace_status, app_runtime_status)
-            if browser_evidence_requested and not _browser_artifacts_ready(browser_artifact_bundle):
-                missing_artifacts = ", ".join(_browser_missing_artifacts(browser_artifact_bundle))
+            if browser_evidence_requested and not _browser_artifacts_ready(
+                browser_artifact_bundle,
+                artifact_requirements=task_spec.artifact_requirements,
+            ):
+                missing_artifacts = ", ".join(missing_browser_artifacts)
                 test_summary = _annotate_test_summary_browser_artifacts(
                     _annotate_test_summary_runtime(
                         test_summary,
@@ -1896,13 +1923,14 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
                     failure_class="artifacts_missing",
                     failure_reason=(
-                        "Browser evidence is incomplete; required screenshots are missing"
+                        "Browser evidence is incomplete; required browser artifacts are missing"
                         + (f": {missing_artifacts}" if missing_artifacts else ".")
                     ),
                     failure_fingerprint="",
@@ -1915,7 +1943,7 @@ class HealerRunner:
                             test_summary,
                             failure_class="artifacts_missing",
                             failure_reason=(
-                                "Browser evidence is incomplete; required screenshots are missing"
+                                "Browser evidence is incomplete; required browser artifacts are missing"
                                 + (f": {missing_artifacts}" if missing_artifacts else ".")
                             ),
                         ),
@@ -1944,6 +1972,7 @@ class HealerRunner:
                     ),
                     artifact_bundle=browser_artifact_bundle,
                     artifact_links=browser_artifact_links,
+                    artifact_requirements=task_spec.artifact_requirements,
                 )
                 _stop_app_runtime()
                 return HealerRunResult(
@@ -1975,6 +2004,7 @@ class HealerRunner:
             test_summary,
             artifact_bundle=browser_artifact_bundle,
             artifact_links=browser_artifact_links,
+            artifact_requirements=task_spec.artifact_requirements,
         )
         test_summary = _with_workspace_status(
             test_summary,
@@ -5879,6 +5909,7 @@ def _annotate_test_summary_browser_artifacts(
     *,
     artifact_bundle: dict[str, Any],
     artifact_links: list[dict[str, Any]],
+    artifact_requirements: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     enriched = dict(summary or {})
     if artifact_bundle:
@@ -5886,8 +5917,14 @@ def _annotate_test_summary_browser_artifacts(
     if artifact_links:
         enriched["artifact_links"] = [dict(link) for link in artifact_links]
     if bool(enriched.get("browser_evidence_required")):
-        artifact_proof_ready = bool(artifact_bundle) and _browser_artifacts_ready(artifact_bundle)
+        missing_artifacts = _browser_missing_artifacts(
+            artifact_bundle,
+            artifact_requirements=artifact_requirements,
+        )
+        artifact_proof_ready = bool(artifact_bundle) and not missing_artifacts
         enriched["artifact_proof_ready"] = artifact_proof_ready
+        if missing_artifacts:
+            enriched["missing_artifacts"] = missing_artifacts
         phase_states = enriched.get("phase_states")
         phase_state_map = dict(phase_states) if isinstance(phase_states, dict) else {}
         phase_state_map["artifact_proof_ready"] = artifact_proof_ready
@@ -6171,34 +6208,81 @@ def _browser_bundle_phase_result(bundle: dict[str, Any], *, phase: str) -> Brows
     )
 
 
-def _browser_artifacts_ready(bundle: dict[str, Any]) -> bool:
-    return not _browser_missing_artifacts(bundle)
+def _browser_artifacts_ready(bundle: dict[str, Any], *, artifact_requirements: tuple[str, ...] = ()) -> bool:
+    return not _browser_missing_artifacts(bundle, artifact_requirements=artifact_requirements)
 
 
-def _browser_phase_artifacts_ready(bundle: dict[str, Any], *, phase: str) -> bool:
-    return not _browser_phase_missing_artifacts(bundle, phase=phase)
+def _browser_phase_artifacts_ready(
+    bundle: dict[str, Any],
+    *,
+    phase: str,
+    artifact_requirements: tuple[str, ...] = (),
+) -> bool:
+    return not _browser_phase_missing_artifacts(
+        bundle,
+        phase=phase,
+        artifact_requirements=artifact_requirements,
+    )
 
 
-def _browser_missing_artifacts(bundle: dict[str, Any]) -> list[str]:
+def _browser_missing_artifacts(
+    bundle: dict[str, Any],
+    *,
+    artifact_requirements: tuple[str, ...] = (),
+) -> list[str]:
     missing: list[str] = []
     for phase_name in ("failure_artifacts", "resolution_artifacts"):
-        missing.extend(_browser_phase_missing_artifacts(bundle, phase=phase_name))
+        missing.extend(
+            _browser_phase_missing_artifacts(
+                bundle,
+                phase=phase_name,
+                artifact_requirements=artifact_requirements,
+            )
+        )
     return missing
 
 
-def _browser_phase_missing_artifacts(bundle: dict[str, Any], *, phase: str) -> list[str]:
+def _browser_phase_missing_artifacts(
+    bundle: dict[str, Any],
+    *,
+    phase: str,
+    artifact_requirements: tuple[str, ...] = (),
+) -> list[str]:
     phase_payload = bundle.get(phase)
+    required_fields = _browser_required_artifact_fields(artifact_requirements=artifact_requirements)
     if not isinstance(phase_payload, dict):
-        phase_prefix = phase.replace("_artifacts", "")
-        return [f"{phase_prefix}_screenshot"]
+        return [_browser_phase_artifact_label(phase=phase, field=field) for field in required_fields]
 
     missing: list[str] = []
-    raw_path = str(phase_payload.get("screenshot_path") or "").strip()
-    if not raw_path:
-        missing.append(f"{phase.replace('_artifacts', '')}_screenshot")
-    elif not Path(raw_path).exists():
-        missing.append(f"{phase.replace('_artifacts', '')}_screenshot")
+    for field in required_fields:
+        raw_path = str(phase_payload.get(field) or "").strip()
+        if not raw_path or not Path(raw_path).exists():
+            missing.append(_browser_phase_artifact_label(phase=phase, field=field))
     return missing
+
+
+def _browser_required_artifact_fields(*, artifact_requirements: tuple[str, ...] = ()) -> tuple[str, ...]:
+    fields = ["screenshot_path"]
+    normalized_requirements = {
+        str(item or "").strip().lower()
+        for item in artifact_requirements
+        if str(item or "").strip()
+    }
+    if "console log" in normalized_requirements:
+        fields.append("console_log_path")
+    if "network log" in normalized_requirements:
+        fields.append("network_log_path")
+    return tuple(fields)
+
+
+def _browser_phase_artifact_label(*, phase: str, field: str) -> str:
+    phase_prefix = phase.replace("_artifacts", "")
+    suffix = {
+        "screenshot_path": "screenshot",
+        "console_log_path": "console_log",
+        "network_log_path": "network_log",
+    }.get(field, field.removesuffix("_path"))
+    return f"{phase_prefix}_{suffix}"
 
 
 def _gate_runners_for_mode(mode: str) -> list[tuple[str, Any]]:

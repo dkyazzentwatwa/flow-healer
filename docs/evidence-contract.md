@@ -24,6 +24,8 @@ Typical required evidence:
 
 Some constructive browser tasks with `browser_repro_mode: allow_success` may skip failure-as-bug evidence, but they still need the declared artifact outputs.
 
+When an issue contract explicitly names `console log` or `network log` in `artifact_requirements`, those artifacts are promotion-blocking requirements. Missing declared artifacts should block promotion even when the UI assertions themselves pass.
+
 ## Artifact Types
 
 Supported publishable artifact families include:
@@ -63,6 +65,8 @@ An issue is blocked when:
 - artifact validation or retention metadata cannot be produced
 
 In those cases, Flow Healer should fail with an evidence-related class instead of pretending the issue is complete.
+
+Videos may still be captured and published, but they remain best-effort unless the contract semantics are tightened explicitly.
 
 ## Browser Harness Expectations
 
