@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -52,6 +52,10 @@ _DOCKER_INFRA_OUTPUT_HINTS = (
     "context canceled",
     "docker desktop is not running",
 )
+_VALIDATION_FAILURE_PATH_RE = re.compile(
+    r"(?P<path>(?:\.?/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|rb|java|kt|scala|js|jsx|ts|tsx|go|rs|swift|sql|sh|bash|zsh|yaml|yml|json|toml|ini|cfg|conf|md|txt))(?::\d+(?::\d+)?)?",
+    re.IGNORECASE,
+)
 
 
 def _resolve_browser_entry_url(task_entry_url: str, runtime_readiness_url: str) -> str:
@@ -65,6 +69,272 @@ def _resolve_browser_entry_url(task_entry_url: str, runtime_readiness_url: str) 
         return task_url
     base_for_join = readiness_url if readiness_url.endswith("/") else f"{readiness_url}/"
     return urljoin(base_for_join, task_url.lstrip("/"))
+
+
+def _merge_feedback_context(*, base: str, addition: str) -> str:
+    base_text = str(base or "").strip()
+    addition_text = str(addition or "").strip()
+    if not addition_text:
+        return base_text
+    if not base_text:
+        return addition_text
+    return f"{base_text}\n\n{addition_text}"
+
+
+def _baseline_validation_requested(
+    *,
+    task_spec: HealerTaskSpec,
+    browser_evidence_requested: bool,
+    browser_repro_mode: str,
+) -> bool:
+    if not browser_evidence_requested or browser_repro_mode != "allow_success":
+        return False
+    if task_spec.validation_profile != "code_change":
+        return False
+    if not task_spec.output_targets:
+        return False
+    return bool(str(task_spec.execution_root or "").strip())
+
+
+def _baseline_validation_failed(summary: dict[str, Any]) -> bool:
+    failed_tests = int(summary.get("failed_tests", 0) or 0)
+    if failed_tests > 0:
+        return True
+    for key in ("local_full_exit_code", "local_targeted_exit_code", "docker_full_exit_code", "docker_targeted_exit_code"):
+        value = summary.get(key)
+        try:
+            if int(value or 0) != 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return bool(str(summary.get("failure_class") or "").strip())
+
+
+def _normalize_validation_failure_path(path: str) -> str:
+    candidate = str(path or "").strip().strip("'\"")
+    if not candidate:
+        return ""
+    candidate = re.sub(r"[:(]\d+(?::\d+)?\)?$", "", candidate)
+    candidate = candidate.replace("\\", "/")
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    candidate = candidate.rstrip(":)")
+    if not candidate:
+        return ""
+    return PurePosixPath(candidate).as_posix()
+
+
+def _extract_validation_failure_paths(summary: dict[str, Any]) -> tuple[str, ...]:
+    texts: list[str] = []
+    for key in (
+        "failure_reason",
+        "local_full_output_tail",
+        "local_targeted_output_tail",
+        "docker_full_output_tail",
+        "docker_targeted_output_tail",
+    ):
+        value = summary.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value)
+    paths: list[str] = []
+    for text in texts:
+        for match in _VALIDATION_FAILURE_PATH_RE.finditer(text):
+            normalized = _normalize_validation_failure_path(match.group("path"))
+            if normalized:
+                paths.append(normalized)
+    return tuple(sorted(set(paths)))
+
+
+def _path_within_execution_root(path: str, execution_root: str) -> bool:
+    normalized_path = _normalize_validation_failure_path(path)
+    normalized_root = _normalize_repo_relative_shell_path(execution_root)
+    if not normalized_path or not normalized_root or normalized_root == ".":
+        return False
+    return normalized_path == normalized_root or normalized_path.startswith(f"{normalized_root}/")
+
+
+def _resolve_validation_failure_path(
+    *,
+    workspace: Path,
+    execution_root: str,
+    path: str,
+) -> str:
+    normalized = _normalize_validation_failure_path(path)
+    if not normalized:
+        return ""
+    workspace_candidate = workspace / normalized
+    if workspace_candidate.exists():
+        return normalized
+    normalized_root = _normalize_repo_relative_shell_path(execution_root)
+    if normalized_root and normalized_root != ".":
+        rooted = _normalize_validation_failure_path(f"{normalized_root}/{normalized}")
+        if rooted and (workspace / rooted).exists():
+            return rooted
+    return normalized
+
+
+def _format_baseline_feedback(*, failing_paths: tuple[str, ...]) -> str:
+    listed = ", ".join(failing_paths)
+    return (
+        "### Baseline Validation Context\n"
+        "Baseline validation already fails before the requested page change.\n"
+        f"Authorized scope widening for this run only: {listed}.\n"
+        "Fix the requested page change and the listed baseline validation file(s), then rerun the declared validation."
+    )
+
+
+def _build_baseline_follow_up(
+    *,
+    task_spec: HealerTaskSpec,
+    unsafe_paths: tuple[str, ...],
+) -> tuple[str, str]:
+    execution_root = str(task_spec.execution_root or "").strip() or "."
+    title = f"Follow-up: unblock baseline validation for {execution_root}"
+    bullet_lines = "\n".join(f"- {path}" for path in unsafe_paths)
+    validation_lines = "\n".join(f"- {command}" for command in task_spec.validation_commands) or "- <same validation as original issue>"
+    body = (
+        "Flow Healer detected a pre-existing validation failure while attempting a constructive browser task.\n\n"
+        "Required code outputs:\n"
+        f"{bullet_lines}\n\n"
+        "Validation:\n"
+        f"{validation_lines}\n"
+    )
+    return title, body
+
+
+def _baseline_validation_test_summary(
+    *,
+    task_spec: HealerTaskSpec,
+    effective_task_spec: HealerTaskSpec,
+    baseline_summary: dict[str, Any],
+    failing_paths: tuple[str, ...],
+    widened_paths: tuple[str, ...],
+    unsafe_paths: tuple[str, ...],
+    follow_up_title: str = "",
+    follow_up_body: str = "",
+) -> dict[str, Any]:
+    summary = {
+        "baseline_failed": _baseline_validation_failed(baseline_summary),
+        "failing_paths": list(failing_paths),
+        "widened_scope": bool(widened_paths),
+        "widened_paths": list(widened_paths),
+        "unsafe_paths": list(unsafe_paths),
+        "effective_output_targets": list(effective_task_spec.output_targets),
+        "original_output_targets": list(task_spec.output_targets),
+        "execution_root": str(task_spec.execution_root or "").strip(),
+    }
+    if baseline_summary:
+        summary["validation_summary"] = dict(baseline_summary)
+    if follow_up_title or follow_up_body:
+        summary["follow_up_issue"] = {
+            "title": follow_up_title,
+            "body": follow_up_body,
+        }
+    return summary
+
+
+def _assess_baseline_validation_scope(
+    runner: "HealerRunner",
+    *,
+    workspace: Path,
+    task_spec: HealerTaskSpec,
+    targeted_tests: list[str],
+) -> BaselineValidationAssessment:
+    baseline_summary = runner.validate_workspace(
+        workspace,
+        task_spec=task_spec,
+        targeted_tests=targeted_tests,
+    )
+    if not _baseline_validation_failed(baseline_summary):
+        return BaselineValidationAssessment(
+            baseline_failed=False,
+            test_summary=_baseline_validation_test_summary(
+                task_spec=task_spec,
+                effective_task_spec=task_spec,
+                baseline_summary=baseline_summary,
+                failing_paths=(),
+                widened_paths=(),
+                unsafe_paths=(),
+            ),
+        )
+
+    failing_paths = tuple(
+        dict.fromkeys(
+            _resolve_validation_failure_path(
+                workspace=workspace,
+                execution_root=task_spec.execution_root,
+                path=path,
+            )
+            for path in _extract_validation_failure_paths(baseline_summary)
+            if str(path or "").strip()
+        )
+    )
+    unrelated_paths = tuple(path for path in failing_paths if not _is_explicit_output_target(path, task_spec))
+    if not unrelated_paths:
+        return BaselineValidationAssessment(
+            baseline_failed=True,
+            test_summary=_baseline_validation_test_summary(
+                task_spec=task_spec,
+                effective_task_spec=task_spec,
+                baseline_summary=baseline_summary,
+                failing_paths=failing_paths,
+                widened_paths=(),
+                unsafe_paths=(),
+            ),
+        )
+
+    safe_paths = tuple(
+        path
+        for path in unrelated_paths
+        if _path_within_execution_root(path, task_spec.execution_root)
+        and path not in task_spec.input_context_paths
+    )
+    unsafe_paths = tuple(path for path in unrelated_paths if path not in safe_paths)
+    if unsafe_paths:
+        follow_up_title, follow_up_body = _build_baseline_follow_up(
+            task_spec=task_spec,
+            unsafe_paths=unsafe_paths,
+        )
+        failure_reason = (
+            "I can complete this, but the repo currently fails validation in file(s) outside the declared output targets: "
+            f"{', '.join(unsafe_paths)}. Approve widening scope to include that fix, or accept browser-evidence-only completion."
+        )
+        return BaselineValidationAssessment(
+            baseline_failed=True,
+            failure_class="baseline_validation_blocked",
+            failure_reason=failure_reason,
+            failing_paths=failing_paths,
+            unsafe_paths=unsafe_paths,
+            follow_up_title=follow_up_title,
+            follow_up_body=follow_up_body,
+            test_summary=_baseline_validation_test_summary(
+                task_spec=task_spec,
+                effective_task_spec=task_spec,
+                baseline_summary=baseline_summary,
+                failing_paths=failing_paths,
+                widened_paths=(),
+                unsafe_paths=unsafe_paths,
+                follow_up_title=follow_up_title,
+                follow_up_body=follow_up_body,
+            ),
+        )
+
+    widened_targets = tuple(dict.fromkeys((*task_spec.output_targets, *safe_paths)))
+    widened_task_spec = replace(task_spec, output_targets=widened_targets)
+    return BaselineValidationAssessment(
+        baseline_failed=True,
+        widened_task_spec=widened_task_spec,
+        feedback_context=_format_baseline_feedback(failing_paths=safe_paths),
+        failing_paths=failing_paths,
+        test_summary=_baseline_validation_test_summary(
+            task_spec=task_spec,
+            effective_task_spec=widened_task_spec,
+            baseline_summary=baseline_summary,
+            failing_paths=failing_paths,
+            widened_paths=safe_paths,
+            unsafe_paths=(),
+        ),
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -113,6 +383,20 @@ class PathFenceMaterializationResult:
 class NormalizedValidationCommandsResult:
     normalized_commands: tuple[str, ...]
     rejection_reason: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class BaselineValidationAssessment:
+    baseline_failed: bool
+    widened_task_spec: HealerTaskSpec | None = None
+    feedback_context: str = ""
+    failure_class: str = ""
+    failure_reason: str = ""
+    failing_paths: tuple[str, ...] = ()
+    unsafe_paths: tuple[str, ...] = ()
+    follow_up_title: str = ""
+    follow_up_body: str = ""
+    test_summary: dict[str, Any] | None = None
 
 
 class HealerRunner:
@@ -320,6 +604,7 @@ class HealerRunner:
         browser_artifact_bundle: dict[str, Any] = {}
         browser_artifact_links: list[dict[str, Any]] = []
         repro_stability: dict[str, Any] = {}
+        baseline_validation_summary: dict[str, Any] = {}
         browser_repro_mode = resolve_browser_repro_mode(task_spec)
         browser_contract_already_satisfied = False
         parsed_repro_steps = parse_repro_steps(task_spec.repro_steps) if task_spec.repro_steps else ()
@@ -607,6 +892,57 @@ class HealerRunner:
                     workspace_status=workspace_status,
                 )
         sender = f"healer:{issue_id}"
+        effective_task_spec = task_spec
+        if _baseline_validation_requested(
+            task_spec=task_spec,
+            browser_evidence_requested=browser_evidence_requested,
+            browser_repro_mode=browser_repro_mode,
+        ):
+            baseline_assessment = _assess_baseline_validation_scope(
+                self,
+                workspace=workspace,
+                task_spec=task_spec,
+                targeted_tests=targeted_tests,
+            )
+            baseline_validation_summary = dict(baseline_assessment.test_summary or {})
+            if baseline_assessment.failure_class:
+                failure_summary = _annotate_test_summary_browser_artifacts(
+                    _annotate_test_summary_runtime(
+                        {},
+                        workspace_status=workspace_status,
+                        task_spec=task_spec,
+                    ),
+                    artifact_bundle=browser_artifact_bundle,
+                    artifact_links=browser_artifact_links,
+                )
+                failure_summary["baseline_validation"] = baseline_validation_summary
+                return HealerRunResult(
+                    success=False,
+                    failure_class=baseline_assessment.failure_class,
+                    failure_reason=baseline_assessment.failure_reason,
+                    failure_fingerprint="",
+                    proposer_output="",
+                    diff_paths=[],
+                    diff_files=0,
+                    diff_lines=0,
+                    test_summary=_with_workspace_status(
+                        _annotate_browser_failure_family(
+                            failure_summary,
+                            failure_class=baseline_assessment.failure_class,
+                            failure_reason=baseline_assessment.failure_reason,
+                        ),
+                        workspace_status=workspace_status,
+                        failure_fingerprint="",
+                    ),
+                    workspace_status=workspace_status,
+                )
+            if baseline_assessment.widened_task_spec is not None:
+                effective_task_spec = baseline_assessment.widened_task_spec
+                feedback_context = _merge_feedback_context(
+                    base=feedback_context,
+                    addition=baseline_assessment.feedback_context,
+                )
+        task_spec = effective_task_spec
         workspace_edit_mode = _prefers_workspace_edits(connector=self.connector, task_spec=task_spec)
         # For app-server workspace-edit mode, always start each attempt with a fresh thread.
         # Reusing prior issue threads across attempts can cause stale-context "status only" responses
@@ -647,7 +983,7 @@ class HealerRunner:
             code_change_retries=self.max_code_proposer_retries,
             artifact_retries=self.max_artifact_proposer_retries,
         )
-        if browser_contract_already_satisfied:
+        if browser_contract_already_satisfied and not baseline_validation_summary.get("baseline_failed"):
             max_retries = -1
         turn_timeout_seconds = _turn_timeout_seconds_for_task(
             task_spec=task_spec,
@@ -1834,6 +2170,8 @@ class HealerRunner:
             reason=completion_parser_reason,
         )
         _annotate_app_server_recovery_status(workspace_status)
+        if baseline_validation_summary:
+            test_summary["baseline_validation"] = dict(baseline_validation_summary)
         failed_tests = int(test_summary.get("failed_tests", 0))
         if failed_tests > max_failed_tests_allowed:
             test_failure_class = str(test_summary.get("failure_class") or "").strip()

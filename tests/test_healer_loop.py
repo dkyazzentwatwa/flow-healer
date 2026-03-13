@@ -459,6 +459,266 @@ def test_process_claimed_issue_low_confidence_sets_needs_clarification_label(tmp
     )
 
 
+def test_process_claimed_issue_baseline_validation_blocked_routes_to_needs_clarification(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="4331",
+        repo="owner/repo",
+        title="Issue 4331",
+        body=(
+            "Required code outputs:\n"
+            "- e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb\n\n"
+            "app_target: ruby-rails-web\n"
+            "entry_url: http://127.0.0.1:3101/dashboard\n"
+            "browser_repro_mode: allow_success\n"
+            "repro_steps:\n"
+            "- goto /dashboard\n"
+            "- expect_text Ruby Browser Signal R1\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/ruby-rails-web && bundle exec rspec\n"
+        ),
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-4331"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "4331", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-4331")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=False,
+        diff_paths=[],
+        test_summary={
+            "failed_tests": 1,
+            "baseline_validation": {
+                "unsafe_paths": ["tests/test_repo_health.py"],
+                "follow_up_issue": {
+                    "title": "Follow-up: unblock baseline validation for e2e-apps/ruby-rails-web",
+                    "body": "Required code outputs:\n- tests/test_repo_health.py\n",
+                },
+            },
+        },
+        proposer_output="",
+        workspace_status={},
+        failure_class="baseline_validation_blocked",
+        failure_reason=(
+            "I can complete this, but the repo currently fails validation in file(s) outside the declared output "
+            "targets: tests/test_repo_health.py. Approve widening scope to include that fix, or accept "
+            "browser-evidence-only completion."
+        ),
+        failure_fingerprint="",
+    )
+    loop.tracker.create_issue.return_value = {
+        "number": 987,
+        "html_url": "https://github.com/owner/repo/issues/987",
+        "state": "open",
+    }
+    monkeypatch.setattr(
+        "flow_healer.healer_loop.compile_task_spec",
+        lambda issue_title, issue_body: HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            execution_root="e2e-apps/ruby-rails-web",
+            app_target="ruby-rails-web",
+            entry_url="http://127.0.0.1:3111/dashboard",
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/ruby-dashboard.png",),
+            validation_commands=("cd e2e-apps/ruby-rails-web && bundle exec rspec",),
+        ),
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("4331")
+    attempts = store.list_healer_attempts(issue_id="4331")
+    assert issue is not None
+    assert issue["state"] == "needs_clarification"
+    assert issue["last_failure_class"] == "baseline_validation_blocked"
+    assert attempts[-1]["state"] == "needs_clarification"
+    assert any(
+        call.kwargs.get("label") == "healer:needs-clarification"
+        for call in loop.tracker.add_issue_label.call_args_list
+    )
+    loop.tracker.create_issue.assert_called_once()
+    posted_body = loop.tracker.add_issue_comment.call_args.kwargs["body"]
+    assert "Approve widening scope" in posted_body
+    assert "#987" in posted_body
+
+
+def test_process_claimed_issue_baseline_validation_blocked_reuses_existing_follow_up_issue(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="4332",
+        repo="owner/repo",
+        title="Issue 4332",
+        body=(
+            "Required code outputs:\n"
+            "- e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb\n\n"
+            "app_target: ruby-rails-web\n"
+            "entry_url: http://127.0.0.1:3101/dashboard\n"
+            "browser_repro_mode: allow_success\n"
+            "repro_steps:\n"
+            "- goto /dashboard\n"
+            "- expect_text Ruby Browser Signal R1\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/ruby-rails-web && bundle exec rspec\n"
+        ),
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-4332"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "4332", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-4332")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=False,
+        diff_paths=[],
+        test_summary={
+            "failed_tests": 1,
+            "baseline_validation": {
+                "unsafe_paths": ["tests/test_repo_health.py"],
+                "follow_up_issue": {
+                    "title": "Follow-up: unblock baseline validation for e2e-apps/ruby-rails-web",
+                    "body": "Required code outputs:\n- tests/test_repo_health.py\n",
+                },
+            },
+        },
+        proposer_output="",
+        workspace_status={},
+        failure_class="baseline_validation_blocked",
+        failure_reason="Approve widening scope to include that fix.",
+        failure_fingerprint="",
+    )
+    loop.tracker.find_open_issue_by_fingerprint.return_value = {
+        "number": 988,
+        "html_url": "https://github.com/owner/repo/issues/988",
+        "title": "Follow-up: unblock baseline validation for e2e-apps/ruby-rails-web",
+    }
+    monkeypatch.setattr(
+        "flow_healer.healer_loop.compile_task_spec",
+        lambda issue_title, issue_body: HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            execution_root="e2e-apps/ruby-rails-web",
+            app_target="ruby-rails-web",
+            entry_url="http://127.0.0.1:3111/dashboard",
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/ruby-dashboard.png",),
+            validation_commands=("cd e2e-apps/ruby-rails-web && bundle exec rspec",),
+        ),
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    loop.tracker.create_issue.assert_not_called()
+    posted_body = loop.tracker.add_issue_comment.call_args.kwargs["body"]
+    assert "#988" in posted_body
+
+
+def test_process_claimed_issue_baseline_validation_blocked_tolerates_follow_up_issue_creation_failure(
+    tmp_path, monkeypatch
+):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="4333",
+        repo="owner/repo",
+        title="Issue 4333",
+        body=(
+            "Required code outputs:\n"
+            "- e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb\n\n"
+            "app_target: ruby-rails-web\n"
+            "entry_url: http://127.0.0.1:3101/dashboard\n"
+            "browser_repro_mode: allow_success\n"
+            "repro_steps:\n"
+            "- goto /dashboard\n"
+            "- expect_text Ruby Browser Signal R1\n\n"
+            "Validation:\n"
+            "- cd e2e-apps/ruby-rails-web && bundle exec rspec\n"
+        ),
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+
+    loop = _make_loop(store, healer_enable_review=False)
+    workspace = tmp_path / "workspaces" / "issue-4333"
+    workspace.mkdir(parents=True)
+    loop.tracker.get_issue.return_value = {"issue_id": "4333", "state": "open", "labels": ["healer:ready"]}
+    loop.workspace_manager.ensure_workspace.return_value = SimpleNamespace(path=workspace, branch="healer/issue-4333")
+    loop.dispatcher.acquire_prediction_locks.return_value = SimpleNamespace(acquired=True, reason="")
+    loop.runner.run_attempt.return_value = SimpleNamespace(
+        success=False,
+        diff_paths=[],
+        test_summary={
+            "failed_tests": 1,
+            "baseline_validation": {
+                "unsafe_paths": ["tests/test_repo_health.py"],
+                "follow_up_issue": {
+                    "title": "Follow-up: unblock baseline validation for e2e-apps/ruby-rails-web",
+                    "body": "Required code outputs:\n- tests/test_repo_health.py\n",
+                },
+            },
+        },
+        proposer_output="",
+        workspace_status={},
+        failure_class="baseline_validation_blocked",
+        failure_reason="Approve widening scope to include that fix.",
+        failure_fingerprint="",
+    )
+    loop.tracker.find_open_issue_by_fingerprint.side_effect = RuntimeError("tracker lookup boom")
+    loop.tracker.create_issue.side_effect = RuntimeError("tracker create boom")
+    monkeypatch.setattr(
+        "flow_healer.healer_loop.compile_task_spec",
+        lambda issue_title, issue_body: HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            execution_root="e2e-apps/ruby-rails-web",
+            app_target="ruby-rails-web",
+            entry_url="http://127.0.0.1:3111/dashboard",
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/ruby-dashboard.png",),
+            validation_commands=("cd e2e-apps/ruby-rails-web && bundle exec rspec",),
+        ),
+    )
+
+    loop._process_claimed_issue(claimed)
+
+    issue = store.get_healer_issue("4333")
+    attempts = store.list_healer_attempts(issue_id="4333")
+    assert issue is not None
+    assert issue["state"] == "needs_clarification"
+    assert issue["last_failure_class"] == "baseline_validation_blocked"
+    assert attempts[-1]["state"] == "needs_clarification"
+    posted_body = loop.tracker.add_issue_comment.call_args.kwargs["body"]
+    assert "Approve widening scope" in posted_body
+    assert "Follow-up issue:" not in posted_body
+
+
 def test_clarification_reasons_strict_mode_requires_validation_and_outputs(tmp_path):
     store = SQLiteStore(tmp_path / "relay.db")
     store.bootstrap()

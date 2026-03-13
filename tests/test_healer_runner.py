@@ -5188,6 +5188,339 @@ def test_run_attempt_allows_constructive_browser_tasks_to_mutate_when_initial_jo
     assert browser_harness.calls[0]["expect_failure"] is False
 
 
+def test_run_attempt_widens_scope_for_unrelated_baseline_validation_failures(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    target = workspace / "e2e-apps" / "ruby-rails-web" / "app" / "controllers" / "dashboard_controller.rb"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("class DashboardController < ApplicationController\nend\n", encoding="utf-8")
+    spec_path = workspace / "e2e-apps" / "ruby-rails-web" / "spec" / "requests" / "health_spec.rb"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text("expect(response).to redirect_to('/login')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/e2e-apps/ruby-rails-web/spec/requests/health_spec.rb b/e2e-apps/ruby-rails-web/spec/requests/health_spec.rb\n"
+        "--- a/e2e-apps/ruby-rails-web/spec/requests/health_spec.rb\n"
+        "+++ b/e2e-apps/ruby-rails-web/spec/requests/health_spec.rb\n"
+        "@@ -1 +1 @@\n"
+        "-expect(response).to redirect_to('/login')\n"
+        "+expect(response).to redirect_to('http://127.0.0.1:3111/login')\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3111/dashboard",
+                screenshot_path=str(tmp_path / "before.png"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Ruby Browser Signal R1", "status": "passed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3111/dashboard",
+                screenshot_path=str(tmp_path / "after.png"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Ruby Browser Signal R1", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "bin/rails server",
+                "ready_url": "http://127.0.0.1:3111/",
+                "working_directory": "e2e-apps/ruby-rails-web",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    validation_results = iter(
+        [
+            {
+                "failed_tests": 1,
+                "failure_class": "tests_failed",
+                "failure_reason": "bundle exec rspec failed",
+                "local_full_exit_code": 1,
+                "local_full_output_tail": (
+                    "Failure/Error: expect(response).to redirect_to('/login')\n"
+                    "./spec/requests/health_spec.rb:18\n"
+                ),
+            },
+            {"failed_tests": 0, "local_full_exit_code": 0, "local_full_output_tail": "ok"},
+        ]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: next(validation_results)  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-baseline-widen-1",
+        issue_title="Ruby browser smoke",
+        issue_body="Update the dashboard page.",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+            execution_root="e2e-apps/ruby-rails-web",
+            app_target="ruby-rails-web",
+            entry_url="http://127.0.0.1:3111/dashboard",
+            runtime_profile="web",
+            repro_steps=("goto /dashboard", "expect_text Ruby Browser Signal R1"),
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/ruby-dashboard.png",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert result.diff_paths == ["e2e-apps/ruby-rails-web/spec/requests/health_spec.rb"]
+    assert "e2e-apps/ruby-rails-web/spec/requests/health_spec.rb" in connector.turns[0][1]
+    assert "Baseline validation already fails before the requested page change" in connector.turns[0][1]
+    assert result.test_summary["baseline_validation"]["widened_scope"] is True
+    assert result.test_summary["baseline_validation"]["failing_paths"] == [
+        "e2e-apps/ruby-rails-web/spec/requests/health_spec.rb"
+    ]
+    assert result.test_summary["baseline_validation"]["effective_output_targets"] == [
+        "e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",
+        "e2e-apps/ruby-rails-web/spec/requests/health_spec.rb",
+    ]
+
+
+def test_run_attempt_blocks_when_baseline_validation_widening_is_unsafe(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    target = workspace / "e2e-apps" / "ruby-rails-web" / "app" / "controllers" / "dashboard_controller.rb"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("class DashboardController < ApplicationController\nend\n", encoding="utf-8")
+    external = workspace / "tests" / "test_repo_health.py"
+    external.parent.mkdir(parents=True, exist_ok=True)
+    external.write_text("def test_health():\n    assert False\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    connector = _RetryConnector(["not used"])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3111/dashboard",
+                screenshot_path=str(tmp_path / "before.png"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Ruby Browser Signal R1", "status": "passed"},),
+            )
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "bin/rails server",
+                "ready_url": "http://127.0.0.1:3111/",
+                "working_directory": "e2e-apps/ruby-rails-web",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: {  # type: ignore[method-assign]
+        "failed_tests": 1,
+        "failure_class": "tests_failed",
+        "failure_reason": "pytest failed",
+        "local_full_exit_code": 1,
+        "local_full_output_tail": "tests/test_repo_health.py:4: AssertionError\n",
+    }
+
+    result = runner.run_attempt(
+        issue_id="app-baseline-blocked-1",
+        issue_title="Ruby browser smoke",
+        issue_body="Update the dashboard page.",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+            execution_root="e2e-apps/ruby-rails-web",
+            app_target="ruby-rails-web",
+            entry_url="http://127.0.0.1:3111/dashboard",
+            runtime_profile="web",
+            repro_steps=("goto /dashboard", "expect_text Ruby Browser Signal R1"),
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/ruby-dashboard.png",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is False
+    assert result.failure_class == "baseline_validation_blocked"
+    assert "Approve widening scope" in result.failure_reason
+    assert connector.turns == []
+    assert result.test_summary["baseline_validation"]["widened_scope"] is False
+    assert result.test_summary["baseline_validation"]["unsafe_paths"] == ["tests/test_repo_health.py"]
+    assert result.test_summary["baseline_validation"]["follow_up_issue"]["title"].startswith(
+        "Follow-up:"
+    )
+
+
+def test_run_attempt_keeps_existing_targets_when_baseline_failures_are_already_in_scope(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    target = workspace / "e2e-apps" / "ruby-rails-web" / "app" / "controllers" / "dashboard_controller.rb"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("class DashboardController < ApplicationController\nend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+
+    patch = (
+        "```diff\n"
+        "diff --git a/e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb b/e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb\n"
+        "--- a/e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb\n"
+        "+++ b/e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-class DashboardController < ApplicationController\n"
+        "+class DashboardController < ApplicationController # fixed\n"
+        " end\n"
+        "```\n"
+    )
+    connector = _RetryConnector([patch])
+    app_harness = _FakeAppHarness()
+    browser_harness = _FakeBrowserHarness(
+        [
+            BrowserJourneyResult(
+                phase="failure",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3111/dashboard",
+                screenshot_path=str(tmp_path / "before.png"),
+                console_log_path=str(tmp_path / "before-console.log"),
+                network_log_path=str(tmp_path / "before-network.jsonl"),
+                transcript=({"step": "expect_text Ruby Browser Signal R1", "status": "passed"},),
+            ),
+            BrowserJourneyResult(
+                phase="resolution",
+                passed=True,
+                expected_failure_observed=False,
+                final_url="http://127.0.0.1:3111/dashboard",
+                screenshot_path=str(tmp_path / "after.png"),
+                console_log_path=str(tmp_path / "after-console.log"),
+                network_log_path=str(tmp_path / "after-network.jsonl"),
+                transcript=({"step": "expect_text Ruby Browser Signal R1", "status": "passed"},),
+            ),
+        ]
+    )
+    runner = HealerRunner(
+        connector,
+        timeout_seconds=30,
+        test_gate_mode="local_only",
+        default_runtime_profile="web",
+        app_runtime_profiles=[
+            {
+                "name": "web",
+                "start_command": "bin/rails server",
+                "ready_url": "http://127.0.0.1:3111/",
+                "working_directory": "e2e-apps/ruby-rails-web",
+                "browser": "chromium",
+                "headless": True,
+            }
+        ],
+        app_harness=app_harness,  # type: ignore[arg-type]
+        browser_harness=browser_harness,  # type: ignore[arg-type]
+    )
+    validation_results = iter(
+        [
+            {
+                "failed_tests": 1,
+                "failure_class": "tests_failed",
+                "failure_reason": "bundle exec rspec failed",
+                "local_full_exit_code": 1,
+                "local_full_output_tail": (
+                    "Failure/Error: expected controller output\n"
+                    "./app/controllers/dashboard_controller.rb:1\n"
+                ),
+            },
+            {"failed_tests": 0, "local_full_exit_code": 0, "local_full_output_tail": "ok"},
+        ]
+    )
+    runner.validate_workspace = lambda *args, **kwargs: next(validation_results)  # type: ignore[method-assign]
+
+    result = runner.run_attempt(
+        issue_id="app-baseline-in-scope-1",
+        issue_title="Ruby browser smoke",
+        issue_body="Update the dashboard page.",
+        task_spec=HealerTaskSpec(
+            task_kind="edit",
+            output_mode="patch",
+            output_targets=("e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb",),
+            tool_policy="repo_only",
+            validation_profile="code_change",
+            language="ruby",
+            execution_root="e2e-apps/ruby-rails-web",
+            app_target="ruby-rails-web",
+            entry_url="http://127.0.0.1:3111/dashboard",
+            runtime_profile="web",
+            repro_steps=("goto /dashboard", "expect_text Ruby Browser Signal R1"),
+            browser_repro_mode="allow_success",
+            artifact_requirements=("screenshot: artifacts/ruby-dashboard.png",),
+        ),
+        workspace=workspace,
+        max_diff_files=5,
+        max_diff_lines=50,
+        max_failed_tests_allowed=0,
+        targeted_tests=[],
+    )
+
+    assert result.success is True
+    assert result.diff_paths == ["e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb"]
+    assert "Baseline validation already fails before the requested page change" not in connector.turns[0][1]
+    assert result.test_summary["baseline_validation"]["widened_scope"] is False
+    assert result.test_summary["baseline_validation"]["effective_output_targets"] == [
+        "e2e-apps/ruby-rails-web/app/controllers/dashboard_controller.rb"
+    ]
+
+
 def test_run_attempt_flags_flaky_browser_repro_before_mutation(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

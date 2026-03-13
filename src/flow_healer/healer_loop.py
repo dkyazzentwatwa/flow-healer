@@ -3830,6 +3830,15 @@ class AutonomousHealerLoop:
                         failure_class,
                         failure_reason,
                     )
+                    if failure_class == "baseline_validation_blocked":
+                        issue_state = self._route_baseline_validation_blocked(
+                            issue_id=issue.issue_id,
+                            attempt_no=attempt_no,
+                            failure_reason=failure_reason,
+                            test_summary=test_summary,
+                        )
+                        attempt_state = issue_state
+                        return
                     self._record_failure_fingerprint(
                         issue_id=issue.issue_id,
                         failure_class=failure_class,
@@ -5635,6 +5644,115 @@ class AutonomousHealerLoop:
         self._sync_outcome_issue_label(issue_id=issue_id, label="")
         self._post_issue_status(issue_id=issue_id, body=self._build_judgment_comment(dict(assessment.packet or {})))
         return routed_state
+
+    @staticmethod
+    def _baseline_follow_up_fingerprint(*, issue_id: str, follow_up_title: str, unsafe_paths: list[str]) -> str:
+        payload = "|".join([str(issue_id or "").strip(), str(follow_up_title or "").strip(), *sorted(unsafe_paths)])
+        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+        return f"baseline-validation:{digest}"
+
+    def _ensure_baseline_follow_up_issue(
+        self,
+        *,
+        issue_id: str,
+        baseline_validation: dict[str, Any],
+    ) -> dict[str, Any]:
+        follow_up_issue = dict(baseline_validation.get("follow_up_issue") or {})
+        title = str(follow_up_issue.get("title") or "").strip()
+        body = str(follow_up_issue.get("body") or "").strip()
+        unsafe_paths = [str(path).strip() for path in baseline_validation.get("unsafe_paths", []) if str(path).strip()]
+        if not title or not body:
+            return {}
+        fingerprint = self._baseline_follow_up_fingerprint(
+            issue_id=issue_id,
+            follow_up_title=title,
+            unsafe_paths=unsafe_paths,
+        )
+        try:
+            existing = self.tracker.find_open_issue_by_fingerprint(fingerprint=fingerprint)
+        except Exception as exc:
+            logger.warning(
+                "Failed to check for existing baseline follow-up issue for #%s: %s",
+                issue_id,
+                exc,
+            )
+            existing = None
+        if isinstance(existing, dict) and int(existing.get("number") or 0) > 0:
+            return existing
+        body_with_fingerprint = f"{body}\n\nflow-healer-fingerprint: `{fingerprint}`"
+        try:
+            created = self.tracker.create_issue(title=title, body=body_with_fingerprint, labels=[])
+        except Exception as exc:
+            logger.warning(
+                "Failed to create baseline follow-up issue for #%s: %s",
+                issue_id,
+                exc,
+            )
+            return {}
+        return dict(created or {})
+
+    def _build_baseline_validation_blocked_comment(
+        self,
+        *,
+        attempt_no: int,
+        failure_reason: str,
+        baseline_validation: dict[str, Any],
+        follow_up_issue: dict[str, Any] | None,
+    ) -> str:
+        unsafe_paths = [str(path).strip() for path in baseline_validation.get("unsafe_paths", []) if str(path).strip()]
+        bullets = [
+            f"Attempt: `{attempt_no}`",
+            "Status: requested browser/page behavior is blocked by pre-existing validation outside the declared output targets.",
+            f"Reason: {self._clean_comment_text(failure_reason, max_chars=320)}",
+        ]
+        if unsafe_paths:
+            bullets.append(f"Out-of-scope failing paths: `{self._clean_comment_text(', '.join(unsafe_paths), max_chars=220)}`")
+        bullets.append("Next action: approve widening scope to include that validation fix, or accept browser-evidence-only completion.")
+        follow_up_number = self._coerce_int((follow_up_issue or {}).get("number"), default=0)
+        follow_up_url = str((follow_up_issue or {}).get("html_url") or "").strip()
+        if follow_up_number > 0:
+            follow_up_line = f"Follow-up issue: `#{follow_up_number}`"
+            if follow_up_url:
+                follow_up_line += f" ({follow_up_url})"
+            bullets.append(follow_up_line)
+        return self._format_flow_status_comment(
+            "Scope decision required",
+            "Automation stopped instead of retrying blindly because the repo is already failing unrelated validation.",
+            bullets,
+        )
+
+    def _route_baseline_validation_blocked(
+        self,
+        *,
+        issue_id: str,
+        attempt_no: int,
+        failure_reason: str,
+        test_summary: dict[str, Any],
+    ) -> str:
+        baseline_validation = dict(test_summary.get("baseline_validation") or {})
+        follow_up_issue = self._ensure_baseline_follow_up_issue(
+            issue_id=issue_id,
+            baseline_validation=baseline_validation,
+        )
+        self.store.set_healer_issue_state(
+            issue_id=issue_id,
+            state="needs_clarification",
+            last_failure_class="baseline_validation_blocked",
+            last_failure_reason=str(failure_reason or "").strip()[:500],
+            clear_lease=True,
+        )
+        self._sync_blocked_issue_label(issue_id=issue_id, state="needs_clarification")
+        self._sync_outcome_issue_label(issue_id=issue_id, label=_OUTCOME_LABEL_NEEDS_CLARIFICATION)
+        self._post_issue_status(
+            issue_id=issue_id,
+            body=self._build_baseline_validation_blocked_comment(
+                attempt_no=attempt_no,
+                failure_reason=failure_reason,
+                baseline_validation=baseline_validation,
+                follow_up_issue=follow_up_issue,
+            ),
+        )
+        return "needs_clarification"
 
     @staticmethod
     def _format_flow_status_comment(
