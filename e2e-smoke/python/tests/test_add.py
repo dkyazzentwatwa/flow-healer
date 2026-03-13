@@ -34,6 +34,25 @@ def test_add_accepts_stringified_integer_operands() -> None:
     assert module.add("2", "3") == 5
 
 
+def test_add_many_returns_the_sum_of_three_integers() -> None:
+    module = _load_add_module()
+
+    assert module.add_many(2, 3, 4) == 9
+
+
+def test_add_many_accepts_stringified_integer_operands() -> None:
+    module = _load_add_module()
+
+    assert module.add_many("2", "3", "4") == 9
+
+
+def test_add_many_rejects_invalid_operands() -> None:
+    module = _load_add_module()
+
+    with pytest.raises(TypeError, match=r"^add\(\) operands must be integers$"):
+        module.add_many("two", 3, 4)
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     (
