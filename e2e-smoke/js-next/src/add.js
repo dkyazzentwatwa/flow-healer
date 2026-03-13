@@ -5,6 +5,14 @@ function add(a, b) {
   return left + right;
 }
 
+function addMany(a, b, c) {
+  return (
+    normalizeFiniteNumber(a) +
+    normalizeFiniteNumber(b) +
+    normalizeFiniteNumber(c)
+  );
+}
+
 function normalizeFiniteNumber(value) {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -25,4 +33,4 @@ function normalizeFiniteNumber(value) {
   return value;
 }
 
-module.exports = { add };
+module.exports = { add, addMany };
