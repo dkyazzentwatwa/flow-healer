@@ -12,6 +12,7 @@ from .app_harness import AppRuntimeProfile
 
 
 _DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+_POST_CLICK_SETTLE_MS = 75
 REQUIRED_ARTIFACTS_BY_PHASE: dict[str, tuple[str, ...]] = {
     "repro": ("screenshot_path", "console_log_path"),
     "verify": ("screenshot_path", "console_log_path", "network_log_path"),
@@ -296,9 +297,7 @@ class _PlaywrightBrowserSession:
 
         self._context = self._browser.new_context(**context_kwargs)
         self._page = self._context.new_page()
-        self._page.on("console", self._on_console)
-        self._page.on("request", self._on_request)
-        self._page.on("response", self._on_response)
+        self._attach_page_observers(self._page)
 
     @property
     def current_url(self) -> str:
@@ -308,7 +307,10 @@ class _PlaywrightBrowserSession:
         self._page.goto(url, wait_until="domcontentloaded")
 
     def click(self, selector_or_text: str) -> None:
+        known_pages = tuple(getattr(self._context, "pages", []) or ())
         self._resolve_locator(selector_or_text).click()
+        self._adopt_new_page_if_opened(known_pages=known_pages)
+        self._settle_after_click()
 
     def fill(self, selector: str, value: str) -> None:
         self._resolve_locator(selector).fill(value)
@@ -403,6 +405,32 @@ class _PlaywrightBrowserSession:
         if query.startswith("css="):
             return self._page.locator(query[4:])
         return self._page.locator(query)
+
+    def _attach_page_observers(self, page: Any) -> None:
+        page.on("console", self._on_console)
+        page.on("request", self._on_request)
+        page.on("response", self._on_response)
+
+    def _adopt_new_page_if_opened(self, *, known_pages: tuple[Any, ...]) -> None:
+        current_pages = tuple(getattr(self._context, "pages", []) or ())
+        new_pages = [page for page in current_pages if page not in known_pages]
+        if not new_pages:
+            return
+        new_page = new_pages[-1]
+        if new_page is self._page:
+            return
+        try:
+            new_page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        self._page = new_page
+        self._attach_page_observers(self._page)
+
+    def _settle_after_click(self) -> None:
+        try:
+            self._page.wait_for_timeout(_POST_CLICK_SETTLE_MS)
+        except Exception:
+            return
 
     def _on_console(self, message: Any) -> None:
         self._console_entries.append(f"[{message.type}] {message.text}\n")

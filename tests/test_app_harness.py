@@ -253,3 +253,59 @@ def test_bootstrap_dependencies_raises_on_install_failure(
 
     with pytest.raises(RuntimeError, match="dependency bootstrap failed"):
         harness._maybe_bootstrap_dependencies(profile, env={})
+
+
+def test_session_stop_signals_process_group_before_kill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, int]] = []
+
+    class _FakeStdout:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 4242
+            self.returncode = 0
+            self.stdout = _FakeStdout()
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            calls.append(("terminate", self.pid))
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            calls.append(("kill", self.pid))
+
+    monkeypatch.setattr("flow_healer.app_harness.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr("flow_healer.app_harness.os.killpg", lambda pgid, sig: calls.append(("killpg", sig)))
+
+    from flow_healer.app_harness import AppHarnessSession
+
+    class _FakeThread:
+        def join(self, timeout=None) -> None:
+            return None
+
+    profile = AppRuntimeProfile(
+        name="group-stop",
+        command=(sys.executable, "-u", "noop.py"),
+        cwd=tmp_path,
+    )
+    harness_session = AppHarnessSession(
+        profile=profile,
+        process=_FakeProcess(),  # type: ignore[arg-type]
+        _output_lines=[],
+        _reader_thread=_FakeThread(),  # type: ignore[arg-type]
+    )
+
+    result = harness_session.stop()
+
+    assert result == 0
+    assert calls
+    assert calls[0][0] == "killpg"
+    assert all(call[0] != "terminate" for call in calls)

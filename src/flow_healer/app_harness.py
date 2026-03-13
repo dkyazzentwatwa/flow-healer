@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from collections import deque
@@ -57,11 +58,15 @@ class AppHarnessSession:
     def stop(self) -> int:
         with self._stop_lock:
             if not self._stopped and self.process.poll() is None:
-                self.process.terminate()
+                terminated = self._signal_process_group(signal.SIGTERM)
+                if not terminated:
+                    self.process.terminate()
                 try:
                     self.process.wait(timeout=self.profile.shutdown_timeout_seconds)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
+                    killed = self._signal_process_group(signal.SIGKILL)
+                    if not killed:
+                        self.process.kill()
                     self.process.wait(timeout=1)
             self._stopped = True
 
@@ -69,6 +74,17 @@ class AppHarnessSession:
             self.process.stdout.close()
         self._reader_thread.join(timeout=0.5)
         return int(self.process.returncode or 0)
+
+    def _signal_process_group(self, sig: int) -> bool:
+        try:
+            pgid = os.getpgid(self.process.pid)
+        except (AttributeError, OSError, ValueError):
+            return False
+        try:
+            os.killpg(pgid, sig)
+            return True
+        except (AttributeError, OSError, ValueError):
+            return False
 
 
 class LocalAppHarness:

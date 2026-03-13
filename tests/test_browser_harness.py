@@ -256,6 +256,108 @@ def test_playwright_session_close_tolerates_missing_video_capture(tmp_path: Path
     assert not session._video_output.exists()
 
 
+def test_playwright_session_click_settles_after_interaction() -> None:
+    class _FakeLocator:
+        def __init__(self) -> None:
+            self.clicked = 0
+
+        def click(self) -> None:
+            self.clicked += 1
+
+    class _FakePage:
+        def __init__(self) -> None:
+            self.locator_calls: list[str] = []
+            self.wait_timeout_calls: list[int] = []
+            self.events: list[str] = []
+            self.locator_obj = _FakeLocator()
+
+        def on(self, event: str, _handler) -> None:
+            self.events.append(event)
+
+        def locator(self, selector: str):
+            self.locator_calls.append(selector)
+            return self.locator_obj
+
+        def wait_for_timeout(self, value: int) -> None:
+            self.wait_timeout_calls.append(value)
+
+    class _FakeContext:
+        def __init__(self, page) -> None:
+            self.pages = [page]
+
+    page = _FakePage()
+    context = _FakeContext(page)
+
+    session = _PlaywrightBrowserSession.__new__(_PlaywrightBrowserSession)
+    session._context = context
+    session._page = page
+    session._console_entries = []
+    session._network_entries = []
+
+    session.click("css=.cell")
+
+    assert page.locator_calls == [".cell"]
+    assert page.locator_obj.clicked == 1
+    assert page.wait_timeout_calls
+
+
+def test_playwright_session_click_adopts_new_popup_page() -> None:
+    class _FakeLocator:
+        def __init__(self, click_impl) -> None:
+            self._click_impl = click_impl
+
+        def click(self) -> None:
+            self._click_impl()
+
+    class _FakePage:
+        def __init__(self, *, name: str) -> None:
+            self.name = name
+            self.events: list[str] = []
+            self.wait_timeout_calls: list[int] = []
+            self.load_state_calls: list[tuple[str, int]] = []
+            self._locator_factory = None
+
+        def on(self, event: str, _handler) -> None:
+            self.events.append(event)
+
+        def locator(self, _selector: str):
+            assert self._locator_factory is not None
+            return self._locator_factory()
+
+        def wait_for_load_state(self, state: str, timeout: int = 0) -> None:
+            self.load_state_calls.append((state, timeout))
+
+        def wait_for_timeout(self, value: int) -> None:
+            self.wait_timeout_calls.append(value)
+
+    class _FakeContext:
+        def __init__(self, page) -> None:
+            self.pages = [page]
+
+    origin = _FakePage(name="origin")
+    popup = _FakePage(name="popup")
+    context = _FakeContext(origin)
+
+    def _open_popup() -> None:
+        context.pages.append(popup)
+
+    origin._locator_factory = lambda: _FakeLocator(_open_popup)
+    popup._locator_factory = lambda: _FakeLocator(lambda: None)
+
+    session = _PlaywrightBrowserSession.__new__(_PlaywrightBrowserSession)
+    session._context = context
+    session._page = origin
+    session._console_entries = []
+    session._network_entries = []
+
+    session.click("css=.open")
+
+    assert session._page is popup
+    assert popup.load_state_calls
+    assert "console" in popup.events
+    assert popup.wait_timeout_calls
+
+
 def test_assess_completeness_repro_phase_requires_screenshot_and_console(tmp_path: Path) -> None:
     screenshot = tmp_path / "repro.png"
     console = tmp_path / "repro-console.log"

@@ -1,6 +1,8 @@
+import asyncio
 import os
 import subprocess
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1120,6 +1122,106 @@ def test_record_worker_heartbeat_logs_pulse_message(tmp_path, caplog):
     loop._record_worker_heartbeat(status="idle")
 
     assert "Worker pulse emitted" in caplog.text
+
+
+def test_record_worker_heartbeat_allows_ten_second_pulse_interval(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_pulse_interval_seconds=10)
+
+    loop._record_worker_heartbeat(status="idle")
+    monkeypatch.setattr("flow_healer.healer_loop._minutes_since", lambda _timestamp: 11.0)
+    loop._record_worker_heartbeat(status="idle")
+
+    pulse_events = [
+        event
+        for event in store.list_healer_events(limit=10)
+        if event.get("event_type") == "worker_pulse"
+    ]
+    assert len(pulse_events) >= 2
+
+
+def test_record_worker_heartbeat_processing_infers_active_issue_id(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_pulse_interval_seconds=10, worker_id="worker-a")
+    store.upsert_healer_issue(
+        issue_id="919",
+        repo="owner/repo",
+        title="Issue 919",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    claimed = store.claim_next_healer_issue(worker_id="worker-a", lease_seconds=180, max_active_issues=1)
+    assert claimed is not None
+    store.set_healer_issue_state(issue_id="919", state="running")
+
+    loop._record_worker_heartbeat(status="processing", force_emit=True)
+
+    events = store.list_healer_events(limit=5)
+    assert events
+    assert events[0]["event_type"] == "worker_pulse"
+    assert events[0]["issue_id"] == "919"
+
+
+def test_run_forever_emits_pulses_while_tick_in_progress(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    loop = _make_loop(store, healer_pulse_interval_seconds=0.02)
+
+    stop_flag = {"value": False}
+    pulse_statuses: list[str] = []
+
+    monkeypatch.setattr("flow_healer.healer_loop._MIN_PULSE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(loop, "_tick_once", lambda: time.sleep(0.06))
+    monkeypatch.setattr(
+        loop,
+        "_record_worker_heartbeat",
+        lambda *, status="idle", issue_id="", attempt_id="", force_emit=False: pulse_statuses.append(status),
+    )
+
+    async def _fake_sleep_until_next_tick(*, is_shutdown):
+        stop_flag["value"] = True
+
+    monkeypatch.setattr(loop, "_sleep_until_next_tick", _fake_sleep_until_next_tick)
+
+    asyncio.run(loop.run_forever(lambda: stop_flag["value"]))
+
+    assert pulse_statuses
+    assert all(status in {"idle", "ticking"} for status in pulse_statuses)
+
+
+def test_maybe_run_harness_canaries_skips_on_cold_start_when_persisted_run_is_recent(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.set_state("healer_harness_canary_last_run_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+    loop = _make_loop(
+        store,
+        healer_harness_canary_interval_seconds=21600,
+        healer_app_runtime_profiles={
+            "node-next-web": {
+                "name": "node-next-web",
+                "start_command": "npm run dev",
+                "working_directory": ".",
+                "ready_url": "http://127.0.0.1:3000/",
+            }
+        },
+    )
+
+    called = {"value": False}
+
+    def _should_not_run(*, profile):
+        called["value"] = True
+        return True
+
+    monkeypatch.setattr(loop, "_run_harness_canary_for_profile", _should_not_run)
+
+    summary = loop._maybe_run_harness_canaries()
+
+    assert summary is None
+    assert called["value"] is False
 
 
 def test_record_worker_heartbeat_force_emits_swarm_stage_statuses(tmp_path):

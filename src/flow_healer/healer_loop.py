@@ -104,6 +104,7 @@ _OUTCOME_LABELS = (
     _OUTCOME_LABEL_BLOCKED_ENVIRONMENT,
     _OUTCOME_LABEL_RETRY_EXHAUSTED,
 )
+_MIN_PULSE_INTERVAL_SECONDS = 5.0
 _SQL_VALIDATION_COMMAND_RE = re.compile(
     r"(?:\./scripts/healer_validate\.sh\s+db\b|scripts/flow_healer_sql_validate\.py\b)",
     re.IGNORECASE,
@@ -477,7 +478,7 @@ class AutonomousHealerLoop:
         )
         while not is_shutdown():
             try:
-                await asyncio.to_thread(self._tick_once)
+                await self._run_tick_with_progress_pulses(is_shutdown=is_shutdown)
             except Exception as exc:
                 self.store.update_runtime_status(
                     status="error",
@@ -488,9 +489,31 @@ class AutonomousHealerLoop:
                 logger.exception("Autonomous healer tick failed: %s", exc)
             await self._sleep_until_next_tick(is_shutdown=is_shutdown)
 
+    async def _run_tick_with_progress_pulses(self, *, is_shutdown: Callable[[], bool]) -> None:
+        pulse_interval = max(
+            _MIN_PULSE_INTERVAL_SECONDS,
+            float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)),
+        )
+        tick_task = asyncio.create_task(asyncio.to_thread(self._tick_once))
+        while True:
+            try:
+                await asyncio.wait_for(asyncio.shield(tick_task), timeout=pulse_interval)
+            except asyncio.TimeoutError:
+                if is_shutdown():
+                    continue
+                runtime = self.store.get_runtime_status() or {}
+                status = str(runtime.get("status") or "ticking").strip() or "ticking"
+                await asyncio.to_thread(self._record_worker_heartbeat, status=status)
+                continue
+            break
+        await tick_task
+
     async def _sleep_until_next_tick(self, *, is_shutdown: Callable[[], bool]) -> None:
         remaining = max(5.0, float(self.settings.healer_poll_interval_seconds))
-        pulse_interval = max(15.0, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)))
+        pulse_interval = max(
+            _MIN_PULSE_INTERVAL_SECONDS,
+            float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)),
+        )
         while remaining > 0 and not is_shutdown():
             delay = min(remaining, pulse_interval)
             await asyncio.sleep(delay)
@@ -694,6 +717,8 @@ class AutonomousHealerLoop:
             status = sticky_status
         else:
             status = requested_status
+        if status == "processing" and not str(issue_id or "").strip():
+            issue_id = self._resolve_active_issue_id_for_worker()
         now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         self.store.set_states(
             {
@@ -702,7 +727,10 @@ class AutonomousHealerLoop:
             }
         )
         self.store.update_runtime_status(status=status, last_error="", touch_heartbeat=True)
-        pulse_interval_minutes = max(0.25, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)) / 60.0)
+        pulse_interval_minutes = max(
+            _MIN_PULSE_INTERVAL_SECONDS / 60.0,
+            float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0)) / 60.0,
+        )
         last_pulse_at = str(self.store.get_state("healer_last_pulse_at") or "").strip()
         if not force_emit and last_pulse_at and _minutes_since(last_pulse_at) < pulse_interval_minutes:
             return
@@ -729,6 +757,20 @@ class AutonomousHealerLoop:
             status,
             issue_id or "-",
         )
+
+    def _resolve_active_issue_id_for_worker(self) -> str:
+        active_rows = self.store.list_healer_issues(states=["running", "claimed", "verify_pending"], limit=20)
+        owned_issue_ids = [
+            str(row.get("issue_id") or "").strip()
+            for row in active_rows
+            if str(row.get("lease_owner") or "").strip() == self.worker_id
+        ]
+        owned_issue_ids = [issue_id for issue_id in owned_issue_ids if issue_id]
+        if owned_issue_ids:
+            return owned_issue_ids[0]
+        if len(active_rows) == 1:
+            return str(active_rows[0].get("issue_id") or "").strip()
+        return ""
 
     def _set_sticky_runtime_status(self, *, issue_id: str, status: str) -> None:
         normalized_issue = str(issue_id or "").strip()
@@ -771,6 +813,13 @@ class AutonomousHealerLoop:
         )
         now = time.monotonic()
         last_run = float(getattr(self, "_last_harness_canary_at", 0.0))
+        if not force and not last_run:
+            persisted_last_run = str(self.store.get_state("healer_harness_canary_last_run_at") or "").strip()
+            if persisted_last_run:
+                elapsed_seconds = max(0.0, _minutes_since(persisted_last_run) * 60.0)
+                if elapsed_seconds < interval_seconds:
+                    self._last_harness_canary_at = max(0.0, now - elapsed_seconds)
+                    return None
         if not force and last_run and (now - last_run) < interval_seconds:
             return None
         self._last_harness_canary_at = now
@@ -4673,8 +4722,8 @@ class AutonomousHealerLoop:
         lease_lost: threading.Event,
     ) -> None:
         interval = min(
-            max(15.0, float(self.dispatcher.lease_seconds) / 2.0),
-            max(15.0, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0))),
+            max(_MIN_PULSE_INTERVAL_SECONDS, float(self.dispatcher.lease_seconds) / 2.0),
+            max(_MIN_PULSE_INTERVAL_SECONDS, float(getattr(self.settings, "healer_pulse_interval_seconds", 60.0))),
         )
         while not stop_event.wait(interval):
             renewed = self.store.renew_healer_issue_lease(
