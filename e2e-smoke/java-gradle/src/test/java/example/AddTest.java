@@ -13,5 +13,15 @@ public final class AddTest {
         if (sum3 != 9) {
             throw new AssertionError("expected 9 but got " + sum3);
         }
+
+        int positiveSum = Add.addMany(2, 3, 4);
+        if (positiveSum != 9) {
+            throw new AssertionError("expected 9 but got " + positiveSum);
+        }
+
+        int mixedSignSum = Add.addMany(-2, 3, -4);
+        if (mixedSignSum != -3) {
+            throw new AssertionError("expected -3 but got " + mixedSignSum);
+        }
     }
 }

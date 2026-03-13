@@ -7,6 +7,10 @@ public final class Add {
         return left + right;
     }
 
+    public static int addMany(int left, int right, int extra) {
+        return left + right + extra;
+    }
+
     public static int add3(int left, int right, int extra) {
         return left + right + extra;
     }
