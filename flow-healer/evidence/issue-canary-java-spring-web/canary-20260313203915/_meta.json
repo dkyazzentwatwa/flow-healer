@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "content_type": "image/png",
+      "name": "canary.png",
+      "remote_path": "flow-healer/evidence/issue-canary-java-spring-web/canary-20260313203915/canary.png"
+    },
+    {
+      "content_type": "text/plain",
+      "name": "canary-console.log",
+      "remote_path": "flow-healer/evidence/issue-canary-java-spring-web/canary-20260313203915/canary-console.log"
+    },
+    {
+      "content_type": "application/x-ndjson",
+      "name": "canary-network.jsonl",
+      "remote_path": "flow-healer/evidence/issue-canary-java-spring-web/canary-20260313203915/canary-network.jsonl"
+    }
+  ],
+  "attempt_id": "canary-20260313203915",
+  "canary": true,
+  "canary_profile": "java-spring-web",
+  "generated_at": "2026-03-13T20:40:37Z",
+  "issue_id": "canary-java-spring-web",
+  "retention_until": "2026-04-12T20:40:37Z",
+  "run_key": "canary-20260313203915"
+}
