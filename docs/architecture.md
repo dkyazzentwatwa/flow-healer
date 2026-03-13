@@ -1,5 +1,7 @@
 # Architecture
 
+This document is the short architectural overview. Use it to orient quickly, then move to [healing-state-machine.md](healing-state-machine.md) for runtime decision flow and [refactor-map.md](refactor-map.md) for future module boundaries.
+
 ## High-Level Flow
 
 ~~~text
@@ -18,29 +20,31 @@ GitHub Issues / Repo Signals <----------------------+
             v                                       |
       Autonomous Loop ------------------------------+
             |
-   Codex Connector -> Docker Test Gate -> Verifier -> Reviewer -> PR
+   Connector -> validation -> verifier -> reviewer -> PR
 ~~~
 
 ## Key Modules
 
-- `src/flow_healer/cli.py`: CLI Command entrypoint.
-- `src/flow_healer/service.py`: Multi-repo orchestration and polling.
-- `src/flow_healer/healer_loop.py`: Main control loop for issue processing, retries, and feedback ingestion.
-- `src/flow_healer/healer_scan.py`: Deterministic repository scanning for known breakage patterns.
-- `src/flow_healer/healer_tracker.py`: GitHub API adapter for issues, PRs, and comments.
-- `src/flow_healer/healer_workspace.py`: Manager for isolated git worktrees.
-- `src/flow_healer/healer_dispatcher.py`: Handles claim logic and lock acquisition for issues.
-- `src/flow_healer/healer_locks.py`: Implements path-level and coarse-grained locking.
-- `src/flow_healer/healer_runner.py`: Executes the fix proposal via the AI connector.
-- `src/flow_healer/healer_verifier.py`: Post-fix verification pass to ensure quality.
-- `src/flow_healer/healer_reviewer.py`: Generates AI-driven code reviews for proposed fixes.
-- `src/flow_healer/healer_memory.py`: Persists and retrieves lessons from prior attempts to improve future fixes.
-- `src/flow_healer/healer_reconciler.py`: Cleans up expired leases, locks, and orphan workspaces.
-- `src/flow_healer/store.py`: SQLite persistence for issues, attempts, lessons, and scans.
+- `src/flow_healer/cli.py`: CLI entrypoint
+- `src/flow_healer/service.py`: multi-repo orchestration and polling
+- `src/flow_healer/healer_loop.py`: issue processing, retries, and feedback ingestion
+- `src/flow_healer/healer_runner.py`: prompt assembly, execution-root resolution, and validation orchestration
+- `src/flow_healer/healer_task_spec.py`: issue-body parsing and task-contract extraction
+- `src/flow_healer/healer_tracker.py`: GitHub issues, PRs, comments, and artifact publishing
+- `src/flow_healer/healer_workspace.py`: isolated git worktree management
+- `src/flow_healer/healer_verifier.py`: post-fix verification and evidence checks
+- `src/flow_healer/store.py`: SQLite persistence
+- `apps/dashboard/` and `src/flow_healer/web_dashboard.py`: modern and legacy operator surfaces
 
 ## Design Notes
 
-- **Isolation**: Work is isolated per issue in dedicated git worktrees.
-- **Safety**: Retry budgets, backoff, and circuit-breaker behavior reduce repeated unsafe attempts.
-- **Iterative Healing**: PR feedback (comments from human reviewers) is monitored and incorporated into the `feedback_context` for subsequent healing attempts.
-- **Stateful**: Durable state is maintained in SQLite to allow recovery across restarts.
+- Isolation is per issue via dedicated worktrees.
+- Runtime behavior is stateful and restart-safe because queue, attempt, lock, and event state lives in SQLite.
+- Verification is lane-aware rather than repo-global by default.
+- Browser-backed tasks may also require artifact completeness, not just passing tests.
+
+## Read Next
+
+- [healing-state-machine.md](healing-state-machine.md): claim, preflight, propose, validate, verify, PR, retry, quarantine
+- [runtime-state.md](runtime-state.md): queue states, attempts, locks, and safe reset boundaries
+- [refactor-map.md](refactor-map.md): hotspots, target seams, extraction order, and non-goals

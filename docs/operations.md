@@ -1,10 +1,19 @@
 # Operations
 
-## Split Service Cutover (Apple Flow + Flow Healer)
+This runbook covers live-service operation, maintenance, and recovery. It intentionally links out to the canonical docs for runtime-state semantics, evidence rules, and connector behavior instead of redefining them here.
 
-Use this runbook when both daemons must stay always-on while remaining fully isolated (separate launch labels, DB roots, logs, and working directories).
+## Canonical Companions
 
-### 1) Backup DBs
+- [runtime-state.md](runtime-state.md): queue states, attempts, locks, safe reset guidance
+- [connectors.md](connectors.md): backend routing, timeout, and fallback behavior
+- [evidence-contract.md](evidence-contract.md): artifact completeness and when missing evidence blocks completion
+- [healing-state-machine.md](healing-state-machine.md): how the runtime moves from claim to retry, quarantine, or PR
+
+## Split Service Cutover
+
+Use this runbook when Apple Flow and Flow Healer must stay always-on while remaining fully isolated with separate launch labels, DB roots, logs, and working directories.
+
+### 1. Back up state
 
 ~~~bash
 mkdir -p ~/.apple-flow/backups ~/.flow-healer/backups
@@ -12,45 +21,25 @@ cp -av ~/Documents/code/codex-flow/data/relay.db ~/.apple-flow/backups/relay.db.
 cp -av ~/.flow-healer/repos/flow-healer-self/state.db ~/.flow-healer/backups/flow-healer-self.state.$(date +%Y%m%d%H%M%S).bak || true
 ~~~
 
-### 2) Stop both services
+### 2. Stop both services
 
 ~~~bash
 launchctl stop local.flow-healer || true
 launchctl stop local.apple-flow || true
 ~~~
 
-### 3) Apple Flow DB migration
+### 3. Ensure launch config separation
 
-~~~bash
-mkdir -p ~/.apple-flow
-cp -av ~/Documents/code/codex-flow/data/relay.db ~/.apple-flow/relay.db
-~~~
-
-Set Apple Flow env to prevent healer ownership drift:
-
-~~~bash
-perl -0pi -e 's/^apple_flow_enable_autonomous_healer=.*/apple_flow_enable_autonomous_healer=false/m' ~/Documents/code/codex-flow/.env
-perl -0pi -e 's/^apple_flow_enable_healer_scheduled_scans=.*/apple_flow_enable_healer_scheduled_scans=false/m' ~/Documents/code/codex-flow/.env
-perl -0pi -e 's|^apple_flow_db_path=.*|apple_flow_db_path=/Users/cypher-server/.apple-flow/relay.db|m' ~/Documents/code/codex-flow/.env
-~~~
-
-### 4) Ensure Flow Healer launch config is explicit
-
-`local.flow-healer.plist` should include:
+`local.flow-healer.plist` should use:
 
 - `Label`: `local.flow-healer`
-- `WorkingDirectory`: `/Users/cypher-server/Documents/code/flow-healer`
-- `ProgramArguments`: `/Users/cypher-server/Documents/code/flow-healer/.venv/bin/python -m flow_healer.cli --config /Users/cypher-server/.flow-healer/config.yaml start`
-- `EnvironmentVariables.PYTHONPATH`: `/Users/cypher-server/Documents/code/flow-healer/src`
-- `StandardErrorPath` / `StandardOutPath` under `~/.flow-healer/`
+- `WorkingDirectory`: the Flow Healer repo root
+- `ProgramArguments`: the Flow Healer CLI entrypoint
+- stdout and stderr paths under `~/.flow-healer/`
 
-`local.apple-flow.plist` should include:
+`local.apple-flow.plist` should use its own repo root and log paths under `~/.apple-flow/`.
 
-- `Label`: `local.apple-flow`
-- `WorkingDirectory`: `/Users/cypher-server/Documents/code/codex-flow`
-- stdout/stderr paths under `~/.apple-flow/logs/`
-
-### 5) Start and enable boot/login persistence
+### 4. Start and verify
 
 ~~~bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.apple-flow.plist 2>/dev/null || true
@@ -59,214 +48,76 @@ launchctl enable gui/$(id -u)/local.apple-flow
 launchctl enable gui/$(id -u)/local.flow-healer
 launchctl start local.apple-flow
 launchctl start local.flow-healer
-~~~
-
-### 5a) Optional nightly helper recycle
-
-To recycle Flow Healer helper subprocesses without taking down the parent daemon, add a separate LaunchAgent:
-
-- `Label`: `local.flow-healer.recycle-helpers`
-- `ProgramArguments`: `/Users/cypher-server/Documents/code/flow-healer/.venv/bin/python -m flow_healer.cli --config /Users/cypher-server/.flow-healer/config.yaml recycle-helpers --idle-only`
-- `WorkingDirectory`: `/Users/cypher-server/Documents/code/flow-healer`
-- `StartCalendarInterval`: `Hour=3`, `Minute=0`
-- `StandardErrorPath`: `~/.flow-healer/recycle-helpers.err`
-- `StandardOutPath`: `~/.flow-healer/recycle-helpers.out`
-
-After shipping code that adds the recycle handler, restart the main `local.flow-healer` agent once during an idle window so the live daemon loads the new logic:
-
-~~~bash
-launchctl kickstart -k gui/$(id -u)/local.flow-healer
-~~~
-
-The continuous `start` command now boots the same always-on runtime as `serve`, so the web dashboard should be available whenever `local.flow-healer` is running.
-
-### 6) Clear stale running attempts
-
-If an issue remains `running` after daemon restart, requeue expired leases:
-
-~~~bash
-sqlite3 ~/.flow-healer/repos/flow-healer-self/state.db "UPDATE healer_issues SET state='queued', lease_owner=NULL, lease_expires_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE state='running' AND lease_expires_at <= CURRENT_TIMESTAMP;"
-~~~
-
-### 7) Verify separation
-
-~~~bash
 scripts/diagnose_runtime.sh ~/.flow-healer/config.yaml flow-healer-self
 scripts/verify_runtime.sh ~/.flow-healer/config.yaml flow-healer-self
 flow-healer --config ~/.flow-healer/config.yaml doctor --repo flow-healer-self
 flow-healer --config ~/.flow-healer/config.yaml status --repo flow-healer-self
 ~~~
 
-### 7a) Repo identity cutover
-
-If a live daemon is still writing to `~/.flow-healer/repos/flow-healer/state.db` while the canonical config repo name is `flow-healer-self`, migrate the active state before resuming normal operations:
-
-~~~bash
-python scripts/migrate_repo_state.py \
-  --source-db ~/.flow-healer/repos/flow-healer/state.db \
-  --target-db ~/.flow-healer/repos/flow-healer-self/state.db \
-  --source-repo-name flow-healer \
-  --target-repo-name flow-healer-self
-~~~
-
-After migration, update `~/.flow-healer/config.yaml` so the repo entry name is `flow-healer-self`, then restart `local.flow-healer`.
-
 ## Workspace Reconciliation
 
-The reconciler runs at the start of every tick and sweeps any workspace directory not associated with an active issue in the `healer_issues` table.
+The reconciler sweeps workspace directories that are no longer associated with an active issue.
 
 ~~~bash
 flow-healer start --once
 ~~~
 
+Use [runtime-state.md](runtime-state.md) before manually clearing issue state, leases, or locks.
+
 ## Failure Recovery
 
-When a healing attempt ends with `no_patch` or `verifier_failed`, handle it as an operational incident and recover predictably:
+When a healing attempt ends with `no_patch`, `verifier_failed`, `baseline_validation_blocked`, or another incident-class failure:
 
 1. Identify the failing issue and inspect the last failure record.
-2. Correct any environmental precondition (dependencies, flaky tests, temporary repo issues) that blocked the patch/verification.
-3. Re-run a single pass so the same issue re-enters the queue and gets one immediate retry.
+2. Determine whether the blocker is runtime, issue-contract, evidence, or lane-specific.
+3. Fix the underlying blocker before rerunning a controlled pass.
 
 ~~~bash
-sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT issue_id, attempt_id, failure_reason, failure_details, started_at FROM healer_attempts WHERE failure_reason IN ('no_patch', 'verifier_failed') ORDER BY started_at DESC LIMIT 10;"
-~~~
-
-~~~bash
+sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT issue_id, attempt_id, failure_reason, failure_details, started_at FROM healer_attempts ORDER BY started_at DESC LIMIT 10;"
 flow-healer start --once --repo demo
 ~~~
 
-### PR-open failures
+Use [agent-remediation-playbook.md](agent-remediation-playbook.md) for repeated-failure doctrine. Use [lane-guides/README.md](lane-guides/README.md) when the failure belongs to a specific fixture or browser app family.
 
-When an attempt reaches `pr_open_failed`, the patch and push steps already succeeded and the failure happened while calling the GitHub issue or pull request API. Start by confirming the repo is healthy and capturing the latest GitHub-side error signal:
+## PR-Open Failures
+
+When an attempt reaches `pr_open_failed`, the patch and push steps already succeeded and the failure happened while talking to GitHub.
 
 ~~~bash
 flow-healer doctor --repo demo
-~~~
-
-~~~bash
 sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT issue_id, failure_class, failure_reason, started_at FROM healer_attempts WHERE failure_class = 'pr_open_failed' ORDER BY started_at DESC LIMIT 10;"
 ~~~
 
-If the latest attempt also recorded a connector GitHub error, inspect the cached runtime state:
+Common next checks:
 
-~~~bash
-sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT key, value FROM healer_state WHERE key IN ('healer_connector_last_error_class', 'healer_connector_last_error_reason') ORDER BY key;"
-~~~
+- auth or token drift
+- repository permissions or branch protection
+- stale or duplicate PR state
+- transient GitHub API or network errors
 
-Use the following triage path for the most common root causes.
-
-#### `github_auth_missing`
-
-Use this path when `flow-healer doctor` reports `github_token_present` as false, the service environment lost the configured token, or the last error reason shows authentication or permission failures such as `401`, `403`, or `Bad credentials`.
-
-1. Confirm which token variable the service expects from `doctor` output under `github_token_env`.
-2. Export or restore that variable in the runtime environment used by the service or launch agent.
-3. If the token exists but PR creation still fails, replace it with a token that can read the repo, push branches, and open pull requests for the target repository.
-4. Re-run `flow-healer doctor --repo demo` and confirm `github_token_present` is true before retrying the queue.
-
-~~~bash
-flow-healer start --once --repo demo
-~~~
-
-#### `github_api_error`
-
-Use this path when the cached error class is `github_api_error` or the failure reason mentions GitHub returning `403`, `422`, `500`, `502`, `503`, or `504`.
-
-1. Read the stored `healer_connector_last_error_reason` value to capture the exact GitHub response.
-2. For `403`, check for branch protection, missing repository permissions, or temporary abuse or rate-limit responses.
-3. For `422`, inspect whether the managed branch already has an open pull request, the base branch is invalid, or the PR payload became stale.
-4. For `5xx`, treat the incident as transient and retry after the service backoff window.
-5. If the error persists across retries, pause automation for that repo until credentials or repository policy are corrected.
-
-~~~bash
-flow-healer status --repo demo
-~~~
-
-#### `github_network_error`
-
-Use this path when the cached error class is `github_network_error` or the last error reason shows `URLError`, DNS resolution failure, TLS handshake failure, or connection timeout.
-
-1. Verify general outbound connectivity from the host running Flow Healer.
-2. Check whether `https://api.github.com` is reachable from that environment and whether any proxy, VPN, or firewall rule changed.
-3. If the service runs under `launchd`, compare the `launchd_path` and `launchd_path_has_connector` fields from `doctor` with the interactive shell environment to catch path or networking drift.
-4. Retry one controlled pass after connectivity is restored.
-
-~~~bash
-flow-healer start --once --repo demo
-~~~
-
-If none of the three paths explain the failure, preserve the `healer_connector_last_error_reason` value and the matching `healer_attempts` row in the incident notes before deeper debugging.
+Connector failure-class semantics are documented in [connectors.md](connectors.md).
 
 ## Common Issues
 
-### "Docker not available"
+### Docker not available
 
-**Symptom**: Test gate fails with "Docker not available" or "exec: docker: not found"
+For Python or Node repos without usable local toolchains, configure Docker-only mode where the lane supports it:
 
-**Solution**: Ensure Docker is running and accessible. For Python or Node repos without usable local toolchains, configure Docker-only mode:
-
-```yaml
+~~~yaml
 repos:
   - name: my-project
     test_gate_mode: docker_only
     local_gate_policy: skip
-```
+~~~
 
 ### Local toolchain missing
 
-**Symptom**: Tests fail because the local Python, Node.js, or Swift toolchain is unavailable or broken.
+Repair the local toolchain for Swift, Go, Rust, Ruby, and Java lanes because those families do not currently rely on Docker fallback in the main model.
 
-**Solution**:
+### Missing evidence artifacts
 
-- For Python or Node, use `docker_only` to skip local testing entirely.
-- For Swift, repair the local toolchain and use `local_only` or `local_then_docker` because Swift does not support Docker gates.
-
-```yaml
-repos:
-  - name: node-project
-    test_gate_mode: docker_only
-    local_gate_policy: skip
-    language: node
-```
-
-### Docker image pull failure
-
-**Symptom**: "Unable to find image" or network timeout during Docker operations
-
-**Solution**:
-1. Check Docker is running: `docker ps`
-2. Pull the image manually: `docker pull node:20-slim`
-3. Verify network connectivity to Docker Hub
-
-### Test command timeout
-
-**Symptom**: Tests hang or timeout during Docker execution
-
-**Solution**: Increase `connector_timeout_seconds` in config:
-
-```yaml
-service:
-  connector_timeout_seconds: 600
-```
+If the UI looks correct but verification still fails, check whether the exact named evidence files were published. The artifact naming and completeness rules live in [evidence-contract.md](evidence-contract.md).
 
 ## Monitoring
 
-`flow-healer status --repo <repo>` now includes three high-value reliability surfaces:
-
-- `retry_playbook_metrics`: retry strategy volume, dominant failure domain, and last selected playbook details.
-- `reliability_trends`: `7d` and `30d` windows with current vs previous-window deltas.
-- `reliability_daily_rollups`: per-day reliability summaries for quick regression spotting.
-
-When retry behavior drifts, start with `retry_playbook_metrics.dominant_domain` and `top_failure_classes` to decide whether to tune contract prompts, infra preflight, or code-focused retries.
-
-Check healer status:
-
-~~~bash
-flow-healer status --repo demo
-~~~
-
-Review recent attempts:
-
-~~~bash
-sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT issue_id, status, failure_reason, started_at FROM healer_attempts ORDER BY started_at DESC LIMIT 20;"
-~~~
+`flow-healer status --repo <repo>` includes high-value reliability surfaces such as retry metrics, reliability trends, and daily rollups. Interpret those signals together with [runtime-state.md](runtime-state.md) and [healing-state-machine.md](healing-state-machine.md) before changing retry behavior or queue policy.

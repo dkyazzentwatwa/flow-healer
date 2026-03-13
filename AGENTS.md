@@ -1,19 +1,88 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-Core Python code lives in `src/flow_healer/`. The CLI entry point is [`src/flow_healer/cli.py`](src/flow_healer/cli.py), while service orchestration, scanning, tracking, locks, and SQLite state handling are split into focused modules such as `service.py`, `healer_loop.py`, and `store.py`. Tests live in `tests/` and mirror the module layout with files like `test_healer_runner.py` and `test_healer_scan.py`. Use `config.example.yaml` as the template for local configuration; keep machine-specific secrets and repo paths out of version control.
+Flow Healer is an issue-to-PR automation service with durable runtime state, lane-aware validation, browser evidence requirements, and both CLI and dashboard operator surfaces. If you are picking this repo up quickly, do not start by inferring behavior from scattered plans or recent commits. Start from the canonical docs below.
 
-## Fast Handoff For New Agents
-Current work has been focused on prompt reliability and issue-driven execution routing. If you need to pick up quickly, start with these files:
+## Canonical Sources Of Truth
 
-- `src/flow_healer/healer_task_spec.py`: parses issue title/body into task kind, output targets, input-only context, language hints, execution root, and validation commands.
-- `src/flow_healer/healer_runner.py`: assembles the proposer prompt, resolves effective language and execution root, stages model output, and runs validation gates.
-- `src/flow_healer/language_detector.py` and `src/flow_healer/language_strategies.py`: repo-level language detection plus per-language local/docker test commands.
-- `tests/test_healer_task_spec.py`, `tests/test_healer_runner.py`, and `tests/e2e/test_flow_healer_e2e.py`: the clearest source of truth for intended issue-body formats and mixed-language sandbox behavior.
+Read these first when the work touches the matching area:
 
-The current prompt-improvement direction is low-risk cleanup, not a connector redesign. Keep the existing `codex exec` flow, but make prompt sections clearer, reduce duplicated instructions, and tighten task-specific execution rules.
+- [docs/README.md](docs/README.md): canonical documentation index
+- [docs/issue-contracts.md](docs/issue-contracts.md): issue-body semantics, mutation scope, runtime-profile fields, evidence fields, `browser_repro_mode`
+- [docs/healing-state-machine.md](docs/healing-state-machine.md): claim-to-resolution runtime flow
+- [docs/runtime-state.md](docs/runtime-state.md): SQLite tables, attempts, queue states, locks, safe resets
+- [docs/evidence-contract.md](docs/evidence-contract.md): artifact completeness and browser-evidence rules
+- [docs/dashboard.md](docs/dashboard.md): Next dashboard vs legacy Python dashboard, routes, and safe control-plane boundaries
+- [docs/lane-guides/README.md](docs/lane-guides/README.md): lane-safe editing rules for `e2e-smoke/` and `e2e-apps/`
+- [docs/agent-remediation-playbook.md](docs/agent-remediation-playbook.md): repeated-failure doctrine
+- [docs/test-strategy.md](docs/test-strategy.md): which test to add when behavior changes or escapes
 
-## Build, Test, and Development Commands
+Historical planning docs under [docs/plans/](docs/plans/) and [docs/archive/README.md](docs/archive/README.md) are reference material only. They are not the authority for current behavior.
+
+## Fast Orientation
+
+If you need to build context in code after reading the docs, start here:
+
+- `src/flow_healer/healer_task_spec.py`: parses issue title and body into task kind, outputs, input-only context, execution root, runtime profile, evidence requirements, and validation commands
+- `src/flow_healer/healer_runner.py`: assembles the proposer prompt, stages connector output, runs validation, and enforces scope and evidence rules
+- `src/flow_healer/healer_loop.py`: queue claiming, retry handling, quarantine, clarification flow, and orchestration
+- `src/flow_healer/store.py`: durable SQLite state and migration-backed persistence
+- `tests/test_healer_task_spec.py`, `tests/test_healer_runner.py`, `tests/test_healer_loop.py`: executable source of truth for issue-contract and runtime behavior
+
+## Documentation-First Rules
+
+- If a runtime, contract, lane, evidence, or dashboard behavior changes, update the corresponding canonical doc in the same change.
+- Do not leave new semantics documented only in a plan doc, issue comment, or commit message.
+- If you discover a repeated failure pattern caused by missing documentation, add or tighten the doc before teaching the connector a one-off workaround.
+- Keep `README.md` high-level. Put operating semantics in `docs/`.
+
+## Contract-First Issue Handling
+
+- Treat [docs/issue-contracts.md](docs/issue-contracts.md) as authoritative for issue-body parsing and semantics.
+- Use `Required code outputs` to define the intended mutation scope.
+- Use `input-only context` for reference files that should not become output targets.
+- Keep `Validation` scoped to the execution root actually owned by the issue.
+- For constructive browser tasks that may already pass before mutation, use `browser_repro_mode: allow_success`.
+- If an issue body is ambiguous, fix the contract or open a clarification path instead of encoding a fragile heuristic.
+
+## Dashboard And Control-Plane Rules
+
+- Read [docs/dashboard.md](docs/dashboard.md) before touching `apps/dashboard/` or `src/flow_healer/web_dashboard.py`.
+- Treat UI-only edits differently from control-plane edits. If a change affects route data loading, dashboard proxy behavior, runtime status surfaces, or artifact/control semantics, update the canonical docs in the same change.
+- Do not treat browser-app fixture changes as dashboard changes; app-backed sandboxes belong to the lane guides.
+
+## Lane-Safe Editing Rules
+
+- Read the relevant guide in [docs/lane-guides/README.md](docs/lane-guides/README.md) before editing anything under `e2e-smoke/` or `e2e-apps/`.
+- Keep work inside the declared execution root unless the runner explicitly widens scope for a safe baseline blocker.
+- Do not widen scope manually just because validation is red. First determine whether the failure is baseline, harness, contract, or lane-specific.
+- Browser-backed app targets follow [docs/lane-guides/browser-apps.md](docs/lane-guides/browser-apps.md); fixture lanes follow their family guide.
+
+## Evidence And Runtime-State Rules
+
+- Read [docs/evidence-contract.md](docs/evidence-contract.md) before changing browser harness behavior, artifact publishing, or evidence verification.
+- Read [docs/runtime-state.md](docs/runtime-state.md) before changing queue states, lease handling, retries, locks, migrations, or SQLite resets.
+- Missing named artifact outputs are real blockers for browser-evidence issues even when the UI looks correct.
+- Do not ad hoc rename artifacts, reinterpret queue states, or clear state blindly.
+
+## Remediation Doctrine
+
+- When the system fails repeatedly, prefer docs, contracts, tests, fixtures, or guardrails before adding connector cleverness.
+- If a lane fails because the issue contract is weak, strengthen the issue contract and parser examples.
+- If a runtime edge keeps escaping, add the missing invariant and regression test.
+- If a fixture or browser app has repeated baseline blockers, document the lane and add the smallest safe guardrail that prevents blind retries.
+- Use [docs/agent-remediation-playbook.md](docs/agent-remediation-playbook.md) as the operating doctrine for repeated failure handling.
+
+## Project Structure
+
+- `src/flow_healer/`: core Python runtime
+- `tests/`: pytest suites that mirror runtime modules
+- `apps/dashboard/`: modern Next dashboard
+- `e2e-smoke/`: fixture lanes for language and framework smoke coverage
+- `e2e-apps/`: browser-backed app targets and richer app fixtures
+- `docs/`: canonical and supporting documentation
+
+## Build, Test, And Development Commands
+
 Create a local environment and install in editable mode:
 
 ```bash
@@ -22,119 +91,46 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 ```
 
-Run the full test suite with `pytest`. Run a focused test with `pytest tests/test_healer_loop.py -v`. Smoke-test the CLI with `flow-healer doctor` or a one-pass run via `flow-healer start --once`. Use `flow-healer scan --dry-run` when you want to inspect scan behavior without opening issues.
-
-### High-Value Focused Tests
-When working on issue parsing, prompt assembly, or language-aware validation, prefer these targeted test slices before running the whole suite:
+High-value focused tests:
 
 ```bash
 pytest tests/test_healer_task_spec.py -v
 pytest tests/test_healer_runner.py -v
+pytest tests/test_healer_loop.py -v
 pytest tests/e2e/test_flow_healer_e2e.py -k mixed_repo_sandbox -v
 ```
 
-These cover:
-
-- issue-body parsing into language, execution root, and validation commands
-- prompt contract rendering and proposer instructions
-- end-to-end issue-scoped language routing in mixed-language sandbox repos
-
-## Coding Style & Naming Conventions
-Follow existing Python style: 4-space indentation, `snake_case` for functions and modules, `PascalCase` for classes, and explicit type hints on public methods. Keep modules small and responsibility-driven, matching the current pattern of one concern per file. Prefer standard-library tools, `dataclass(slots=True)` where it improves clarity, and short docstrings only when behavior is not obvious. No formatter or linter is configured yet, so keep changes PEP 8-compliant and consistent with neighboring code.
-
-## Testing Guidelines
-Tests use `pytest` with discovery rooted at `tests/`. Name files `test_*.py` and test functions `test_*`. Add or update tests alongside any behavior change, especially around CLI commands, repo state transitions, and scanner or tracker logic. Favor small fake objects and fixtures, following `tests/conftest.py`.
-
-## GitHub Issue Format For Language Tests
-Flow Healer can infer execution root and language directly from the GitHub issue body. This is the fastest way to drive language-specific runs, especially in mixed-language repos or `e2e-smoke/` sandboxes.
-
-Use this pattern in issues:
-
-```md
-Required code outputs:
-- e2e-smoke/node/src/add.js
-- e2e-smoke/node/test/add.test.js
-
-Validation:
-- cd e2e-smoke/node && npm test -- --passWithNoTests
-```
-
-Important behaviors:
-
-- The required trigger label is `healer:ready` unless the repo config overrides `issue_required_labels`.
-- Issue-scoped language hints beat repo-wide `language` config when the issue body clearly points at a language or validation command.
-- `Validation:` lines are parsed for commands like `pytest`, `npm test`, `go test`, `cargo test`, `mvn test`, `./gradlew test`, and `bundle exec rspec`.
-- Paths under `e2e-smoke/<language>/...` also help infer the execution root and language.
-- Targeted test inference currently matters most for Python and Ruby. Other languages usually run the full configured validation command.
-- If you want a repo file treated as reference material instead of an output target, mark it as input-only context in the issue body.
-
-Useful issue-body examples:
-
-```md
-Fix the bug in e2e-smoke/ruby/add.rb and keep the sandbox green.
-Validation: cd e2e-smoke/ruby && bundle exec rspec
-```
-
-```md
-Required code outputs:
-- e2e-smoke/java-gradle/src/main/java/example/App.java
-
-Validation:
-- cd e2e-smoke/java-gradle && ./gradlew test --no-daemon
-```
-
-## GH CLI Workflow
-Prefer `gh` for creating, inspecting, and relabeling issues that should drive Flow Healer.
-
-Inspect an issue before making assumptions:
+Doc and contract validation:
 
 ```bash
-gh issue view <number> --json title,body,labels
+python scripts/validate_repro_contract_examples.py
+python scripts/check_harness_doc_drift.py
 ```
 
-List candidate issues waiting for the healer:
+CLI smoke:
 
 ```bash
-gh issue list --label healer:ready --state open
+flow-healer doctor
+flow-healer start --once
+flow-healer status
 ```
 
-Create a healer-ready issue directly from the terminal:
-
-```bash
-gh issue create \
-  --title "Node sandbox regression" \
-  --label healer:ready \
-  --body $'Required code outputs:\n- e2e-smoke/node/src/add.js\n- e2e-smoke/node/test/add.test.js\n\nValidation:\n- cd e2e-smoke/node && npm test -- --passWithNoTests\n'
-```
-
-Add approval when a repo requires issue-side approval labels:
-
-```bash
-gh issue edit <number> --add-label healer:pr-approved
-```
-
-After editing or creating an issue, run one controlled pass:
-
-```bash
-flow-healer start --repo <repo-name> --once
-flow-healer status --repo <repo-name>
-```
-
-If you are debugging issue parsing, compare the issue body against the expectations in `tests/test_healer_task_spec.py` and `tests/e2e/test_flow_healer_e2e.py` before changing code.
-
-## Branch & Workspace Hygiene
-When working alongside Flow Healer, keep human and healer changes separated so branch state stays predictable.
+## Branch And Workspace Hygiene
 
 - Let healer-managed issue work stay on `healer/issue-*` branches and worktrees.
-- Do your human changes on a normal branch based on `origin/main`.
-- Do not edit inside `.apple-flow-healer/` unless you are specifically debugging healer internals or a broken worktree.
-- When an issue PR merges, prefer `git worktree remove <path>` or the reconciler's normal cleanup over manual deletion.
-- Do not `rm -rf` valid healer worktrees; only remove them manually if they are already stale or corrupt.
-- Periodically clean up stale remote `healer/issue-*` branches after merge if they accumulate.
-- Before rebasing or pulling from `origin/main`, make sure `git status` is clean or that any remaining changes are intentionally staged or stashed.
+- Keep human changes on a normal branch based on `origin/main`.
+- Do not edit inside `.apple-flow-healer/` unless you are explicitly debugging healer internals or a broken worktree.
+- Before rebasing or pulling from `origin/main`, make sure `git status` is clean or any remaining changes are intentionally staged or stashed.
 
-## Commit & Pull Request Guidelines
-This repository currently has no commit history, so use Conventional Commit-style messages such as `feat: add repo health check` or `fix: close store after scan`. Keep pull requests small and reviewable. Include a short summary, test evidence (`pytest`, CLI smoke commands), linked issues, and terminal output or screenshots when changing user-visible CLI behavior.
+## Commit And Review Expectations
 
-## Security & Configuration Tips
-Do not commit tokens, local repo paths, or generated state. Store GitHub credentials in environment variables such as `GITHUB_TOKEN`, and keep runtime data under `~/.flow-healer/` as intended by the sample config.
+- Use Conventional Commit-style messages such as `docs: add runtime-state canon` or `fix: widen safe baseline blockers`.
+- Keep pull requests small enough to review.
+- Include test evidence for runtime changes and doc-validation output for documentation overhauls.
+- When behavior changes, mention which canonical docs were updated alongside the code.
+
+## Security And Config
+
+- Do not commit tokens, local repo paths, or generated state.
+- Store GitHub credentials in environment variables such as `GITHUB_TOKEN`.
+- Keep runtime data under `~/.flow-healer/` as intended by the sample config.
