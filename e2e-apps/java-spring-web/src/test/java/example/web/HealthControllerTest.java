@@ -6,6 +6,7 @@ public class HealthControllerTest {
         loginFormRendersDeterministicEvidenceMarker();
         loginEndpointIssuesCookieBackedSession();
         loginEndpointFallsBackForBlankEmailInput();
+        loginEndpointFallsBackForMalformedEmailInput();
         dashboardRendersFixtureCookieIdentity();
     }
 
@@ -38,6 +39,15 @@ public class HealthControllerTest {
             response.headers().get("Set-Cookie"),
             "healer_session=admin@example.com",
             "blank email cookie fallback"
+        );
+    }
+
+    private static void loginEndpointFallsBackForMalformedEmailInput() {
+        ResponsePlan response = new LoginController().createSession("seeded-admin@example.com\nSet-Cookie:admin\n");
+        assertContains(
+            response.headers().get("Set-Cookie"),
+            "healer_session=admin@example.com",
+            "malformed email cookie fallback"
         );
     }
 

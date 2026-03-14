@@ -1,8 +1,11 @@
 package example.web;
 
 public class LoginController {
+    private static final String ANONYMOUS_SESSION_USER = "anonymous";
+    private static final String DEFAULT_SESSION_EMAIL = "admin@example.com";
+
     public ResponsePlan loginForm(String sessionUser) {
-        String fixtureProfile = (sessionUser == null || sessionUser.isBlank()) ? "anonymous" : sessionUser;
+        String fixtureProfile = resolveSessionUser(sessionUser, ANONYMOUS_SESSION_USER);
         return ResponsePlan.html(
             200,
             """
@@ -19,8 +22,7 @@ public class LoginController {
     }
 
     public ResponsePlan createSession(String email) {
-        String normalizedEmail = email == null ? "" : email.trim();
-        String resolvedEmail = normalizedEmail.isEmpty() ? "admin@example.com" : normalizedEmail;
+        String resolvedEmail = resolveSessionUser(email, DEFAULT_SESSION_EMAIL);
         return ResponsePlan.redirect("/dashboard")
             .withHeader("Set-Cookie", "healer_session=" + resolvedEmail + "; Path=/; SameSite=Lax");
     }
@@ -28,6 +30,17 @@ public class LoginController {
     public ResponsePlan destroySession() {
         return ResponsePlan.redirect("/login")
             .withHeader("Set-Cookie", "healer_session=; Path=/; Max-Age=0");
+    }
+
+    private static String resolveSessionUser(String rawSessionUser, String defaultValue) {
+        if (rawSessionUser == null || rawSessionUser.isBlank()) {
+            return defaultValue;
+        }
+        String trimmedSessionUser = rawSessionUser.trim();
+        if (!trimmedSessionUser.matches("[A-Za-z0-9._%+-@]+")) {
+            return defaultValue;
+        }
+        return trimmedSessionUser;
     }
 
     private static String escapeHtml(String raw) {
