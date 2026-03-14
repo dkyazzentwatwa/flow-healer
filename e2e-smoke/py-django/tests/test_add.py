@@ -32,6 +32,16 @@ def test_add_accepts_numeric_string_wrappers_with_broken_int_conversion() -> Non
     assert add(DjangoBoundaryValue("2"), DjangoBoundaryValue("3")) == 5
 
 
+def test_add_accepts_whitespace_padded_integer_strings() -> None:
+    assert add(" 2 ", "\n3\t") == 5
+
+
+@pytest.mark.parametrize("a, b", [("", "3"), ("2", " "), ("\t", "\n")])
+def test_add_rejects_blank_string_operands(a: str, b: str) -> None:
+    with pytest.raises(TypeError, match="blank string operands are not allowed"):
+        add(a, b)
+
+
 def test_add_rejects_boolean_operands() -> None:
     with pytest.raises(TypeError):
         add(True, 2)
