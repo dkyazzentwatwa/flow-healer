@@ -19,7 +19,16 @@ function addMany(...operands) {
   return total;
 }
 
+function unwrapValue(value) {
+  while (value && typeof value === 'object' && 'value' in value) {
+    value = value.value;
+  }
+
+  return value;
+}
+
 function normalizeFiniteNumber(value) {
+  value = unwrapValue(value);
   if (typeof value === 'string') {
     const trimmed = value.trim();
 
