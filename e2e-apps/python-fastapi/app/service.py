@@ -115,11 +115,13 @@ class TodoService:
         if not isinstance(todo_id, str):
             raise KeyError(TODO_NOT_FOUND)
 
-        normalized_id = todo_id.strip()
+        normalized_id = TodoService._normalize_todo_id(todo_id)
         if not normalized_id:
             raise KeyError(TODO_NOT_FOUND)
 
         existing = self._repository.get(normalized_id)
+        if existing is None:
+            existing = self._find_record_by_normalized_id(normalized_id)
         if existing is None:
             raise KeyError(TODO_NOT_FOUND)
         if not existing.completed or self._is_missing_timestamp(existing.completed_at):
@@ -131,7 +133,7 @@ class TodoService:
     @staticmethod
     def _to_item(record: TodoRecord) -> TodoItem:
         return TodoItem(
-            id=record.id,
+            id=TodoService._normalize_todo_id(record.id),
             title=record.title,
             completed=record.completed,
             completed_at=record.completed_at,
@@ -140,6 +142,12 @@ class TodoService:
     @staticmethod
     def _is_missing_timestamp(value: object) -> bool:
         return not isinstance(value, str) or not value.strip()
+
+    def _find_record_by_normalized_id(self, normalized_id: str) -> TodoRecord | None:
+        for row in self._repository.list_all():
+            if TodoService._normalize_todo_id(row.id) == normalized_id:
+                return row
+        return None
 
     def _compute_next_id(self) -> int:
         next_id = 1
@@ -150,3 +158,18 @@ class TodoService:
                 continue
             next_id = max(next_id, numeric_id + 1)
         return next_id
+
+    @staticmethod
+    def _normalize_todo_id(value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        unsigned = raw[1:] if raw.startswith("+") else raw
+        candidate = unsigned.lstrip("-")
+        if candidate and candidate.isdigit():
+            try:
+                numeric = int(unsigned)
+            except ValueError:
+                return unsigned
+            return str(numeric)
+        return unsigned
