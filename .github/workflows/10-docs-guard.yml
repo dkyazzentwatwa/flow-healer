@@ -1,0 +1,88 @@
+name: 10 Docs Guard
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "apps/**"
+      - "e2e-apps/**"
+      - "e2e-smoke/**"
+      - ".github/workflows/**"
+      - "docs/**"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-guard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  docs-guard:
+    name: docs-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine changed files
+        id: changed
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --name-only origin/${{ github.base_ref }}...HEAD > changed-files.txt
+          else
+            git diff --name-only HEAD^ HEAD > changed-files.txt || true
+          fi
+          cat changed-files.txt
+
+      - name: Validate documentation coverage
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+
+          changed = Path("changed-files.txt").read_text().splitlines()
+          changed_set = set(changed)
+
+          failures = []
+
+          def changed_under(prefix: str) -> bool:
+              return any(p.startswith(prefix) for p in changed_set)
+
+          def changed_matches(parts):
+              return any(any(part in p for part in parts) for p in changed_set)
+
+          def require_doc(doc_path: str, reason: str):
+              if not Path(doc_path).exists():
+                  failures.append(f"{reason}: required doc missing: {doc_path}")
+
+          if changed_under("apps/dashboard/"):
+              require_doc("docs/dashboard.md", "dashboard code changed")
+
+          if changed_matches(["connector", "codex_cli_connector", "codex_app_server_connector", "cline_connector", "claude_cli_connector", "kilo_cli_connector"]):
+              require_doc("docs/connectors.md", "connector surface changed")
+
+          if changed_matches(["healer_task_spec.py", "healer_runner.py", "healer_loop.py"]):
+              require_doc("docs/issue-contracts.md", "core issue/task contract logic changed")
+              require_doc("docs/healing-state-machine.md", "core orchestration logic changed")
+
+          if changed_under("e2e-apps/node-next/") or changed_under("e2e-apps/ruby-rails-web/") or changed_under("e2e-apps/java-spring-web/") or changed_under("e2e-smoke/"):
+              require_doc("docs/evidence-contract.md", "lane/evidence surface changed")
+
+          if changed_under(".github/workflows/"):
+              require_doc("docs/workflows.md", "workflow surface changed")
+
+          if failures:
+              print("Documentation guard failed:")
+              for failure in failures:
+                  print(f" - {failure}")
+              sys.exit(1)
+
+          print("Documentation guard passed.")
+          PY
