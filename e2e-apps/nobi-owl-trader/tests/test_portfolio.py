@@ -548,6 +548,48 @@ class TestPositionUpdates:
         position = portfolio_engine.position_repo.get_by_symbol("BTC/USDT")
         assert position is None  # Position should be closed
 
+    def test_sell_exceeding_long_flips_to_short(self, trade_repo, portfolio_engine, monkeypatch):
+        """Test selling more than the long position opens a short when allowed."""
+        monkeypatch.setenv("ALLOW_SHORT_POSITIONS", "true")
+        base_time = int(datetime.now().timestamp())
+
+        buy_trade = create_trade("buy-1", "BTC/USDT", "buy", 2.0, 50000.0, base_time, fee=100.0)
+        trade_repo.create(buy_trade)
+        portfolio_engine.update_positions_from_trade(buy_trade)
+
+        sell_trade = create_trade("sell-1", "BTC/USDT", "sell", 3.0, 51000.0, base_time + 100, fee=90.0)
+        trade_repo.create(sell_trade)
+        portfolio_engine.update_positions_from_trade(sell_trade)
+
+        position = portfolio_engine.position_repo.get_by_symbol("BTC/USDT")
+        assert position is not None
+        assert position.side == "short"
+        assert abs(position.amount - 1.0) < 1e-8
+        assert abs(position.avg_entry_price - 51000.0) < 0.01
+        # Remaining fee should be 90 * ( (3.0 - 2.0) / 3.0 ) = 30. Total cost = 1 * 51000 - 30.
+        assert abs(position.total_cost - 50970.0) < 0.01
+
+    def test_buy_exceeding_short_flips_to_long(self, trade_repo, portfolio_engine, monkeypatch):
+        """Test buying more than the short position closes it and opens a long."""
+        monkeypatch.setenv("ALLOW_SHORT_POSITIONS", "true")
+        base_time = int(datetime.now().timestamp())
+
+        sell_trade = create_trade("sell-1", "ETH/USDT", "sell", 2.0, 3000.0, base_time, fee=30.0)
+        trade_repo.create(sell_trade)
+        portfolio_engine.update_positions_from_trade(sell_trade)
+
+        buy_trade = create_trade("buy-1", "ETH/USDT", "buy", 3.0, 2800.0, base_time + 100, fee=45.0)
+        trade_repo.create(buy_trade)
+        portfolio_engine.update_positions_from_trade(buy_trade)
+
+        position = portfolio_engine.position_repo.get_by_symbol("ETH/USDT")
+        assert position is not None
+        assert position.side == "long"
+        assert abs(position.amount - 1.0) < 1e-8
+        # Closing fee share = 45 * (2/3) = 30, remaining fee = 15. Total cost = 1 * 2800 + 15.
+        assert abs(position.total_cost - 2815.0) < 0.01
+        assert abs(position.avg_entry_price - 2800.0) < 0.01
+
 
 class TestEdgeCases:
     """Test edge cases and error handling"""
