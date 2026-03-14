@@ -16,3 +16,15 @@ assert.throws(
   () => add('nope', 2),
   /add expects finite numeric inputs/
 );
+assert.throws(
+  () => add(true, 2),
+  /add expects finite numeric inputs/
+);
+assert.throws(
+  () => add(null, 2),
+  /add expects finite numeric inputs/
+);
+assert.throws(
+  () => add(undefined, 2),
+  /add expects finite numeric inputs/
+);
