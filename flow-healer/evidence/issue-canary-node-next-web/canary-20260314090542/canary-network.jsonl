@@ -1,0 +1,8 @@
+{"event": "request", "method": "GET", "resource_type": "document", "url": "http://localhost:3005/"}
+{"event": "response", "resource_type": "document", "status": 200, "url": "http://localhost:3005/"}
+{"event": "request", "method": "GET", "resource_type": "script", "url": "http://localhost:3005/_next/static/chunks/webpack.js?v=1773479149689"}
+{"event": "request", "method": "GET", "resource_type": "script", "url": "http://localhost:3005/_next/static/chunks/main-app.js?v=1773479149689"}
+{"event": "request", "method": "GET", "resource_type": "script", "url": "http://localhost:3005/_next/static/chunks/app-pages-internals.js"}
+{"event": "response", "resource_type": "script", "status": 200, "url": "http://localhost:3005/_next/static/chunks/webpack.js?v=1773479149689"}
+{"event": "response", "resource_type": "script", "status": 200, "url": "http://localhost:3005/_next/static/chunks/app-pages-internals.js"}
+{"event": "response", "resource_type": "script", "status": 200, "url": "http://localhost:3005/_next/static/chunks/main-app.js?v=1773479149689"}
