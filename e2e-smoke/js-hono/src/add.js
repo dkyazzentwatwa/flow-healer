@@ -36,7 +36,7 @@ function getQueryValue(context, name) {
   if (typeof request.query === 'function') {
     const value = request.query(name);
 
-    if (value !== undefined) {
+    if (value !== undefined && typeof value !== 'object') {
       return value;
     }
 
