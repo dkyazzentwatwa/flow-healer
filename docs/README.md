@@ -19,6 +19,7 @@ These documents define current repo behavior and should be updated in the same c
 - [healing-state-machine.md](healing-state-machine.md): issue claim-to-resolution decision flow
 - [connectors.md](connectors.md): backend routing, timeout, and fallback policy
 - [evidence-contract.md](evidence-contract.md): browser evidence completeness, artifact naming, and blocking rules
+- [workflows.md](workflows.md): GitHub Actions workflow inventory and required workflow guardrails
 
 ### Agent Contracts
 

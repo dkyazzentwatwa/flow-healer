@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -97,18 +98,79 @@ def _request_reference_app(
     return response.status, response_headers, response_body
 
 
-def _wait_for_reference_app(port: int, *, timeout_seconds: float = 5.0) -> None:
+def _format_reference_app_timeout(
+    *,
+    port: int,
+    timeout_seconds: float,
+    app_name: str,
+    process: subprocess.Popen[str] | None,
+) -> str:
+    message = f"{app_name} on port {port} did not become ready within {timeout_seconds:.1f}s"
+    if process is None:
+        return message
+
+    return_code = process.poll()
+    if return_code is None:
+        return message
+
+    output = ""
+    if process.stdout is not None:
+        output = process.stdout.read().strip()
+    if output:
+        return f"{message}; process exited with code {return_code}; output:\n{output}"
+    return f"{message}; process exited with code {return_code}"
+
+
+def _wait_for_reference_app(
+    port: int,
+    *,
+    timeout_seconds: float = 5.0,
+    process: subprocess.Popen[str] | None = None,
+    app_name: str = "reference app",
+) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
             status, _headers, _body = _request_reference_app(port=port, method="GET", path="/healthz")
         except OSError:
+            if process is not None and process.poll() is not None:
+                break
             time.sleep(0.1)
             continue
         if status == 200:
             return
         time.sleep(0.1)
-    raise AssertionError(f"reference app on port {port} did not become ready")
+    raise AssertionError(
+        _format_reference_app_timeout(
+            port=port,
+            timeout_seconds=timeout_seconds,
+            app_name=app_name,
+            process=process,
+        )
+    )
+
+
+def test_wait_for_reference_app_reports_process_output_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO("Boot failed: missing dependency\n")
+
+        def poll(self) -> int | None:
+            return 1
+
+    monotonic_values = iter([0.0, 0.05, 0.2])
+
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        f"{__name__}._request_reference_app",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+
+    with pytest.raises(AssertionError, match="Boot failed: missing dependency") as excinfo:
+        _wait_for_reference_app(43210, timeout_seconds=0.1, process=_FakeProcess(), app_name="ruby reference app")
+
+    assert "ruby reference app" in str(excinfo.value)
 
 
 def _reserve_local_port() -> int:
@@ -132,7 +194,12 @@ def test_ruby_reference_app_serves_health_and_cookie_session() -> None:
         text=True,
     )
     try:
-        _wait_for_reference_app(port)
+        _wait_for_reference_app(
+            port,
+            timeout_seconds=10.0,
+            process=process,
+            app_name="ruby reference app",
+        )
 
         status, _headers, body = _request_reference_app(port=port, method="GET", path="/healthz")
         assert status == 200
@@ -191,7 +258,12 @@ def test_java_reference_app_serves_health_and_cookie_session() -> None:
         text=True,
     )
     try:
-        _wait_for_reference_app(port, timeout_seconds=10.0)
+        _wait_for_reference_app(
+            port,
+            timeout_seconds=10.0,
+            process=process,
+            app_name="java reference app",
+        )
 
         status, _headers, body = _request_reference_app(port=port, method="GET", path="/healthz")
         assert status == 200

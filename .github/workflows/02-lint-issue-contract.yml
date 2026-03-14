@@ -8,6 +8,10 @@ on:
       - reopened
       - labeled
 
+concurrency:
+  group: issue-contract-lint-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   issues: write

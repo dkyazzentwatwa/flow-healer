@@ -12,6 +12,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: merge-close-${{ github.workflow }}-${{ github.event.inputs.pr_number || github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
