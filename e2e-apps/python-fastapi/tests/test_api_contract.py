@@ -25,6 +25,10 @@ def _expected_todo_payload(
     }
 
 
+def _expected_health_payload() -> dict[str, object]:
+    return {"status": "ok", "service": {"name": APP_NAME}}
+
+
 def _route_endpoint_for(app, path: str, method: str):
     matches = [
         route.endpoint
@@ -55,7 +59,13 @@ def test_health_route_returns_service_metadata_contract() -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": {"name": APP_NAME}}
+    assert response.json() == _expected_health_payload()
+
+
+def test_health_payload_returns_fresh_contract_copy() -> None:
+    response_one = health()
+    response_one["service"]["name"] = "tampered-name"
+    assert health() == _expected_health_payload()
 
 
 def test_create_todo_rejects_blank_titles() -> None:

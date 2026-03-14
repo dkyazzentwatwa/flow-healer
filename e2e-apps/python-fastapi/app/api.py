@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Final
 from .service import TodoItem, TodoService
 
 APP_NAME = "Flow Healer Python FastAPI Sandbox"
+HEALTH_SERVICE_NAME: Final[str] = APP_NAME
 
 try:
     from fastapi import Body, FastAPI, HTTPException
@@ -50,7 +52,7 @@ service = TodoService()
 
 
 def health() -> dict[str, object]:
-    return {"status": "ok", "service": {"name": APP_NAME}}
+    return {"status": "ok", "service": {"name": HEALTH_SERVICE_NAME}}
 
 
 def _service_for(request_service: TodoService | None) -> TodoService:
