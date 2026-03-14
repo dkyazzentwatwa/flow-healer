@@ -20,7 +20,11 @@ function toFiniteNumber(value) {
     return Number(trimmed);
   }
 
-  return Number(value);
+  if (typeof value !== 'number') {
+    return Number.NaN;
+  }
+
+  return value;
 }
 
 module.exports = { add };
