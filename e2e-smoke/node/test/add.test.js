@@ -151,6 +151,24 @@ test('addMany rejects an invalid operand among a longer list', () => {
   });
 });
 
+test('addMany promotes overflow sums to bigint when needed', () => {
+  assert.equal(
+    addMany(0, Number.MAX_SAFE_INTEGER, 2),
+    9007199254740993n,
+  );
+});
+
+test('addMany rejects unsafe integers after a variadic overflow boundary', () => {
+  assert.throws(
+    () => addMany(Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER + 1),
+    {
+      name: 'RangeError',
+      message:
+        'Cannot mix a variadic bigint-overflow sum with unsafe integer numbers; convert the number input to bigint first.',
+    },
+  );
+});
+
 test('add preserves regular number semantics for non-integer inputs', () => {
   const nanResult = add(Number.NaN, 1);
   const decimalResult = add(0.1, 0.2);
