@@ -120,3 +120,46 @@ def test_refresh_access_token_uses_provider_expiry_when_available() -> None:
     assert refreshed.access_token == "updated-access"
     assert refreshed.refresh_token == "refresh-me"
     assert refreshed.expires_at == refreshed_expiry
+
+
+def test_refresh_access_token_parses_iso_expires_at_string() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    bundle = TokenBundle(
+        access_token="current-access",
+        refresh_token="refresh-me",
+        expires_at=now,
+    )
+    iso_timestamp = "2026-01-01T02:30:00Z"
+
+    refreshed = refresh_access_token(
+        bundle,
+        lambda _refresh_token: {
+            "access_token": "updated-access",
+            "expires_at": iso_timestamp,
+        },
+        now=now,
+    )
+
+    assert refreshed.expires_at == datetime(2026, 1, 1, 2, 30, tzinfo=UTC)
+
+
+def test_refresh_access_token_parses_numeric_expires_at_timestamp() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    bundle = TokenBundle(
+        access_token="current-access",
+        refresh_token="refresh-me",
+        expires_at=now,
+    )
+    expected_expiry = datetime(2027, 4, 1, tzinfo=UTC)
+    timestamp = int(expected_expiry.timestamp())
+
+    refreshed = refresh_access_token(
+        bundle,
+        lambda _refresh_token: {
+            "access_token": "updated-access",
+            "expires_at": timestamp,
+        },
+        now=now,
+    )
+
+    assert refreshed.expires_at == expected_expiry
