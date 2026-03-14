@@ -6,7 +6,7 @@ function add(a, b) {
 }
 
 function normalizeFiniteNumber(value) {
-  if (value && typeof value === 'object' && 'value' in value) {
+  while (value && typeof value === 'object' && 'value' in value) {
     value = value.value;
   }
 
