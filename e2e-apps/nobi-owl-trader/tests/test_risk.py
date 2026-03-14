@@ -96,6 +96,30 @@ def test_drawdown_limit_blocks_at_exact_threshold(db):
 
     assert result["can_trade"] is False
     assert "drawdown" in result["reason"].lower()
+    assert "risk_metrics" in result
+
+
+def test_check_can_trade_returns_risk_metrics(db):
+    """Risk status should surface the metrics used during the guardrail checks."""
+    risk_mgr = RiskManager(make_limits())
+
+    result = risk_mgr.check_can_trade(
+        today_pnl=-100.0,
+        position_size=1500.0,
+        portfolio_value=10000.0,
+        total_exposure=5000.0,
+        peak_equity=12000.0,
+    )
+
+    assert result["can_trade"] is True
+    metrics = result["risk_metrics"]
+    assert metrics["today_pnl"] == -100.0
+    assert metrics["position_pct"] == pytest.approx(15.0)
+    assert metrics["exposure_pct"] == pytest.approx(50.0)
+    assert metrics["drawdown"] == pytest.approx(2000.0)
+    assert metrics["drawdown_pct"] == pytest.approx(1 / 6)
+    assert metrics["max_daily_loss"] == 500.0
+    assert metrics["max_exposure_pct"] == 80.0
 
 
 @pytest.mark.parametrize(
@@ -159,6 +183,7 @@ def test_check_can_trade_rejects_invalid_inputs(db, kwargs, reason_fragment):
 
     assert result["can_trade"] is False
     assert reason_fragment in result["reason"].lower()
+    assert result["risk_metrics"] == {}
 
 
 @pytest.mark.parametrize(
