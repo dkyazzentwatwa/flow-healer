@@ -1,4 +1,5 @@
 import {
+  isTodoPayload,
   toTodoItemPayload,
   toTodoListPayload,
   todoService,
@@ -19,8 +20,8 @@ export async function POST(request) {
   } catch {
     return Response.json({ error: "invalid_json" }, { status: 400 });
   }
-  if (!payload || typeof payload !== "object" || typeof payload.title !== "string") {
-    return Response.json({ error: "title_required" }, { status: 400 });
+  if (!isTodoPayload(payload)) {
+    return Response.json({ error: "invalid_payload" }, { status: 400 });
   }
 
   try {
