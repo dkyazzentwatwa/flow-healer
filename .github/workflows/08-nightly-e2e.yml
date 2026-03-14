@@ -1,0 +1,187 @@
+name: 08 Nightly E2E
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-python-core:
+    name: smoke-python-core
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Run focused core smoke tests
+        run: |
+          pytest tests/test_healer_task_spec.py -v
+          pytest tests/test_healer_runner.py -v
+
+  smoke-dashboard:
+    name: smoke-dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: apps/dashboard
+        run: npm ci
+
+      - name: Run dashboard tests
+        working-directory: apps/dashboard
+        run: npm test
+
+      - name: Build dashboard
+        working-directory: apps/dashboard
+        run: npm run build
+
+  smoke-node-next:
+    name: smoke-node-next
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: e2e-apps/node-next/package.json
+
+      - name: Install node-next dependencies
+        working-directory: e2e-apps/node-next
+        run: npm install
+
+      - name: Run node-next tests
+        working-directory: e2e-apps/node-next
+        run: npm test -- --passWithNoTests
+
+  smoke-ruby-rails:
+    name: smoke-ruby-rails
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+          working-directory: e2e-apps/ruby-rails-web
+
+      - name: Run ruby-rails smoke tests
+        working-directory: e2e-apps/ruby-rails-web
+        run: bundle exec rspec
+
+  smoke-java-spring:
+    name: smoke-java-spring
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Run java-spring smoke tests
+        working-directory: e2e-apps/java-spring-web
+        run: ./gradlew test --no-daemon
+
+  smoke-rust:
+    name: smoke-rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run rust smoke tests
+        working-directory: e2e-smoke/rust
+        run: cargo test
+
+  reliability-canary:
+    name: reliability-canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - smoke-python-core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Run reliability canary pack
+        run: |
+          python scripts/run_reliability_canary.py --output reliability-canary-report.json
+
+      - name: Evaluate canary gate
+        run: |
+          python scripts/evaluate_reliability_canary_gate.py             --report reliability-canary-report.json             --policy .github/reliability-canary-policy.json             --mode enforce             --summary-output reliability-canary-summary.md
+
+      - name: Upload nightly artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-reliability-canary
+          path: |
+            reliability-canary-report.json
+            reliability-canary-summary.md
