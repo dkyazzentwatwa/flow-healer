@@ -104,7 +104,7 @@ function normalizeCompletedFlag(value) {
 
 export function toPublicTodo(todo) {
   return {
-    id: Number(todo.id),
+    id: Number(normalizeTodoId(todo?.id)),
     title: todo.title,
     completed: todo.completed,
   };

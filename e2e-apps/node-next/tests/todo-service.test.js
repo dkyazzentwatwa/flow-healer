@@ -7,6 +7,7 @@ import {
   TodoService,
   toPublicTodo,
   toPublicTodoList,
+  todoService,
   toTodoItemPayload,
   toTodoListPayload,
 } from "../lib/todo-service.js";
@@ -256,6 +257,17 @@ test("toPublicTodo strips internal fields and normalizes the id type", () => {
   );
 });
 
+test("toPublicTodo normalizes public ids before exposing them", () => {
+  assert.equal(
+    toPublicTodo({
+      id: " +09 ",
+      title: "Legacy spacing",
+      completed: false,
+    }).id,
+    9,
+  );
+});
+
 test("todo payload helpers keep the collection and item route shape stable", () => {
   const todos = [
     {
@@ -314,6 +326,28 @@ test("POST rejects blank and malformed titles", async () => {
   assert.equal(malformedResponse.status, 400);
   assert.deepEqual(await malformedResponse.json(), { error: "title_required" });
   assert.equal(listTodos().length, todosBefore);
+});
+
+test("POST returns create_failed for unexpected create errors", async () => {
+  const originalCreate = todoService.create;
+  todoService.create = () => {
+    throw new Error("service_down");
+  };
+
+  try {
+    const response = await POST(
+      new Request("http://localhost/api/todos", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Will not persist" }),
+      }),
+    );
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "create_failed" });
+  } finally {
+    todoService.create = originalCreate;
+  }
 });
 
 test("POST returns the same stable public todo fields as GET", async () => {
