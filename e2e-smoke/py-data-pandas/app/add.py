@@ -8,5 +8,8 @@ def add(a: Any, b: Any) -> Any:
     return a + b
 
 
-def add_many(first: Any, second: Any, third: Any) -> Any:
-    return add(add(first, second), third)
+def add_many(first: Any, second: Any, third: Any, *rest: Any) -> Any:
+    result = add(add(first, second), third)
+    for value in rest:
+        result = add(result, value)
+    return result
