@@ -3,7 +3,7 @@
 # Flow Healer
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](docs/installation.md)
-[![Interface](https://img.shields.io/badge/interface-CLI%20%2B%20Dashboard-111111?style=for-the-badge&logo=gnubash&logoColor=white)](docs/dashboard.md)
+[![Interface](https://img.shields.io/badge/interface-CLI%20%2B%20TUI-111111?style=for-the-badge&logo=gnubash&logoColor=white)](docs/dashboard.md)
 [![State](https://img.shields.io/badge/state-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](docs/runtime-state.md)
 [![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](docs/test-strategy.md)
 [![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](docs/issue-contracts.md)
@@ -18,7 +18,7 @@
 
 Flow Healer helps repositories automate issue-driven repairs without turning the repo into an opaque agent sandbox. It watches GitHub issues, creates isolated worktrees, asks the configured connector to propose a fix, runs validation gates, verifies artifacts and evidence when needed, and only then opens or updates a pull request.
 
-It is built as an operations loop, not just a patch generator. Durable SQLite state, retry and quarantine handling, feedback ingestion, lane-aware validation, and dashboard visibility are all first-class parts of the product.
+It is built as an operations loop, not just a patch generator. Durable SQLite state, retry and quarantine handling, feedback ingestion, lane-aware validation, and export-first operator visibility are all first-class parts of the product.
 
 ## What It Does
 
@@ -30,7 +30,7 @@ It is built as an operations loop, not just a patch generator. Durable SQLite st
 - Tracks queue state, attempts, locks, lessons, events, and runtime health in SQLite.
 - Opens or updates PRs only after verification and evidence checks pass.
 - Re-queues work when humans leave PR feedback comments.
-- Exposes both a legacy Python dashboard and a modern Next dashboard for operator visibility.
+- Exposes export-first telemetry, a built-in read-only TUI, and a Python control plane for operator visibility and integrations.
 
 ## Start Here
 

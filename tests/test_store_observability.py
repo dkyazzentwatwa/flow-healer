@@ -322,6 +322,60 @@ def test_store_migrates_legacy_attempt_rows_with_default_observability_fields(tm
     assert attempt["judgment_reason_code"] == ""
 
 
+def test_store_bootstrap_migrates_legacy_issue_rows_before_creating_scope_indexes(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE healer_issues (
+                issue_id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                author TEXT NOT NULL DEFAULT '',
+                labels_json TEXT NOT NULL DEFAULT '[]',
+                priority INTEGER NOT NULL DEFAULT 100,
+                state TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                backoff_until TEXT DEFAULT NULL,
+                lease_owner TEXT DEFAULT NULL,
+                lease_expires_at TEXT DEFAULT NULL,
+                workspace_path TEXT NOT NULL DEFAULT '',
+                branch_name TEXT NOT NULL DEFAULT '',
+                pr_number INTEGER DEFAULT NULL,
+                pr_state TEXT NOT NULL DEFAULT '',
+                last_failure_class TEXT NOT NULL DEFAULT '',
+                last_failure_reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = SQLiteStore(db_path)
+    store.bootstrap()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        issue_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info('healer_issues')").fetchall()
+        }
+        index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list('healer_issues')").fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert "scope_key" in issue_columns
+    assert "idx_healer_issues_state_scope_priority_updated" in index_names
+
+
 def test_store_persists_attempt_observability_fields(tmp_path):
     store = SQLiteStore(tmp_path / "state.db")
     store.bootstrap()

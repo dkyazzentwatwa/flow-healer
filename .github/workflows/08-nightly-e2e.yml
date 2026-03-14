@@ -39,34 +39,6 @@ jobs:
           pytest tests/test_healer_task_spec.py -v
           pytest tests/test_healer_runner.py -v
 
-  smoke-dashboard:
-    name: smoke-dashboard
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: apps/dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: apps/dashboard
-        run: npm ci
-
-      - name: Run dashboard tests
-        working-directory: apps/dashboard
-        run: npm test
-
-      - name: Build dashboard
-        working-directory: apps/dashboard
-        run: npm run build
-
   smoke-node-next:
     name: smoke-node-next
     runs-on: ubuntu-latest

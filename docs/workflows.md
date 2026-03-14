@@ -10,11 +10,11 @@ This doc defines the active GitHub Actions workflows in Flow Healer and the guar
 - `04-merge-close.yml`: controlled merge-and-close helper
 - `05-workflow-lint.yml`: workflow linting, ShellCheck, and policy validation
 - `06-dependency-review.yml`: dependency review on package-manifest changes
-- `07-codeql.yml`: CodeQL analysis for Python and JavaScript/TypeScript
+- `07-codeql.yml`: CodeQL analysis for Python
 - `08-nightly-e2e.yml`: nightly smoke and reliability checks
 - `09-release.yml`: tagged release packaging and publishing
 - `10-docs-guard.yml`: verifies docs coverage for protected surfaces
-- `ci.yml`: main test, packaging, dashboard, and canary validation
+- `ci.yml`: main test, packaging, and canary validation
 
 ## Required Guardrails
 

@@ -83,30 +83,6 @@ jobs:
           .venv-release/bin/python -m pip install dist/*.whl
           .venv-release/bin/flow-healer --help
 
-  build-dashboard:
-    name: build-dashboard
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: apps/dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: apps/dashboard
-        run: npm ci
-
-      - name: Build dashboard
-        working-directory: apps/dashboard
-        run: npm run build
-
   create-release:
     name: create-release
     runs-on: ubuntu-latest
@@ -114,7 +90,6 @@ jobs:
     needs:
       - build-python
       - verify-wheel
-      - build-dashboard
 
     steps:
       - name: Download python distributions

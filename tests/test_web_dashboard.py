@@ -850,8 +850,8 @@ def test_render_dashboard_returns_minimal_api_landing_page(tmp_path: Path) -> No
     html = _render_dashboard(config, service, notice="")
 
     assert "<title>Flow Healer API Server</title>" in html
-    assert "Start the separate dashboard app" in html
-    assert "apps/dashboard" in html
+    assert "flow-healer export" in html
+    assert "flow-healer tui" in html
     assert "/api/queue" in html
     assert "/api/issue-detail" in html
 

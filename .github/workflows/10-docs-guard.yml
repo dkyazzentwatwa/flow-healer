@@ -62,8 +62,9 @@ jobs:
               if not Path(doc_path).exists():
                   failures.append(f"{reason}: required doc missing: {doc_path}")
 
-          if changed_under("apps/dashboard/"):
+          if changed_matches(["telemetry_exports.py", "tui.py", "web_dashboard.py", "dashboard_cockpit.py"]):
               require_doc("docs/dashboard.md", "dashboard code changed")
+              require_doc("docs/telemetry-exports.md", "telemetry surface changed")
 
           if changed_matches(["connector", "codex_cli_connector", "codex_app_server_connector", "cline_connector", "claude_cli_connector", "kilo_cli_connector"]):
               require_doc("docs/connectors.md", "connector surface changed")

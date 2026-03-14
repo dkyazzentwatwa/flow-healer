@@ -28,7 +28,6 @@ jobs:
       matrix:
         language:
           - python
-          - javascript-typescript
 
     steps:
       - name: Checkout
@@ -52,24 +51,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
-
-      - name: Set up Node
-        if: matrix.language == 'javascript-typescript'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: apps/dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        if: matrix.language == 'javascript-typescript'
-        working-directory: apps/dashboard
-        run: npm ci
-
-      - name: Build dashboard
-        if: matrix.language == 'javascript-typescript'
-        working-directory: apps/dashboard
-        run: npm run build
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3

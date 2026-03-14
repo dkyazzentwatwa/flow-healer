@@ -9,6 +9,8 @@ from pathlib import Path
 from .config import AppConfig
 from .serve_runtime import run_serve
 from .service import FlowHealerService
+from .telemetry_exports import default_export_dir, write_telemetry_exports
+from .tui import run_tui
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="~/.flow-healer/config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("start", "status", "pause", "resume", "scan", "doctor", "serve", "recycle-helpers"):
+    for name in ("start", "status", "pause", "resume", "scan", "doctor", "serve", "recycle-helpers", "export", "tui"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--repo")
         if name == "start":
@@ -30,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--port", type=int)
         if name == "recycle-helpers":
             cmd.add_argument("--idle-only", action="store_true")
+        if name == "export":
+            cmd.add_argument("--formats", default="csv,jsonl")
+            cmd.add_argument("--output-dir")
+        if name == "tui":
+            cmd.add_argument("--once", action="store_true")
+            cmd.add_argument("--refresh-seconds", type=int, default=5)
     return parser
 
 
@@ -97,6 +105,33 @@ def main() -> None:
     if args.command == "recycle-helpers":
         for row in service.request_helper_recycle(args.repo, idle_only=bool(args.idle_only)):
             print(json.dumps(row, indent=2, default=str))
+        return
+    if args.command == "export":
+        output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else default_export_dir(config)
+        written = write_telemetry_exports(
+            service=service,
+            repo_name=args.repo,
+            output_dir=output_dir,
+            formats=tuple(str(args.formats or "").split(",")),
+        )
+        print(
+            json.dumps(
+                {
+                    "output_dir": str(output_dir),
+                    "files": [str(path) for path in written],
+                },
+                indent=2,
+            )
+        )
+        return
+    if args.command == "tui":
+        run_tui(
+            config=config,
+            service=service,
+            repo_name=args.repo,
+            refresh_seconds=int(args.refresh_seconds),
+            once=bool(args.once),
+        )
         return
 
 

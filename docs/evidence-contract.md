@@ -82,5 +82,5 @@ Lane-specific expectations live in the lane guides and [docs/fixture-profile-gui
 ## Relationship To Other Docs
 
 - use [docs/issue-contracts.md](/Users/cypher-server/Documents/code/flow-healer/docs/issue-contracts.md) for `artifact_requirements`
-- use [docs/dashboard.md](/Users/cypher-server/Documents/code/flow-healer/docs/dashboard.md) for the artifact browser UI
+- use [docs/dashboard.md](/Users/cypher/Documents/GitHub/flow-healer/docs/dashboard.md) for the remaining API/artifact access surface
 - use [docs/healing-state-machine.md](/Users/cypher-server/Documents/code/flow-healer/docs/healing-state-machine.md) for when evidence is required in the runtime flow

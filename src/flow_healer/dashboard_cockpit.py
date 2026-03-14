@@ -1049,8 +1049,8 @@ def render_dashboard(config: AppConfig, service: FlowHealerService, notice: str)
 <body>
   <main>
     <h1>Flow Healer API Server</h1>
-    <p>Start the separate dashboard app from <code>apps/dashboard</code> to use the new UI.</p>
-    <p>This server now exists to provide Flow Healer data and actions only.</p>
+    <p>Use <code>flow-healer export</code> for CSV/JSONL telemetry and <code>flow-healer tui</code> for a read-only live terminal view.</p>
+    <p>This server exists to provide Flow Healer data and actions for custom integrations.</p>
     <ul>
       <li><code>/api/queue</code></li>
       <li><code>/api/issue-detail</code></li>

@@ -49,7 +49,7 @@ class FlowHealerServeRuntime:
                 port=self.port,
             )
             web_server.start()
-            logger.info("Flow Healer web dashboard listening on http://%s:%s", self.host, self.port)
+            logger.info("Flow Healer HTTP control plane listening on http://%s:%s", self.host, self.port)
 
         if self.config.control.mail.enabled:
             mail_poller = MailCommandPoller(settings=self.config.control.mail, router=router)

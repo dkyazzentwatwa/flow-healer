@@ -34,7 +34,7 @@ GitHub Issues / Repo Signals <----------------------+
 - `src/flow_healer/healer_workspace.py`: isolated git worktree management
 - `src/flow_healer/healer_verifier.py`: post-fix verification and evidence checks
 - `src/flow_healer/store.py`: SQLite persistence
-- `apps/dashboard/` and `src/flow_healer/web_dashboard.py`: modern and legacy operator surfaces
+- `src/flow_healer/web_dashboard.py`, `src/flow_healer/telemetry_exports.py`, and `src/flow_healer/tui.py`: operator API, export, and terminal surfaces
 
 ## Design Notes
 

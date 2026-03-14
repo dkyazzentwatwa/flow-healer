@@ -4,8 +4,6 @@ on:
   pull_request:
     paths:
       - "pyproject.toml"
-      - "apps/dashboard/package.json"
-      - "apps/dashboard/package-lock.json"
       - "e2e-apps/**/package.json"
       - "e2e-apps/**/package-lock.json"
       - "e2e-smoke/**/package.json"

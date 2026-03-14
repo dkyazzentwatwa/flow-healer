@@ -8,6 +8,8 @@ This guide covers everyday CLI workflows. For issue-body semantics, lane-safe ed
 | --- | --- |
 | `flow-healer doctor [--repo NAME]` | Validate environment, git, Docker, and API setup. |
 | `flow-healer status [--repo NAME]` | Show issue counts, state, and recent attempts. |
+| `flow-healer export [--repo NAME] [--formats csv,jsonl] [--output-dir PATH]` | Write telemetry exports for spreadsheet and structured analysis workflows. |
+| `flow-healer tui [--repo NAME] [--once] [--refresh-seconds N]` | Open the read-only terminal operator view. |
 | `flow-healer start [--repo NAME] [--once]` | Run the healing loop continuously or for a single pass. |
 | `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo. |
 | `flow-healer resume [--repo NAME]` | Resume autonomous processing. |
@@ -21,7 +23,26 @@ export GITHUB_TOKEN=your_token_here
 flow-healer doctor --repo my-project
 flow-healer start --repo my-project --once
 flow-healer status --repo my-project
+flow-healer export --repo my-project
 ~~~
+
+## Telemetry And TUI
+
+For self-serve analysis, export telemetry instead of relying on a separate browser dashboard:
+
+~~~bash
+flow-healer export --repo my-project
+flow-healer export --repo my-project --formats csv,jsonl --output-dir /tmp/my-project-telemetry
+~~~
+
+Use the built-in terminal UI for lightweight live inspection:
+
+~~~bash
+flow-healer tui --repo my-project
+flow-healer tui --repo my-project --once
+~~~
+
+Use [telemetry-exports.md](telemetry-exports.md) for the export contract and [dashboard.md](dashboard.md) for the remaining control-plane/UI boundaries.
 
 ## Healing Lifecycle
 

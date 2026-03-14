@@ -1,65 +1,53 @@
 # Dashboard
 
-This doc defines the operator-facing dashboard surface for Flow Healer and the contract around changing it safely.
+This doc defines the remaining operator-facing UI and API surface for Flow Healer after retiring the separate Next.js dashboard app.
 
 ## What Exists Today
 
-Flow Healer currently has two dashboard surfaces:
+Flow Healer now has three operator-facing surfaces:
 
-- The legacy Python dashboard in [src/flow_healer/web_dashboard.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/web_dashboard.py), served by `flow-healer serve` and the always-on runtime.
-- The Next.js dashboard app in [apps/dashboard](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard), which is the modern operator UI and the preferred surface for product-facing dashboard work.
+- `flow-healer export`: primary telemetry/reporting surface that writes CSV and JSONL snapshots
+- `flow-healer tui`: primary built-in live operator surface for read-only queue, attempt, event, log, and health inspection
+- `flow-healer serve`: Python HTTP control plane for JSON APIs, artifact serving, and custom integrations
 
-Use the Python dashboard as the control-plane reference and fallback surface. Use the Next app for ongoing UI work unless the change explicitly targets the embedded Python dashboard.
+The old `apps/dashboard` Next.js app is retired and should not be reintroduced as a supported operator surface.
+The TUI intentionally uses compact terminal panels and sparkline-style summaries inspired by tools like Chartli and Terminui, but it stays Python-native so the repo no longer depends on a separate Node UI stack.
 
 ## Canonical Anchors
 
-- [src/flow_healer/web_dashboard.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/web_dashboard.py)
-- [apps/dashboard/src/lib/flow-healer.ts](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/src/lib/flow-healer.ts)
-- [apps/dashboard/app/api/flow-healer/[...path]/route.ts](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/app/api/flow-healer/[...path]/route.ts)
-- [apps/dashboard/app/operations/page.tsx](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/app/operations/page.tsx)
-- [apps/dashboard/app/telemetry/page.tsx](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/app/telemetry/page.tsx)
-- [apps/dashboard/app/artifacts/page.tsx](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/app/artifacts/page.tsx)
-- [apps/dashboard/app/settings/page.tsx](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/app/settings/page.tsx)
+- [src/flow_healer/cli.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/cli.py)
+- [src/flow_healer/telemetry_exports.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/telemetry_exports.py)
+- [src/flow_healer/tui.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/tui.py)
+- [src/flow_healer/web_dashboard.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/web_dashboard.py)
+- [src/flow_healer/dashboard_cockpit.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/dashboard_cockpit.py)
 
-## Running The Dashboards
+## Operator Workflows
 
-Legacy Python dashboard:
+Telemetry export:
+
+```bash
+flow-healer export --repo <repo-name>
+flow-healer export --repo <repo-name> --formats csv,jsonl --output-dir /tmp/flow-healer-exports
+```
+
+Read-only terminal view:
+
+```bash
+flow-healer tui --repo <repo-name>
+flow-healer tui --repo <repo-name> --once
+```
+
+HTTP control plane:
 
 ```bash
 flow-healer serve --repo <repo-name>
 ```
 
-Next dashboard app:
+## HTTP Routes And APIs
 
-```bash
-cd apps/dashboard
-npm install
-npm run dev
-```
+The Python control plane remains available for custom connections and automation:
 
-The Next app defaults to port `3099` and proxies Flow Healer runtime data through `/api/flow-healer/*`.
-
-## Data Flow And Fallback Behavior
-
-The Next app fetches live data through [apps/dashboard/src/lib/flow-healer.ts](/Users/cypher-server/Documents/code/flow-healer/apps/dashboard/src/lib/flow-healer.ts). That library has two modes:
-
-- `live`: runtime fetch succeeds and the UI renders current queue, overview, issue-detail, and artifact data.
-- `fallback`: fetch fails and the UI renders built-in demo payloads so the shell stays usable during local UI development or when the runtime is offline.
-
-The Python dashboard is always live against the in-process service runtime. It is the source of truth for payload semantics and endpoint behavior.
-
-## Route Map
-
-Next dashboard routes:
-
-- `/operations`: issue queue, workbench, and issue drill-down workflows
-- `/telemetry`: repo status, reliability signals, and trend summaries
-- `/artifacts`: published evidence browsing and artifact-focused triage
-- `/settings`: local configuration and operator controls
-
-Python dashboard routes and APIs:
-
-- `/`: rendered HTML dashboard shell
+- `/`: minimal landing page describing export, TUI, and API usage
 - `/api/overview`
 - `/api/status`
 - `/api/queue`
@@ -69,40 +57,36 @@ Python dashboard routes and APIs:
 - `/api/commands`
 - `/artifact`
 
-## Safe UI Change vs Control-Plane Change
+These APIs remain control-plane/integration surfaces. They are not the primary built-in operator experience.
 
-Safe UI-only changes:
+## Change Boundaries
 
-- typography, spacing, layout, cards, labels, and component composition inside `apps/dashboard`
-- route-local presentation tweaks that do not change payload expectations
-- fallback/demo content updates that preserve the same data shape
+Control-plane contract changes include:
 
-Control-plane contract changes:
-
-- changing JSON field names or meanings in the Python dashboard payloads
-- changing the proxy route behavior or error semantics
+- changing JSON field names or meanings in the Python API payloads
 - changing artifact link formats, queue row semantics, issue-detail structure, or telemetry rollups
-- changing operator command behavior exposed through dashboard actions
+- changing export row shape or JSONL event payload expectations
+- changing operator command behavior exposed through HTTP endpoints or CLI actions
 
-If a change is control-plane-facing, update this doc plus [docs/runtime-state.md](/Users/cypher-server/Documents/code/flow-healer/docs/runtime-state.md), [docs/healing-state-machine.md](/Users/cypher-server/Documents/code/flow-healer/docs/healing-state-machine.md), or [docs/evidence-contract.md](/Users/cypher-server/Documents/code/flow-healer/docs/evidence-contract.md) as appropriate.
+If the change affects persisted state, queue semantics, or evidence handling, update this doc and the matching canonical runtime docs in the same change.
 
 ## Testing Expectations
 
-When changing `apps/dashboard`:
+When changing export or TUI behavior:
 
-- run `cd apps/dashboard && npm test`
-- run the focused dashboard route and component tests when behavior changes
-- verify live/fallback behavior if the change touches `src/lib/flow-healer.ts`
+- run focused export and TUI tests
+- run `pytest tests/test_cli.py -v`
+- run `pytest tests/test_service.py -q`
 
-When changing Python dashboard payloads:
+When changing Python API payloads or artifact serving:
 
 - run `pytest tests/test_web_dashboard.py -q`
-- run `pytest tests/test_service.py -q` if the payload source changes
+- run `pytest tests/test_service.py -q`
 
 ## What This Doc Does Not Define
 
 This doc does not define issue-body semantics, evidence completeness, or retry/state transitions. Use:
 
-- [docs/issue-contracts.md](/Users/cypher-server/Documents/code/flow-healer/docs/issue-contracts.md)
-- [docs/evidence-contract.md](/Users/cypher-server/Documents/code/flow-healer/docs/evidence-contract.md)
-- [docs/healing-state-machine.md](/Users/cypher-server/Documents/code/flow-healer/docs/healing-state-machine.md)
+- [docs/issue-contracts.md](/Users/cypher/Documents/GitHub/flow-healer/docs/issue-contracts.md)
+- [docs/evidence-contract.md](/Users/cypher/Documents/GitHub/flow-healer/docs/evidence-contract.md)
+- [docs/healing-state-machine.md](/Users/cypher/Documents/GitHub/flow-healer/docs/healing-state-machine.md)

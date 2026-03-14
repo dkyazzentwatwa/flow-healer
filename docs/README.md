@@ -41,7 +41,8 @@ These documents define current repo behavior and should be updated in the same c
 
 ### UI / Control Plane
 
-- [dashboard.md](dashboard.md): Next dashboard vs legacy Python dashboard, routes, data sources, and safe edit boundaries
+- [dashboard.md](dashboard.md): export/TUI operator surfaces and remaining Python control-plane boundaries
+- [telemetry-exports.md](telemetry-exports.md): CSV and JSONL export contract for operator telemetry
 - [app-target-onboarding.md](app-target-onboarding.md): how to add a browser-backed app target or runtime profile
 - [fixture-profile-guidance.md](fixture-profile-guidance.md): deterministic auth, fixture, and environment guidance for browser-backed apps
 

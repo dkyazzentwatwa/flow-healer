@@ -11,7 +11,7 @@ Read these first when the work touches the matching area:
 - [docs/healing-state-machine.md](docs/healing-state-machine.md): claim-to-resolution runtime flow
 - [docs/runtime-state.md](docs/runtime-state.md): SQLite tables, attempts, queue states, locks, safe resets
 - [docs/evidence-contract.md](docs/evidence-contract.md): artifact completeness and browser-evidence rules
-- [docs/dashboard.md](docs/dashboard.md): Next dashboard vs legacy Python dashboard, routes, and safe control-plane boundaries
+- [docs/dashboard.md](docs/dashboard.md): export/TUI operator surfaces, Python control-plane boundaries, and compatibility notes
 - [docs/lane-guides/README.md](docs/lane-guides/README.md): lane-safe editing rules for `e2e-smoke/` and `e2e-apps/`
 - [docs/agent-remediation-playbook.md](docs/agent-remediation-playbook.md): repeated-failure doctrine
 - [docs/test-strategy.md](docs/test-strategy.md): which test to add when behavior changes or escapes
@@ -46,8 +46,8 @@ If you need to build context in code after reading the docs, start here:
 
 ## Dashboard And Control-Plane Rules
 
-- Read [docs/dashboard.md](docs/dashboard.md) before touching `apps/dashboard/` or `src/flow_healer/web_dashboard.py`.
-- Treat UI-only edits differently from control-plane edits. If a change affects route data loading, dashboard proxy behavior, runtime status surfaces, or artifact/control semantics, update the canonical docs in the same change.
+- Read [docs/dashboard.md](docs/dashboard.md) before touching `src/flow_healer/tui.py`, `src/flow_healer/telemetry_exports.py`, or `src/flow_healer/web_dashboard.py`.
+- Treat TUI-only edits differently from control-plane edits. If a change affects export schemas, runtime status surfaces, control-plane payloads, or artifact/control semantics, update the canonical docs in the same change.
 - Do not treat browser-app fixture changes as dashboard changes; app-backed sandboxes belong to the lane guides.
 
 ## Lane-Safe Editing Rules
@@ -78,7 +78,7 @@ If you need to build context in code after reading the docs, start here:
 
 - `src/flow_healer/`: core Python runtime
 - `tests/`: pytest suites that mirror runtime modules
-- `apps/dashboard/`: modern Next dashboard
+- `src/flow_healer/tui.py`: read-only terminal operator surface
 - `e2e-smoke/`: fixture lanes for language and framework smoke coverage
 - `e2e-apps/`: browser-backed app targets and richer app fixtures
 - `docs/`: canonical and supporting documentation

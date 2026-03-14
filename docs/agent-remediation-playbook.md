@@ -30,7 +30,7 @@ The preferred remediation order is:
 Signal:
 
 - the agent edits the wrong dashboard surface
-- the agent confuses the Next dashboard with the legacy Python dashboard
+- the agent confuses export/TUI surfaces with the Python HTTP control plane
 - the agent changes payload semantics while trying to make a visual tweak
 
 Preferred repo fix:

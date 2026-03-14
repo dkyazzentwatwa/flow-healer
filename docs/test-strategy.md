@@ -11,7 +11,7 @@ This doc defines the testing pyramid for Flow Healer and what kind of regression
 ## Test Layers
 
 - unit tests: narrow behavior in parser, runner helpers, state helpers, connector helpers
-- integration tests: loop, store, tracker, service, dashboard payload assembly
+- integration tests: loop, store, tracker, service, export assembly, and control-plane payload assembly
 - lane/sandbox tests: `e2e-smoke/*` and `e2e-apps/*` contract coverage
 - browser evidence tests: artifact capture, publish rules, app runtime flows
 - canary and stress docs/runbooks: operator validation and drift detection
@@ -20,7 +20,7 @@ This doc defines the testing pyramid for Flow Healer and what kind of regression
 
 - parser and runner regressions should block contract or execution changes
 - loop/store regressions should block retry, judgment, or state changes
-- dashboard tests should block payload or UI contract changes
+- export/TUI/control-plane tests should block operator-surface contract changes
 - browser evidence tests should block artifact/evidence contract changes
 
 ## What To Add When A Bug Escapes

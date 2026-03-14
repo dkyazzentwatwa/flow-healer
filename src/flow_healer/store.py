@@ -213,28 +213,11 @@ class SQLiteStore:
                     UNIQUE(source, external_id)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_backoff ON healer_issues(state, backoff_until, priority, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_priority_updated ON healer_issues(state, priority, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_workspace ON healer_issues(state, workspace_path, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_scope_priority_updated ON healer_issues(state, scope_key, priority, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_issues_state_lease ON healer_issues(state, lease_expires_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_attempts_started ON healer_attempts(started_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_started ON healer_attempts(issue_id, started_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_healer_attempts_state_finished_issue ON healer_attempts(state, finished_at, issue_id);
-                CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_attempt_no ON healer_attempts(issue_id, attempt_no);
-                CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at);
-                CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_healer_events_issue_created ON healer_events(issue_id, created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_control_commands_created ON control_commands(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_control_commands_repo_created ON control_commands(repo_name, created_at DESC);
                 """
             )
             conn.execute("INSERT OR IGNORE INTO healer_runtime(singleton, status) VALUES(1, 'idle')")
             conn.commit()
             self._migrate(conn)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at)"
-            )
             conn.commit()
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
@@ -293,6 +276,9 @@ class SQLiteStore:
                 if column not in mutation_cols:
                     conn.execute(statement)
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_issues_state_backoff ON healer_issues(state, backoff_until, priority, updated_at)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_issues_scope_state ON healer_issues(scope_key, state, updated_at)"
             )
             conn.execute(
@@ -318,6 +304,21 @@ class SQLiteStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_attempts_issue_attempt_no ON healer_attempts(issue_id, attempt_no)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_locks_lease ON healer_locks(lease_expires_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_events_created ON healer_events(created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_healer_events_issue_created ON healer_events(issue_id, created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_control_commands_created ON control_commands(created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_control_commands_repo_created ON control_commands(repo_name, created_at DESC)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_healer_mutation_log_lease ON healer_mutation_log(lease_expires_at)"
