@@ -55,15 +55,25 @@ function ordinaryToPrimitive(value) {
   throw new TypeError('Cannot convert object to primitive value');
 }
 
-function toAddPrimitive(value) {
-  if (isPrimitive(value)) {
-    return value;
+function unwrapValue(value) {
+  while (value && typeof value === 'object' && 'value' in value) {
+    value = value.value;
   }
 
-  const customToPrimitive = value[Symbol.toPrimitive];
+  return value;
+}
+
+function toAddPrimitive(value) {
+  const unwrappedValue = unwrapValue(value);
+
+  if (isPrimitive(unwrappedValue)) {
+    return unwrappedValue;
+  }
+
+  const customToPrimitive = unwrappedValue[Symbol.toPrimitive];
 
   if (typeof customToPrimitive === 'function') {
-    const result = customToPrimitive.call(value, 'default');
+    const result = customToPrimitive.call(unwrappedValue, 'default');
 
     if (!isPrimitive(result)) {
       throw new TypeError('Cannot convert object to primitive value');
@@ -72,7 +82,7 @@ function toAddPrimitive(value) {
     return result;
   }
 
-  return ordinaryToPrimitive(value);
+  return ordinaryToPrimitive(unwrappedValue);
 }
 
 function isStringOperand(value) {
