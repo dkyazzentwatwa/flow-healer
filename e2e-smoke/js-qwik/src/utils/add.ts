@@ -10,6 +10,10 @@ function add(a: number | string, b: number | string): number {
       return Number(trimmed);
     }
 
+    if (typeof value !== 'number') {
+      throw new TypeError('add expects finite numeric inputs');
+    }
+
     return Number(value);
   };
 
