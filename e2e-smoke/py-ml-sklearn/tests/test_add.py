@@ -26,3 +26,18 @@ def test_add_supports_sklearn_style_array_like_inputs() -> None:
     result = add(values, 0.5)
 
     np.testing.assert_allclose(result, np.array([1.5, 2.5, 3.5]))
+
+
+def test_add_supports_array_protocol_inputs() -> None:
+    class ArrayLike:
+        def __init__(self, values):
+            self._values = np.array(values)
+
+        def __array__(self, dtype=None):
+            return np.asarray(self._values, dtype=dtype)
+
+    left = ArrayLike([1.0, 2.0, 3.0])
+    right = ArrayLike([0.5, 0.5, 0.5])
+
+    np.testing.assert_allclose(add(left, right), np.array([1.5, 2.5, 3.5]))
+    np.testing.assert_allclose(add(0.5, right), np.array([1.0, 1.0, 1.0]))
