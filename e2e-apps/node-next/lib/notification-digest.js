@@ -17,6 +17,23 @@ function normalizeMaxItems(maxItems, totalItems) {
   return Math.min(Math.floor(maxItems), totalItems);
 }
 
+function parseCreatedAt(value) {
+  const createdAt = String(value ?? "");
+  const timestamp = Date.parse(createdAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function compareDigestEntries(left, right) {
+  const leftTime = parseCreatedAt(left.createdAt);
+  const rightTime = parseCreatedAt(right.createdAt);
+
+  if (leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
 function isQueued(notification) {
   if (notification && "status" in notification) {
     return String(notification.status ?? "").toLowerCase() === QUEUED_STATUS;
@@ -67,6 +84,10 @@ export function buildRecipientDigest(notifications) {
     digestByRecipient.set(entry.recipient, bucket);
   }
 
+  for (const entries of digestByRecipient.values()) {
+    entries.sort(compareDigestEntries);
+  }
+
   return Array.from(digestByRecipient.entries())
     .sort((left, right) => left[0].localeCompare(right[0]))
     .map(([recipient, entries]) => ({ recipient, entries }));
@@ -75,11 +96,15 @@ export function buildRecipientDigest(notifications) {
 export function flushRecipientDigest(notifications, recipient, options = {}) {
   const recipientKey = normalizeRecipient(recipient);
   const queuedEntries = (notifications ?? [])
-    .map((notification, index) => ({ notification, index }))
+    .map((notification, index) => ({
+      notification,
+      index,
+      entry: toDigestEntry(notification),
+    }))
     .filter(
-      ({ notification }) =>
-        normalizeRecipient(notification?.recipient) === recipientKey && isQueued(notification),
-    );
+      ({ entry, notification }) => entry.recipient === recipientKey && isQueued(notification),
+    )
+    .sort((left, right) => compareDigestEntries(left.entry, right.entry));
 
   const maxItems = normalizeMaxItems(options.maxItems, queuedEntries.length);
   const selectedEntries = queuedEntries.slice(0, maxItems);
