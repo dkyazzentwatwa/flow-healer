@@ -40,6 +40,79 @@ test("buildRecipientDigest groups queued notifications per recipient", () => {
   ]);
 });
 
+test("buildRecipientDigest sorts entries by creation time and id", () => {
+  const notifications = [
+    {
+      id: "later",
+      recipient: "alice@example.com",
+      subject: "Later",
+      status: "queued",
+      createdAt: "2026-03-11T10:00:00Z",
+    },
+    {
+      id: "same-time-b",
+      recipient: "alice@example.com",
+      subject: "Same",
+      status: "queued",
+      createdAt: "2026-03-10T10:00:00Z",
+    },
+    {
+      id: "same-time-a",
+      recipient: "alice@example.com",
+      subject: "Same",
+      status: "queued",
+      createdAt: "2026-03-10T10:00:00Z",
+    },
+    {
+      id: "earlier",
+      recipient: "alice@example.com",
+      subject: "Earlier",
+      status: "queued",
+      createdAt: "2026-03-09T10:00:00Z",
+    },
+  ];
+
+  const digest = buildRecipientDigest(notifications.reverse());
+
+  assert.deepEqual(digest[0].entries.map((entry) => entry.id), [
+    "earlier",
+    "same-time-a",
+    "same-time-b",
+    "later",
+  ]);
+});
+
+test("flushRecipientDigest prioritizes the earliest queued notifications when limited", () => {
+  const queuedNotifications = [
+    {
+      id: "later",
+      recipient: "alex@example.com",
+      status: "queued",
+      createdAt: "2026-03-11T10:00:00Z",
+    },
+    {
+      id: "earlier",
+      recipient: "alex@example.com",
+      status: "queued",
+      createdAt: "2026-03-10T10:00:00Z",
+    },
+  ];
+
+  const result = flushRecipientDigest(queuedNotifications, "alex@example.com", {
+    maxItems: 1,
+    sentAt: "2026-03-11T12:00:00Z",
+  });
+
+  assert.equal(result.sent, 1);
+  assert.deepEqual(result.sentIds, ["earlier"]);
+  assert.equal(result.digest.notifications.length, 1);
+  assert.equal(result.digest.notifications[0].id, "earlier");
+  assert.equal(queuedNotifications[0].sent, undefined);
+  assert.equal(queuedNotifications[1].sent, true);
+  assert.equal(queuedNotifications[1].status, "sent");
+  assert.equal(queuedNotifications[1].sentAt, "2026-03-11T12:00:00Z");
+});
+
 test("flushRecipientDigest marks only recipient-scoped ids as sent", () => {
   const notifications = [
     { id: "42", recipient: "alice@example.com", subject: "A", status: "queued" },
