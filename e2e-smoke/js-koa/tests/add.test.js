@@ -25,23 +25,23 @@ assert.throws(() => add(true, 5), {
 });
 
 Promise.all([
-  expectMiddlewareResult(handler, { a: '4', b: '6' }, { body: { result: 10 } }),
-  expectMiddlewareResult(addHandler, { a: '4', b: '6' }, { body: { result: 10 } }),
-  expectMiddlewareResult(handleAdd, { a: '4', b: '6' }, { body: { result: 10 } }),
+  expectMiddlewareResult(handler, { a: '4', b: '6' }, { body: { result: 10 } }, true),
+  expectMiddlewareResult(addHandler, { a: '4', b: '6' }, { body: { result: 10 } }, true),
+  expectMiddlewareResult(handleAdd, { a: '4', b: '6' }, { body: { result: 10 } }, true),
   expectMiddlewareResult(middleware, { a: 'two', b: '6' }, {
     body: { error: 'add expects finite numeric inputs' },
     status: 400,
-  }),
+  }, false),
   expectMiddlewareResult(addMiddleware, { a: 'two', b: '6' }, {
     body: { error: 'add expects finite numeric inputs' },
     status: 400,
-  }),
+  }, false),
 ]).catch((error) => {
   process.exitCode = 1;
   throw error;
 });
 
-async function expectMiddlewareResult(fn, query, expected) {
+async function expectMiddlewareResult(fn, query, expected, shouldCallNext = true) {
   assert.strictEqual(typeof fn, 'function');
 
   const context = { query };
@@ -51,7 +51,7 @@ async function expectMiddlewareResult(fn, query, expected) {
     nextCalled = true;
   });
 
-  assert.strictEqual(nextCalled, true);
+  assert.strictEqual(nextCalled, shouldCallNext);
   assert.deepStrictEqual(context.body, expected.body);
   assert.strictEqual(context.status ?? 200, expected.status ?? 200);
 }

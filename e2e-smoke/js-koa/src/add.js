@@ -17,6 +17,7 @@ async function handler(context, next) {
 
     context.status = 400;
     context.body = { error: error.message };
+    return;
   }
 
   if (typeof next === 'function') {
