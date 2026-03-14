@@ -1,6 +1,7 @@
 """Focused addition helper exercised by the Python smoke tests."""
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from fractions import Fraction
 import math
 import operator
 import sys
@@ -82,6 +83,18 @@ def _normalize_float_operand(value: float) -> int:
         raise _operand_type_error(cause=exc)
 
 
+def _normalize_fraction_operand(value: Fraction) -> int:
+    """Round Fraction operands with deterministic half-up semantics."""
+    numerator = value.numerator
+    denominator = value.denominator
+
+    half = denominator // 2
+    if numerator >= 0:
+        return (numerator + half) // denominator
+
+    return -((-numerator + half) // denominator)
+
+
 def _normalize_decimal_operand(value: Decimal) -> int:
     """Round finite Decimal operands with deterministic half-up semantics."""
     if not value.is_finite():
@@ -131,6 +144,9 @@ def _normalize_operand(value: object) -> int:
 
     if isinstance(value, Decimal):
         return _normalize_decimal_operand(value)
+
+    if isinstance(value, Fraction):
+        return _normalize_fraction_operand(value)
 
     if isinstance(value, float):
         return _normalize_float_operand(value)

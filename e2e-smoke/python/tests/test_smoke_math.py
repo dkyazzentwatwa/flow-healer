@@ -1,4 +1,5 @@
 from decimal import Decimal
+from fractions import Fraction
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -81,6 +82,14 @@ ADD_SUCCESS_CASES = (
     pytest.param("1_000", "2_000", 3000, id="adds_underscored_integer_strings"),
     pytest.param(Decimal("2.5"), 2, 5, id="adds_decimal_operand_with_half_up_rounding"),
     pytest.param(Decimal("-2.5"), 1, -2, id="adds_negative_decimal_operand_with_half_up_rounding"),
+    pytest.param(Fraction(5, 2), 0, 3, id="adds_fraction_operand_with_half_up_rounding"),
+    pytest.param(Fraction(-5, 2), 1, -2, id="adds_negative_fraction_operand_with_half_up_rounding"),
+    pytest.param(
+        Fraction(1, 2),
+        Fraction(1, 2),
+        2,
+        id="adds_half_fraction_operands_round_up",
+    ),
 )
 
 ADD_TYPE_ERROR_CASES = (
@@ -93,7 +102,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(Decimal("Infinity"), 1, id="rejects_decimal_infinite_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 17
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 20
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 7
 
 
@@ -361,6 +370,25 @@ def test_normalize_operand_rounds_decimal_inputs_deterministically(
     expected: int,
 ) -> None:
     """Decimal operands should round predictably before addition."""
+    assert _normalize_operand(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        pytest.param(Fraction(5, 2), 3, id="rounds_positive_fraction_half_up"),
+        pytest.param(Fraction(-5, 2), -3, id="rounds_negative_fraction_half_up"),
+        pytest.param(Fraction(249, 100), 2, id="rounds_positive_fraction_fraction_down"),
+        pytest.param(Fraction(-249, 100), -2, id="rounds_negative_fraction_fraction_toward_zero"),
+        pytest.param(Fraction(1, 2), 1, id="rounds_positive_fraction_half_exact"),
+        pytest.param(Fraction(10**80 * 2 + 1, 2), 10**80 + 1, id="handles_large_fraction_half_edge"),
+    ),
+)
+def test_normalize_operand_rounds_fraction_inputs_deterministically(
+    value: Fraction,
+    expected: int,
+) -> None:
+    """Fraction operands should round predictably before addition."""
     assert _normalize_operand(value) == expected
 
 
