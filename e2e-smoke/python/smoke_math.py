@@ -82,6 +82,22 @@ def _normalize_float_operand(value: float) -> int:
         raise _operand_type_error(cause=exc)
 
 
+def _normalize_decimal_operand(value: Decimal) -> int:
+    """Round finite Decimal operands with deterministic half-up semantics."""
+    if not value.is_finite():
+        raise _operand_type_error()
+
+    try:
+        rounded_value = value.to_integral_value(rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError) as exc:
+        raise _operand_type_error(cause=exc)
+
+    try:
+        return int(rounded_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _operand_type_error(cause=exc)
+
+
 def _strip_ascii_whitespace(value: str) -> str:
     """Trim the same leading and trailing whitespace that int() accepts."""
     return value.strip()
@@ -112,6 +128,9 @@ def _normalize_operand(value: object) -> int:
 
     if isinstance(value, Integral):
         return _normalize_integral_operand(value)
+
+    if isinstance(value, Decimal):
+        return _normalize_decimal_operand(value)
 
     if isinstance(value, float):
         return _normalize_float_operand(value)
