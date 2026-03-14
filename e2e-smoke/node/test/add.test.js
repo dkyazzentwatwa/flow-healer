@@ -137,6 +137,20 @@ test('addMany rejects one invalid operand', () => {
   });
 });
 
+test('addMany sums more than three finite operands', () => {
+  assert.equal(addMany(1, 2, 3, 4, 5), 15);
+});
+
+test('addMany normalizes numeric string operands across variadic inputs', () => {
+  assert.equal(addMany('1', ' 2 ', '3', '4'), 10);
+});
+
+test('addMany rejects an invalid operand among a longer list', () => {
+  assert.throws(() => addMany(1, 2, Number.POSITIVE_INFINITY, 4), {
+    name: 'TypeError',
+  });
+});
+
 test('add preserves regular number semantics for non-integer inputs', () => {
   const nanResult = add(Number.NaN, 1);
   const decimalResult = add(0.1, 0.2);
