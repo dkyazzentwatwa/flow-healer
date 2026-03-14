@@ -742,7 +742,6 @@ class HealerRunner:
                 )
 
             pre_fix_session: AppHarnessSession | None = None
-            browser_entry_url = _resolve_browser_entry_url(task_spec.entry_url, browser_profile.readiness_url or "")
             try:
                 expect_pre_fix_failure = browser_repro_mode != "allow_success"
                 self._run_fixture_driver(
@@ -751,6 +750,8 @@ class HealerRunner:
                     action="prepare",
                 )
                 boot_result, pre_fix_session = self._app_harness.boot(browser_profile)
+                boot_readiness_url = boot_result.readiness_url or browser_profile.readiness_url or ""
+                browser_entry_url = _resolve_browser_entry_url(task_spec.entry_url, boot_readiness_url)
                 pre_fix_storage_state_path = self._materialize_fixture_auth_state(
                     profile=browser_profile,
                     fixture_profile=task_spec.fixture_profile,
@@ -1726,6 +1727,8 @@ class HealerRunner:
                         action="prepare",
                     )
                 boot_result, app_runtime_session = self._app_harness.boot(runtime_profile)
+                boot_readiness_url = boot_result.readiness_url or runtime_profile.readiness_url or ""
+                resolved_runtime_entry_url = _resolve_browser_entry_url(task_spec.entry_url, boot_readiness_url)
                 if browser_evidence_requested:
                     runtime_storage_state_path = self._materialize_fixture_auth_state(
                         profile=runtime_profile,
@@ -1845,7 +1848,7 @@ class HealerRunner:
                 targeted_tests=targeted_tests,
             )
         if browser_evidence_requested and runtime_profile is not None and app_runtime_session is not None:
-            browser_entry_url = _resolve_browser_entry_url(task_spec.entry_url, runtime_profile.readiness_url or "")
+            browser_entry_url = resolved_runtime_entry_url
             try:
                 resolution_journey = self._browser_harness.capture_journey(
                     profile=runtime_profile,
@@ -1974,6 +1977,7 @@ class HealerRunner:
                     artifact_links=browser_artifact_links,
                     artifact_requirements=task_spec.artifact_requirements,
                 )
+                test_summary["browser_failure_family"] = _browser_step_failure_family_for_journey(resolution_journey)
                 _stop_app_runtime()
                 return HealerRunResult(
                     success=False,
@@ -1985,11 +1989,7 @@ class HealerRunner:
                     diff_files=diff_files,
                     diff_lines=diff_lines,
                     test_summary=_with_workspace_status(
-                        _annotate_browser_failure_family(
-                            test_summary,
-                            failure_class="browser_step_failed",
-                            failure_reason=failure_reason,
-                        ),
+                        test_summary,
                         workspace_status=workspace_status,
                         failure_fingerprint="",
                     ),
@@ -5871,6 +5871,15 @@ def _browser_failure_family(*, failure_class: str, failure_reason: str | None) -
     return ""
 
 
+def _browser_step_failure_family_for_journey(result: BrowserJourneyResult) -> str:
+    if result.same_origin_asset_failures:
+        return "runtime_readiness"
+    joined_console_errors = " ".join(str(entry or "").strip().lower() for entry in result.console_errors)
+    if any(token in joined_console_errors for token in ("chunk load", "failed to fetch", "loading chunk")):
+        return "runtime_readiness"
+    return "journey_step"
+
+
 def _annotate_test_summary_runtime(
     summary: dict[str, Any],
     *,
@@ -6092,6 +6101,9 @@ def _browser_phase_payload(result: BrowserJourneyResult) -> dict[str, Any]:
         "expected_failure_observed": bool(result.expected_failure_observed),
         "final_url": result.final_url,
         "transcript": [dict(entry) for entry in result.transcript],
+        "hydration_ready": bool(result.hydration_ready),
+        "same_origin_asset_failures": [dict(entry) for entry in result.same_origin_asset_failures],
+        "console_errors": list(result.console_errors),
     }
     if result.failure_step:
         payload["failure_step"] = result.failure_step
@@ -6205,6 +6217,11 @@ def _browser_bundle_phase_result(bundle: dict[str, Any], *, phase: str) -> Brows
         console_log_path=str(phase_payload.get("console_log_path") or ""),
         network_log_path=str(phase_payload.get("network_log_path") or ""),
         transcript=tuple(dict(entry) for entry in transcript) if isinstance(transcript, list) else (),
+        hydration_ready=bool(phase_payload.get("hydration_ready", True)),
+        same_origin_asset_failures=tuple(
+            dict(entry) for entry in phase_payload.get("same_origin_asset_failures", []) if isinstance(entry, dict)
+        ),
+        console_errors=tuple(str(entry) for entry in phase_payload.get("console_errors", []) if str(entry or "").strip()),
     )
 
 

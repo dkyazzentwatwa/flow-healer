@@ -155,6 +155,57 @@ def test_start_requires_both_log_and_url_when_both_are_configured(
         assert session.stop() == 0
 
 
+def test_start_uses_runtime_local_url_when_logs_report_port_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_path = _write_script(
+        tmp_path,
+        "next_like_app.py",
+        """
+        import signal
+        import time
+
+        def _handle_term(signum, frame):
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, _handle_term)
+        print("booting", flush=True)
+        time.sleep(0.1)
+        print("Local:        http://localhost:3001", flush=True)
+        while True:
+            time.sleep(0.1)
+        """,
+    )
+    attempts: list[str] = []
+
+    def fake_url_is_ready(url: str, *, timeout_seconds: float) -> bool:
+        attempts.append(url)
+        return url == "http://localhost:3001/healthz"
+
+    monkeypatch.setattr("flow_healer.app_harness._url_is_ready", fake_url_is_ready)
+
+    harness = LocalAppHarness()
+    profile = AppRuntimeProfile(
+        name="next-like-app",
+        command=(sys.executable, "-u", str(script_path)),
+        cwd=tmp_path,
+        readiness_url="http://127.0.0.1:3000/healthz",
+        startup_timeout_seconds=2.0,
+        poll_interval_seconds=0.05,
+    )
+
+    result, session = harness.start(profile)
+    try:
+        assert result.ready_via_url is True
+        assert result.readiness_url == "http://localhost:3001/healthz"
+        assert "http://127.0.0.1:3000/healthz" in attempts
+        assert "http://localhost:3001/healthz" in attempts
+        assert session.process.poll() is None
+    finally:
+        assert session.stop() == 0
+
+
 def test_start_raises_when_process_exits_before_becoming_ready(tmp_path: Path) -> None:
     script_path = _write_script(
         tmp_path,

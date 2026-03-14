@@ -11,6 +11,7 @@ from flow_healer.browser_harness import (
     BrowserStep,
     LocalBrowserHarness,
     _PlaywrightBrowserSession,
+    _browser_boot_failure_summary,
     assess_browser_evidence_completeness,
     classify_browser_failure,
     parse_repro_steps,
@@ -247,6 +248,62 @@ def test_capture_journey_handles_completed_state_then_restart_to_fresh_state(tmp
     assert Path(result.network_log_path).exists()
 
 
+def test_capture_journey_supports_fresh_deterministic_playthrough_without_restart(tmp_path: Path) -> None:
+    class _DeterministicBoardSession(_FakeBrowserSession):
+        def __init__(self) -> None:
+            super().__init__(
+                visible_texts={"Start game", "Current turn: X", "Tic Tac Toe Browser Signal T3"},
+                current_url="http://127.0.0.1:3000/tictactoe",
+            )
+            self._moves: list[str] = []
+
+        def click(self, selector: str) -> None:
+            super().click(selector)
+            self._moves.append(selector)
+            if len(self._moves) < 5:
+                self.visible_texts = {"Current turn: X", "Tic Tac Toe Browser Signal T3"}
+                return
+            self.visible_texts = {"Winner: X", "Restart", "Tic Tac Toe Browser Signal T3"}
+
+    session = _DeterministicBoardSession()
+    harness = LocalBrowserHarness(session_factory=lambda profile, entry_url, artifact_root, phase: session)
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        browser="chromium",
+    )
+
+    result = harness.capture_journey(
+        profile=profile,
+        entry_url="http://127.0.0.1:3000",
+        repro_steps=(
+            "goto /tictactoe",
+            "expect_url http://127.0.0.1:3000/tictactoe",
+            "expect_text Tic Tac Toe Browser Signal T3",
+            "expect_any_text Start game || Current turn: X",
+            'click [aria-label="Cell 1"]',
+            'click [aria-label="Cell 2"]',
+            'click [aria-label="Cell 4"]',
+            'click [aria-label="Cell 5"]',
+            'click [aria-label="Cell 7"]',
+            "expect_text Winner: X",
+        ),
+        artifact_root=tmp_path / "artifacts",
+        phase="resolution",
+        expect_failure=False,
+    )
+
+    assert result.passed is True
+    assert session.clicked == [
+        '[aria-label="Cell 1"]',
+        '[aria-label="Cell 2"]',
+        '[aria-label="Cell 4"]',
+        '[aria-label="Cell 5"]',
+        '[aria-label="Cell 7"]',
+    ]
+
+
 def test_capture_journey_accepts_preparsed_browser_steps(tmp_path: Path) -> None:
     session = _FakeBrowserSession()
     harness = LocalBrowserHarness(session_factory=lambda profile, entry_url, artifact_root, phase: session)
@@ -479,6 +536,139 @@ def test_playwright_session_click_adopts_new_popup_page() -> None:
     assert popup.wait_timeout_calls
 
 
+def test_browser_boot_failure_summary_flags_same_origin_script_404s() -> None:
+    summary = _browser_boot_failure_summary(
+        entry_url="http://127.0.0.1:3000/tictactoe-t4",
+        console_entries=(
+            "[error] Failed to load resource: the server responded with a status of 404 (Not Found)\n",
+        ),
+        network_entries=(
+            {
+                "event": "response",
+                "status": 404,
+                "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+                "resource_type": "script",
+            },
+            {
+                "event": "response",
+                "status": 404,
+                "url": "http://127.0.0.1:3000/favicon.ico",
+                "resource_type": "other",
+            },
+        ),
+    )
+
+    assert summary["hydration_ready"] is False
+    assert summary["same_origin_asset_failures"] == (
+        {
+            "resource_type": "script",
+            "status": 404,
+            "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+        },
+    )
+    assert summary["console_errors"] == (
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    )
+
+
+def test_playwright_session_goto_reloads_once_after_client_boot_failures() -> None:
+    class _FakePage:
+        def __init__(self) -> None:
+            self.goto_calls: list[tuple[str, str]] = []
+            self.reload_calls: list[str] = []
+            self.wait_timeout_calls: list[int] = []
+            self.wait_for_load_state_calls: list[tuple[str, int]] = []
+            self.url = "http://127.0.0.1:3000/tictactoe-t4"
+
+        def goto(self, url: str, wait_until: str = "") -> None:
+            self.goto_calls.append((url, wait_until))
+
+        def reload(self, wait_until: str = "") -> None:
+            self.reload_calls.append(wait_until)
+
+        def wait_for_load_state(self, state: str, timeout: int = 0) -> None:
+            self.wait_for_load_state_calls.append((state, timeout))
+
+        def wait_for_timeout(self, value: int) -> None:
+            self.wait_timeout_calls.append(value)
+
+    session = _PlaywrightBrowserSession.__new__(_PlaywrightBrowserSession)
+    session._page = _FakePage()
+    session._entry_url = "http://127.0.0.1:3000/tictactoe-t4"
+    session._console_entries = [
+        "[error] Failed to load resource: the server responded with a status of 404 (Not Found)\n"
+    ]
+    session._network_entries = [
+        {
+            "event": "response",
+            "status": 404,
+            "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+            "resource_type": "script",
+        }
+    ]
+
+    session.goto("http://127.0.0.1:3000/tictactoe-t4")
+
+    assert session._page.goto_calls == [("http://127.0.0.1:3000/tictactoe-t4", "domcontentloaded")]
+    assert session._page.reload_calls == ["domcontentloaded"]
+    assert session._page.wait_for_load_state_calls == [("networkidle", 2000)]
+    assert session._page.wait_timeout_calls
+    assert session._last_boot_failure_summary["hydration_ready"] is True
+
+
+def test_playwright_session_boot_check_reassesses_after_reload_settle() -> None:
+    class _FakePage:
+        def __init__(self, session) -> None:
+            self.session = session
+            self.url = "http://127.0.0.1:3000/rps-r1"
+
+        def goto(self, url: str, wait_until: str = "") -> None:
+            return None
+
+        def reload(self, wait_until: str = "") -> None:
+            self.session._network_entries = [
+                {
+                    "event": "response",
+                    "status": 200,
+                    "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=2",
+                    "resource_type": "script",
+                },
+                {
+                    "event": "response",
+                    "status": 200,
+                    "url": "http://127.0.0.1:3000/_next/static/chunks/app-pages-internals.js",
+                    "resource_type": "script",
+                },
+            ]
+            self.session._console_entries = []
+
+        def wait_for_load_state(self, state: str, timeout: int = 0) -> None:
+            return None
+
+        def wait_for_timeout(self, value: int) -> None:
+            return None
+
+    session = _PlaywrightBrowserSession.__new__(_PlaywrightBrowserSession)
+    session._entry_url = "http://127.0.0.1:3000/rps-r1"
+    session._console_entries = [
+        "[error] Failed to load resource: the server responded with a status of 404 (Not Found)\n"
+    ]
+    session._network_entries = [
+        {
+            "event": "response",
+            "status": 404,
+            "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+            "resource_type": "script",
+        }
+    ]
+    session._page = _FakePage(session)
+
+    summary = session._ensure_client_boot_ready("http://127.0.0.1:3000/rps-r1")
+
+    assert summary["hydration_ready"] is True
+    assert summary["same_origin_asset_failures"] == ()
+
+
 def test_assess_completeness_repro_phase_requires_screenshot_and_console(tmp_path: Path) -> None:
     screenshot = tmp_path / "repro.png"
     console = tmp_path / "repro-console.log"
@@ -491,6 +681,14 @@ def test_assess_completeness_repro_phase_requires_screenshot_and_console(tmp_pat
         final_url="http://127.0.0.1:3000",
         screenshot_path=str(screenshot),
         console_log_path=str(console),
+        hydration_ready=False,
+        same_origin_asset_failures=(
+            {
+                "resource_type": "script",
+                "status": 404,
+                "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+            },
+        ),
     )
 
     completeness = assess_browser_evidence_completeness(result)
@@ -500,6 +698,52 @@ def test_assess_completeness_repro_phase_requires_screenshot_and_console(tmp_pat
     assert completeness.missing == ()
     assert completeness.complete is True
     assert completeness.missing_class == "none"
+    assert result.hydration_ready is False
+
+
+def test_capture_journey_records_browser_boot_diagnostics_from_session(tmp_path: Path) -> None:
+    class _DiagnosticSession(_FakeBrowserSession):
+        def diagnostics(self) -> dict[str, object]:
+            return {
+                "hydration_ready": False,
+                "same_origin_asset_failures": (
+                    {
+                        "resource_type": "script",
+                        "status": 404,
+                        "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+                    },
+                ),
+                "console_errors": ("chunk load failed",),
+            }
+
+    session = _DiagnosticSession()
+    harness = LocalBrowserHarness(session_factory=lambda profile, entry_url, artifact_root, phase: session)
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        browser="chromium",
+    )
+
+    result = harness.capture_journey(
+        profile=profile,
+        entry_url="http://127.0.0.1:3000",
+        repro_steps=("goto /", "expect_text Available todo routes"),
+        artifact_root=tmp_path / "artifacts",
+        phase="resolution",
+        expect_failure=False,
+    )
+
+    assert result.hydration_ready is False
+    assert result.console_errors == ("chunk load failed",)
+    assert result.same_origin_asset_failures == (
+        {
+            "resource_type": "script",
+            "status": 404,
+            "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1",
+        },
+    )
+
 
 
 def test_assess_completeness_verify_phase_requires_network_log(tmp_path: Path) -> None:

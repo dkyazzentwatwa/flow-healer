@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import time
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock, Thread
 from urllib import error, request
+from urllib.parse import urlparse, urlunparse
 
 
 @dataclass(slots=True, frozen=True)
@@ -161,23 +163,28 @@ class LocalAppHarness:
         require_url = bool(profile.readiness_url)
         ready_via_log = False
         ready_via_url = False
+        resolved_readiness_url = profile.readiness_url
         started_at = time.monotonic()
 
         while True:
             output_tail = session.output_tail()
             if require_log and profile.readiness_log_text and profile.readiness_log_text in output_tail:
                 ready_via_log = True
-            if require_url and profile.readiness_url and _url_is_ready(
-                profile.readiness_url,
-                timeout_seconds=max(profile.poll_interval_seconds, 0.2),
-            ):
-                ready_via_url = True
+            if require_url and profile.readiness_url:
+                for candidate_url in _candidate_readiness_urls(profile.readiness_url, output_tail):
+                    if _url_is_ready(
+                        candidate_url,
+                        timeout_seconds=max(profile.poll_interval_seconds, 0.2),
+                    ):
+                        ready_via_url = True
+                        resolved_readiness_url = candidate_url
+                        break
 
             if (not require_log or ready_via_log) and (not require_url or ready_via_url):
                 return AppHarnessBootResult(
                     profile=profile,
                     pid=session.process.pid,
-                    readiness_url=profile.readiness_url,
+                    readiness_url=resolved_readiness_url,
                     ready_via_url=ready_via_url,
                     ready_via_log=ready_via_log,
                     startup_seconds=time.monotonic() - started_at,
@@ -225,6 +232,49 @@ def _infer_install_command(profile: AppRuntimeProfile) -> tuple[str, ...]:
     if (profile.cwd / "package-lock.json").exists():
         return ("npm", "ci")
     return ("npm", "install")
+
+
+_LOCAL_RUNTIME_URL_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/[^\s]*)?", re.IGNORECASE)
+
+
+def _candidate_readiness_urls(configured_url: str, output_tail: str) -> tuple[str, ...]:
+    configured = str(configured_url or "").strip()
+    if not configured:
+        return ()
+
+    candidates = [configured]
+    discovered = _discovered_local_runtime_url(output_tail, configured_url=configured)
+    if discovered and discovered not in candidates:
+        candidates.append(discovered)
+    return tuple(candidates)
+
+
+def _discovered_local_runtime_url(output_tail: str, *, configured_url: str) -> str | None:
+    lines = [line.strip() for line in str(output_tail or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if "local:" not in line.lower():
+            continue
+        match = _LOCAL_RUNTIME_URL_RE.search(line)
+        if match is None:
+            continue
+        return _merge_runtime_url(configured_url, match.group(0))
+
+    matches = _LOCAL_RUNTIME_URL_RE.findall(str(output_tail or ""))
+    if not matches:
+        return None
+    return _merge_runtime_url(configured_url, matches[-1])
+
+
+def _merge_runtime_url(configured_url: str, discovered_url: str) -> str:
+    configured = urlparse(str(configured_url or "").strip())
+    discovered = urlparse(str(discovered_url or "").strip())
+    if not discovered.scheme or not discovered.netloc:
+        return str(configured_url or "").strip()
+    path = configured.path or discovered.path or "/"
+    params = configured.params or discovered.params
+    query = configured.query or discovered.query
+    fragment = configured.fragment or discovered.fragment
+    return urlunparse((discovered.scheme, discovered.netloc, path, params, query, fragment))
 
 
 def _url_is_ready(url: str, *, timeout_seconds: float) -> bool:

@@ -37,7 +37,7 @@
       "source": "docs/issue-contracts.md",
       "source_kind": "inline_body",
       "title": "Node restart-state browser contract",
-      "body": "Required code outputs:\n- e2e-apps/node-next/app/page.js\n\nExecution root:\n- e2e-apps/node-next\n\napp_target: node-next\nruntime_profile: web\nbrowser_repro_mode: allow_success\n\nrepro_steps:\n- goto /game\n- expect_any_text Winner: X || Start game\n- click button.restart\n- expect_text Start game\n- expect_text_absent Winner: X\n- expect_url /game\n\nartifact_requirements:\n- screenshot: artifacts/game-board.png\n- console log\n- network log\n\nValidation:\n- cd e2e-apps/node-next && npm test -- --passWithNoTests\n"
+      "body": "Required code outputs:\n- e2e-apps/node-next/app/page.js\n\nExecution root:\n- e2e-apps/node-next\n\napp_target: node-next\nruntime_profile: web\nbrowser_repro_mode: allow_success\n\nrepro_steps:\n- goto /game\n- expect_url /game\n- expect_any_text Start game || Current turn: X\n- click [aria-label=\"Cell 1\"]\n- click [aria-label=\"Cell 2\"]\n- click [aria-label=\"Cell 4\"]\n- click [aria-label=\"Cell 5\"]\n- click [aria-label=\"Cell 7\"]\n- expect_text Winner: X\n\nartifact_requirements:\n- screenshot: artifacts/game-board.png\n- console log\n- network log\n\nValidation:\n- cd e2e-apps/node-next && npm test -- --passWithNoTests\n"
     }
   ]
 }

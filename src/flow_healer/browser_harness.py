@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from .app_harness import AppRuntimeProfile
 
@@ -40,6 +40,9 @@ class BrowserJourneyResult:
     console_log_path: str = ""
     network_log_path: str = ""
     transcript: tuple[dict[str, object], ...] = ()
+    hydration_ready: bool = True
+    same_origin_asset_failures: tuple[dict[str, object], ...] = ()
+    console_errors: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -134,6 +137,7 @@ class LocalBrowserHarness:
             error = "; ".join(part for part in (error, f"artifact_capture_failed: {artifact_error}") if part)
 
         final_url = _current_url(session) or _resolve_url(entry_url, "/")
+        diagnostics = _session_diagnostics(session, entry_url=final_url or entry_url)
         return BrowserJourneyResult(
             phase=phase,
             passed=passed,
@@ -146,6 +150,9 @@ class LocalBrowserHarness:
             console_log_path=console_log_path,
             network_log_path=network_log_path,
             transcript=tuple(transcript),
+            hydration_ready=bool(diagnostics.get("hydration_ready", True)),
+            same_origin_asset_failures=tuple(diagnostics.get("same_origin_asset_failures") or ()),
+            console_errors=tuple(diagnostics.get("console_errors") or ()),
         )
 
     def _build_session(
@@ -276,6 +283,11 @@ class _PlaywrightBrowserSession:
         self._console_entries: list[str] = []
         self._network_entries: list[dict[str, object]] = []
         self._video_output: Path | None = None
+        self._last_boot_failure_summary: dict[str, object] = {
+            "hydration_ready": True,
+            "same_origin_asset_failures": (),
+            "console_errors": (),
+        }
 
         self._playwright = sync_playwright().start()
         browser_name = str(profile.browser or "chromium").strip().lower()
@@ -314,6 +326,7 @@ class _PlaywrightBrowserSession:
 
     def goto(self, url: str) -> None:
         self._page.goto(url, wait_until="domcontentloaded")
+        self._last_boot_failure_summary = self._ensure_client_boot_ready(url)
 
     def click(self, selector_or_text: str) -> None:
         known_pages = tuple(getattr(self._context, "pages", []) or ())
@@ -432,7 +445,18 @@ class _PlaywrightBrowserSession:
             return self._page.locator(f"xpath={query}")
         if query.startswith("css="):
             return self._page.locator(query[4:])
-        return self._page.locator(query)
+
+        # If it looks like a standard CSS selector (e.g. contains brackets, dots, or hashes), use it directly.
+        if any(char in query for char in "[]#."):
+            return self._page.locator(query)
+
+        # Fallback heuristic: try button by name, then general text.
+        # This makes 'click Restart' work without needing 'click button=Restart' or 'click text=Restart'.
+        button_locator = self._page.get_by_role("button", name=query, exact=False)
+        if button_locator.count() > 0:
+            return button_locator
+
+        return self._page.get_by_text(query, exact=False)
 
     def _attach_page_observers(self, page: Any) -> None:
         page.on("console", self._on_console)
@@ -460,6 +484,43 @@ class _PlaywrightBrowserSession:
         except Exception:
             return
 
+    def diagnostics(self) -> dict[str, object]:
+        summary = _browser_boot_failure_summary(
+            entry_url=self.current_url or self._entry_url,
+            console_entries=tuple(self._console_entries),
+            network_entries=tuple(self._network_entries),
+        )
+        if summary["hydration_ready"] and not self._last_boot_failure_summary.get("hydration_ready", True):
+            return dict(self._last_boot_failure_summary)
+        return summary
+
+    def _ensure_client_boot_ready(self, url: str) -> dict[str, object]:
+        summary = _browser_boot_failure_summary(
+            entry_url=url,
+            console_entries=tuple(self._console_entries),
+            network_entries=tuple(self._network_entries),
+        )
+        if summary["hydration_ready"]:
+            return summary
+        try:
+            self._page.wait_for_timeout(300)
+            self._console_entries.clear()
+            self._network_entries.clear()
+            self._page.reload(wait_until="domcontentloaded")
+            try:
+                self._page.wait_for_load_state("networkidle", timeout=2000)
+            except Exception:
+                pass
+            self._page.wait_for_timeout(300)
+        except Exception:
+            return summary
+        retried = _browser_boot_failure_summary(
+            entry_url=url,
+            console_entries=tuple(self._console_entries),
+            network_entries=tuple(self._network_entries),
+        )
+        return retried
+
     def _on_console(self, message: Any) -> None:
         self._console_entries.append(f"[{message.type}] {message.text}\n")
 
@@ -469,17 +530,80 @@ class _PlaywrightBrowserSession:
                 "event": "request",
                 "method": request.method,
                 "url": request.url,
+                "resource_type": str(getattr(request, "resource_type", "") or ""),
             }
         )
 
     def _on_response(self, response: Any) -> None:
+        request = getattr(response, "request", None)
         self._network_entries.append(
             {
                 "event": "response",
                 "status": response.status,
                 "url": response.url,
+                "resource_type": str(getattr(request, "resource_type", "") or ""),
             }
         )
+
+
+def _session_diagnostics(session: Any, *, entry_url: str) -> dict[str, object]:
+    diagnostics_fn = getattr(session, "diagnostics", None)
+    if callable(diagnostics_fn):
+        raw = diagnostics_fn()
+        if isinstance(raw, dict):
+            return {
+                "hydration_ready": bool(raw.get("hydration_ready", True)),
+                "same_origin_asset_failures": tuple(raw.get("same_origin_asset_failures") or ()),
+                "console_errors": tuple(raw.get("console_errors") or ()),
+            }
+    return {
+        "hydration_ready": True,
+        "same_origin_asset_failures": (),
+        "console_errors": (),
+    }
+
+
+def _browser_boot_failure_summary(
+    *,
+    entry_url: str,
+    console_entries: tuple[str, ...] | list[str],
+    network_entries: tuple[dict[str, object], ...] | list[dict[str, object]],
+) -> dict[str, object]:
+    parsed_entry = urlparse(str(entry_url or "").strip())
+    origin = (parsed_entry.scheme, parsed_entry.netloc)
+    asset_failures: list[dict[str, object]] = []
+    for entry in network_entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("event") or "") != "response":
+            continue
+        status = int(entry.get("status") or 0)
+        if status < 400:
+            continue
+        resource_type = str(entry.get("resource_type") or "").strip().lower()
+        if resource_type not in {"script", "stylesheet"}:
+            continue
+        parsed_url = urlparse(str(entry.get("url") or "").strip())
+        if origin != (parsed_url.scheme, parsed_url.netloc):
+            continue
+        asset_failures.append(
+            {
+                "resource_type": resource_type,
+                "status": status,
+                "url": str(entry.get("url") or "").strip(),
+            }
+        )
+
+    console_errors = tuple(
+        line.strip().removeprefix("[error] ").strip()
+        for line in console_entries
+        if str(line or "").strip().startswith("[error]")
+    )
+    return {
+        "hydration_ready": not asset_failures,
+        "same_origin_asset_failures": tuple(asset_failures),
+        "console_errors": console_errors,
+    }
 
 
 def parse_repro_steps(repro_steps: tuple[str, ...]) -> tuple[BrowserStep, ...]:

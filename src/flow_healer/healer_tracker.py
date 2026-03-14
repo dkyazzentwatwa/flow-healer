@@ -33,6 +33,7 @@ _ALLOWED_ARTIFACT_SUFFIXES = {
     ".webp",
 }
 _MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
+_DEFAULT_GITHUB_REQUEST_TIMEOUT_SECONDS = 5
 _ARTIFACT_CONTENT_TYPES = {
     ".gif": "image/gif",
     ".jpeg": "image/jpeg",
@@ -114,6 +115,7 @@ class GitHubHealerTracker:
         retry_max_backoff_seconds: int = 300,
         poll_use_conditional_requests: bool = True,
         poll_etag_ttl_seconds: int = 300,
+        request_timeout_seconds: int = _DEFAULT_GITHUB_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.token = (token or os.getenv("GITHUB_TOKEN", "")).strip()
@@ -128,6 +130,7 @@ class GitHubHealerTracker:
         self.retry_max_backoff_seconds = max(5, int(retry_max_backoff_seconds))
         self.poll_use_conditional_requests = bool(poll_use_conditional_requests)
         self.poll_etag_ttl_seconds = max(60, int(poll_etag_ttl_seconds))
+        self.request_timeout_seconds = max(1, int(request_timeout_seconds))
         self._mutation_lock = threading.Lock()
         self._last_mutation_at = 0.0
         self._etag_cache: dict[str, tuple[str, Any, float]] = {}
@@ -253,26 +256,35 @@ class GitHubHealerTracker:
     def find_open_issue_by_fingerprint(self, fingerprint: str) -> dict[str, Any] | None:
         if not self.enabled or not fingerprint.strip():
             return None
-        query = (
+        q = (
             f"repo:{self.repo_slug} is:issue is:open "
             f"\"flow-healer-fingerprint: `{fingerprint.strip()}`\""
         )
-        payload = self._request_json(
-            f"/search/issues?q={quote(query)}&per_page=1"
-        )
-        if not isinstance(payload, dict):
+        gql = """
+query FindIssueByFingerprint($q: String!) {
+  search(query: $q, type: ISSUE, first: 1) {
+    nodes {
+      ... on Issue {
+        number
+        url
+        title
+      }
+    }
+  }
+}
+"""
+        data = self._graphql(gql, {"q": q})
+        nodes = (data.get("search") or {}).get("nodes") or []
+        if not nodes or not isinstance(nodes[0], dict):
             return None
-        items = payload.get("items")
-        if not isinstance(items, list) or not items:
-            return None
-        item = items[0] if isinstance(items[0], dict) else {}
-        number = int(item.get("number") or 0)
+        node = nodes[0]
+        number = int(node.get("number") or 0)
         if number <= 0:
             return None
         return {
             "number": number,
-            "html_url": str(item.get("html_url") or ""),
-            "title": str(item.get("title") or ""),
+            "html_url": str(node.get("url") or ""),
+            "title": str(node.get("title") or ""),
         }
 
     def create_issue(self, *, title: str, body: str, labels: list[str] | None = None) -> dict[str, Any] | None:
@@ -361,26 +373,37 @@ class GitHubHealerTracker:
     def find_pr_for_issue(self, *, issue_id: str, limit: int = 100) -> PullRequestResult | None:
         if not self.enabled or not issue_id.strip():
             return None
-        query = f'repo:{self.repo_slug} is:pr "issue #{issue_id.strip()}"'
-        payload = self._request_json(
-            f"/search/issues?q={quote(query)}&per_page={int(max(1, min(limit, 20)))}"
-        )
-        if not isinstance(payload, dict):
-            return None
-        items = payload.get("items")
-        if not isinstance(items, list):
-            return None
+        first = int(max(1, min(limit, 10)))
+        q = f'repo:{self.repo_slug} is:pr "issue #{issue_id.strip()}"'
+        gql = """
+query FindPRForIssue($q: String!, $first: Int!) {
+  search(query: $q, type: ISSUE, first: $first) {
+    nodes {
+      ... on PullRequest {
+        number
+        state
+        url
+        updatedAt
+        mergedAt
+        closedAt
+      }
+    }
+  }
+}
+"""
+        data = self._graphql(gql, {"q": q, "first": first})
+        nodes = (data.get("search") or {}).get("nodes") or []
         matches: list[tuple[str, PullRequestResult]] = []
-        for item in items:
-            if not isinstance(item, dict):
+        for node in nodes:
+            if not isinstance(node, dict):
                 continue
-            pr_number = int(item.get("number") or 0)
+            pr_number = int(node.get("number") or 0)
             if pr_number <= 0:
                 continue
-            state = str(item.get("state") or "").strip().lower()
-            html_url = str(item.get("html_url") or "")
-            updated_at = str(item.get("closed_at") or item.get("updated_at") or "")
-            if state == "closed":
+            gql_state = str(node.get("state") or "").upper()
+            html_url = str(node.get("url") or "")
+            updated_at = str(node.get("closedAt") or node.get("updatedAt") or "")
+            if gql_state in ("CLOSED", "MERGED"):
                 details = self.get_pr_details(pr_number=pr_number)
                 if details is None:
                     continue
@@ -395,19 +418,20 @@ class GitHubHealerTracker:
                     )
                 )
                 continue
+            state = "open" if gql_state == "OPEN" else gql_state.lower() or "open"
             matches.append(
                 (
                     updated_at,
                     PullRequestResult(
                         number=pr_number,
-                        state=state or "open",
+                        state=state,
                         html_url=html_url,
                     ),
                 )
             )
         if not matches:
             return None
-        matches.sort(key=lambda item: item[0], reverse=True)
+        matches.sort(key=lambda x: x[0], reverse=True)
         return matches[0][1]
 
     def open_or_update_pr(
@@ -1456,6 +1480,19 @@ class GitHubHealerTracker:
             return "unknown"
         return "success"
 
+    def _graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = self._request_json(
+            "/graphql",
+            method="POST",
+            body={"query": query, "variables": variables or {}},
+        )
+        if not isinstance(payload, dict):
+            return {}
+        errors = payload.get("errors")
+        if errors:
+            logger.warning("GraphQL errors: %s", errors)
+        return payload.get("data") or {}
+
     @staticmethod
     def _latest_timestamp(*values: str) -> str:
         timestamps = [str(value or "").strip() for value in values if str(value or "").strip()]
@@ -1504,7 +1541,7 @@ class GitHubHealerTracker:
             if use_conditional and cached_etag:
                 req.add_header("If-None-Match", cached_etag)
             try:
-                with urlopen(req, timeout=20) as resp:
+                with urlopen(req, timeout=self.request_timeout_seconds) as resp:
                     raw = resp.read().decode("utf-8", errors="replace")
                     payload = json.loads(raw) if raw else {}
                     if use_conditional:

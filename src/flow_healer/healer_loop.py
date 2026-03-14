@@ -34,6 +34,7 @@ from .healer_preflight import (
 )
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
+from .healer_security_reviewer import HealerSecurityReviewer
 from .healer_runner import HealerRunner, _stage_workspace_changes
 from .healer_swarm import HealerSwarm, SwarmRecoveryOutcome, SwarmRecoveryPlan, build_connector_subagent_backend
 from .healer_scan import FlowHealerScanner
@@ -427,12 +428,13 @@ class AutonomousHealerLoop:
     def _pipeline_for_task(
         self,
         task_spec: HealerTaskSpec,
-    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerSwarm, HealerPreflight]:
+    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerSecurityReviewer, HealerSwarm, HealerPreflight]:
         backend = self._select_backend_for_task(task_spec)
         connector = self.connectors_by_backend.get(backend, self.connector)
         runner = self.runners_by_backend.get(backend, self.runner)
         verifier = self.verifiers_by_backend.get(backend, self.verifier)
         reviewer = self.reviewers_by_backend.get(backend, self.reviewer)
+        security_reviewer = HealerSecurityReviewer(connector)
         swarm = self.swarms_by_backend.get(backend)
         preflight = self.preflight_by_backend.get(backend, self.preflight)
         if swarm is None:
@@ -453,7 +455,7 @@ class AutonomousHealerLoop:
                 ),
             )
             self.swarms_by_backend[backend] = swarm
-        return backend, connector, runner, verifier, reviewer, swarm, preflight
+        return backend, connector, runner, verifier, reviewer, security_reviewer, swarm, preflight
 
     @property
     def enabled(self) -> bool:
@@ -866,7 +868,8 @@ class AutonomousHealerLoop:
             browser_ready, browser_reason = browser_harness.check_runtime_available()
             if not browser_ready:
                 raise RuntimeError(browser_reason or "Browser runtime is unavailable for canary.")
-            _boot_result, session = app_harness.boot(profile)
+            boot_result, session = app_harness.boot(profile)
+            entry_url = str(boot_result.readiness_url or profile.readiness_url or "").strip()
             artifact_root = Path(
                 tempfile.mkdtemp(prefix=f"flow-healer-canary-{profile_name}-", dir=os.getenv("TMPDIR") or None)
             ).resolve()
@@ -3244,6 +3247,29 @@ class AutonomousHealerLoop:
             trusted_actors=self.settings.healer_trusted_actors,
             limit=max(50, self.settings.healer_max_concurrent_issues * 20),
         )
+        ready_issue_ids = {issue.issue_id for issue in issues if issue.issue_id}
+        for row in self.store.list_healer_issues(states=["queued"], limit=500):
+            issue_id = str(row.get("issue_id") or "").strip()
+            if not issue_id or issue_id in ready_issue_ids:
+                continue
+            try:
+                snapshot = self.tracker.get_issue(issue_id=issue_id)
+            except Exception as exc:
+                logger.warning("Failed to refresh remote state for queued issue #%s: %s", issue_id, exc)
+                continue
+            if not isinstance(snapshot, dict):
+                continue
+            remote_state = str(snapshot.get("state") or "").strip().lower()
+            if remote_state and remote_state != "open":
+                self.store.set_healer_issue_state(
+                    issue_id=issue_id,
+                    state="archived",
+                    pr_state="closed",
+                    last_failure_class="",
+                    last_failure_reason="",
+                    clear_lease=True,
+                )
+                logger.info("Archived queued issue #%s because GitHub issue is %s.", issue_id, remote_state)
         for issue in issues:
             task_spec = compile_task_spec(issue_title=issue.title, issue_body=issue.body)
             prediction = predict_lock_set(issue_text=f"{issue.title}\n{issue.body}")
@@ -3495,7 +3521,7 @@ class AutonomousHealerLoop:
             return True
 
         try:
-            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_swarm, selected_preflight = (
+            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_security_reviewer, selected_swarm, selected_preflight = (
                 self._pipeline_for_task(task_spec)
             )
             if not bool(getattr(self.tracker, "enabled", False)):
@@ -4296,6 +4322,19 @@ class AutonomousHealerLoop:
                 ci_status_summary=ci_status_summary,
             )
             logger.info("Issue #%s opened/updated PR #%s", issue.issue_id, pr.number)
+            if self.settings.healer_enable_security_review:
+                try:
+                    sec_review = selected_security_reviewer.review(
+                        issue_id=issue.issue_id,
+                        issue_title=issue.title,
+                        issue_body=issue.body,
+                        diff_paths=run_result.diff_paths,
+                        proposer_output=run_result.proposer_output,
+                        verifier_summary=verification.summary,
+                    )
+                    self.tracker.add_pr_comment(pr_number=pr.number, body=sec_review.review_body)
+                except Exception as exc:
+                    logger.warning("Failed to generate security review for PR #%d: %s", pr.number, exc)
             if self.settings.healer_enable_review:
                 try:
                     review = selected_reviewer.review(

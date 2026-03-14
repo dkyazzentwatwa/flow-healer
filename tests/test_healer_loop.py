@@ -51,6 +51,7 @@ def _make_loop(store, **overrides):
         healer_max_wall_clock_seconds_per_issue=300,
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
+        healer_enable_security_review=overrides.get("healer_enable_security_review", True),
         healer_issue_contract_mode=overrides.get("healer_issue_contract_mode", "lenient"),
         healer_parse_confidence_threshold=overrides.get("healer_parse_confidence_threshold", 0.3),
         healer_codex_native_multi_agent_enabled=overrides.get("healer_codex_native_multi_agent_enabled", False),
@@ -1399,6 +1400,34 @@ def test_ingest_ready_issues_requeues_archived_issue(tmp_path):
     assert issue["state"] == "queued"
     assert issue["pr_state"] == ""
     loop.tracker.add_issue_reaction.assert_not_called()
+
+
+def test_ingest_ready_issues_archives_local_queued_issue_when_remote_closed(tmp_path):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    store.upsert_healer_issue(
+        issue_id="5034",
+        repo="owner/repo",
+        title="Issue 5034",
+        body="",
+        author="alice",
+        labels=["healer:ready"],
+        priority=5,
+    )
+    store.set_healer_issue_state(issue_id="5034", state="queued")
+
+    loop = _make_loop(store)
+    loop.tracker.list_ready_issues.return_value = []
+    loop.tracker.get_issue.return_value = {"issue_id": "5034", "state": "closed", "labels": ["healer:ready"]}
+
+    loop._ingest_ready_issues()
+
+    issue = store.get_healer_issue("5034")
+    assert issue is not None
+    assert issue["state"] == "archived"
+    assert issue["pr_state"] == "closed"
+    assert issue["last_failure_class"] == ""
+    assert issue["last_failure_reason"] == ""
 
 
 def test_ingest_ready_issues_restores_pr_open_when_existing_issue_has_open_pr(tmp_path):
@@ -5592,6 +5621,74 @@ def test_maybe_run_harness_canaries_records_success(tmp_path, monkeypatch):
     assert summary == {"profiles": 1, "passed": 1, "failed": 0}
     assert store.get_state("healer_app_runtime_canary_last_success_at:web")
     assert store.get_state("healer_harness_canary_failures") is None
+
+
+def test_maybe_run_harness_canaries_use_boot_result_readiness_url(tmp_path, monkeypatch):
+    store = SQLiteStore(tmp_path / "relay.db")
+    store.bootstrap()
+    profile = AppRuntimeProfile(
+        name="web",
+        command=("npm", "run", "dev"),
+        cwd=tmp_path,
+        readiness_url="http://127.0.0.1:3000/",
+    )
+    loop = _make_loop(
+        store,
+        healer_app_runtime_profiles={"web": profile},
+        healer_harness_canary_interval_seconds=300,
+    )
+    seen_entry_urls: list[str] = []
+
+    class _FakeCanarySession:
+        def stop(self) -> int:
+            return 0
+
+    class _FakeCanaryAppHarness:
+        def boot(self, runtime_profile):
+            return (
+                SimpleNamespace(
+                    profile=runtime_profile,
+                    readiness_url="http://localhost:3001/",
+                    pid=4321,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="Local: http://localhost:3001",
+                ),
+                _FakeCanarySession(),
+            )
+
+    class _FakeCanaryBrowserHarness:
+        def check_runtime_available(self):
+            return True, ""
+
+        def capture_journey(self, *, profile, entry_url, repro_steps, artifact_root, phase, expect_failure):
+            seen_entry_urls.append(entry_url)
+            phase_root = artifact_root / phase
+            phase_root.mkdir(parents=True, exist_ok=True)
+            screenshot = phase_root / "canary.png"
+            console = phase_root / "canary-console.log"
+            network = phase_root / "canary-network.jsonl"
+            screenshot.write_text("png", encoding="utf-8")
+            console.write_text("console", encoding="utf-8")
+            network.write_text("{}", encoding="utf-8")
+            return BrowserJourneyResult(
+                phase=phase,
+                passed=True,
+                expected_failure_observed=False,
+                final_url=entry_url,
+                screenshot_path=str(screenshot),
+                console_log_path=str(console),
+                network_log_path=str(network),
+            )
+
+    monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
+    monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+
+    summary = loop._maybe_run_harness_canaries(force=True)
+
+    assert summary == {"profiles": 1, "passed": 1, "failed": 0}
+    assert seen_entry_urls == ["http://localhost:3001/"]
 
 
 def test_maybe_run_harness_canaries_records_failure_counters(tmp_path, monkeypatch):

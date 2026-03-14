@@ -35,6 +35,7 @@ Global settings for the Flow Healer service.
 | `github_token_env` | Environment variable name for the GitHub token. | `GITHUB_TOKEN` |
 | `poll_interval_seconds` | How often to poll GitHub for changes. | `60` |
 | `state_root` | Directory for SQLite state and worktrees. | `~/.flow-healer` |
+| `tracker_backend` | Issue/PR tracker transport: `github`, `gh_cli`, or `local_fs`. Use `gh_cli` when direct API access is unreliable but `gh` works. | `github` |
 | `connector_backend` | Which Codex transport to use: `exec` or `app_server`. | `exec` |
 | `connector_command` | The CLI command for the AI connector (e.g., `codex`). | `codex` |
 | `connector_model` | Model name to pass to the connector. | `gpt-5.4` |

@@ -47,6 +47,8 @@ Healthy state:
 3. Verify Playwright and the runtime profile's readiness URL.
 4. Re-run once after fixing the local prerequisite.
 
+For browser-backed Node apps, the harness now performs one headless self-heal reload when the initial page load shows same-origin client asset failures such as missing JS or CSS chunks. If the reload clears the bootstrap failure, the journey continues inside the same attempt. If the same bootstrap failure repeats, the attempt still fails and surfaces `runtime_readiness` diagnostics instead of silently looping as a product bug.
+
 Healthy state:
 
 - screenshots exist for app-backed runs
@@ -81,6 +83,8 @@ Healthy state:
 - `healer_app_runtime_canary_last_success_at:<profile>` is recent
 - `harness_health.canary_profiles.failures` is stable
 - the profile is not listed in `harness_health.stale_runtime_profiles.profiles`
+
+For Node app profiles, transient client-bundle bootstrap failures should clear on the harness self-heal reload. Repeated same-origin asset failures after that single reload are a real readiness problem and should be triaged as runtime drift or app boot instability.
 
 ## Orphan Cleanup
 

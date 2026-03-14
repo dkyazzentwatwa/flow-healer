@@ -58,6 +58,32 @@ def test_validate_repro_contract_examples_accepts_expected_invalid_examples(tmp_
     assert report["examples"][0]["reason_codes"] == ["missing_validation"]
 
 
+def test_validate_repro_contract_examples_use_outcome_assertions_without_restart_dependency() -> None:
+    module = _load_script_module("validate_repro_contract_examples.py", "validate_repro_contract_examples")
+
+    report = module.build_report()
+    example = next(
+        item for item in report["examples"] if item["name"] == "browser-allow-success-outcome-assertions"
+    )
+    manifest = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "harness-repro-contract-examples.json"
+        ).read_text(encoding="utf-8")
+    )
+    body = next(
+        entry["body"]
+        for entry in manifest["examples"]
+        if entry["name"] == "browser-allow-success-outcome-assertions"
+    )
+
+    assert example["passed"] is True
+    assert "click button.restart" not in body
+    assert "expect_url /game" in body
+    assert "expect_any_text Start game || Current turn: X" in body
+
+
 def test_check_harness_doc_drift_reports_resolved_log_policy() -> None:
     module = _load_script_module("check_harness_doc_drift.py", "check_harness_doc_drift")
 

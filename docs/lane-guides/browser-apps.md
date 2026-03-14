@@ -37,6 +37,7 @@ This guide covers browser-backed app targets under `e2e-apps/`: `node-next`, `py
 - The page renders the requested UI but artifact files never land at the exact required paths.
 - App-local validation is red because of an unrelated baseline failure inside the same app.
 - Fixture state drift causes the harness to miss the target route, auth gate, or expected text.
+- Browser-backed Node apps can render static HTML before client bundles hydrate. The harness now retries one headless page load when same-origin JS/CSS assets fail to load, but repeated bootstrap failures should be treated as runtime readiness problems, not app logic regressions.
 
 ## Lane-Specific Guardrails
 

@@ -1,0 +1,59 @@
+Stress-test objective:
+Create a deterministic Tic-Tac-Toe browser flow that proves a full X win path with captured evidence.
+
+Required code outputs:
+- e2e-apps/node-next/app/tictactoe-t4/page.js
+
+Allowed output targets:
+- e2e-apps/node-next/app/tictactoe-t4/page.js
+- e2e-apps/node-next/artifacts/node-next-tictactoe-t4.png
+- e2e-apps/node-next/artifacts/node-next-tictactoe-t4.console.log
+- e2e-apps/node-next/artifacts/node-next-tictactoe-t4.network.log
+
+Change request:
+- Create a playable Tic-Tac-Toe game at `/tictactoe-t4`.
+- Keep the implementation self-contained in the route file.
+- Show a visible 3x3 board with clickable cells.
+- Show visible status text.
+- Add visible proof text `Tic Tac Toe Browser Signal T4`.
+
+Behavior requirements:
+- First player is X.
+- Use this deterministic move order:
+  click Cell 0 -> X
+  click Cell 3 -> O
+  click Cell 1 -> X
+  click Cell 4 -> O
+  click Cell 2 -> X (win)
+- After the last move, show visible text `Winner: X`.
+
+Execution root: e2e-apps/node-next
+
+app_target: web
+browser_repro_mode: allow_success
+entry_url: http://127.0.0.1:3000
+runtime_profile: node-next-web
+
+repro_steps:
+- goto /tictactoe-t4
+- expect_text Tic Tac Toe Browser Signal T4
+- expect_text Current turn: X
+- click [aria-label="Cell 0"]
+- click [aria-label="Cell 3"]
+- click [aria-label="Cell 1"]
+- click [aria-label="Cell 4"]
+- click [aria-label="Cell 2"]
+- expect_text Winner: X
+
+artifact_requirements:
+- resolution_screenshot: e2e-apps/node-next/artifacts/node-next-tictactoe-t4.png
+- resolution_console_log: e2e-apps/node-next/artifacts/node-next-tictactoe-t4.console.log
+- resolution_network_log: e2e-apps/node-next/artifacts/node-next-tictactoe-t4.network.log
+
+Validation:
+- cd e2e-apps/node-next && npm run build
+
+judgment_required_conditions:
+- Fail if proof text is missing.
+- Fail if the board is not visibly a 3x3 interactive grid.
+- Fail if `Winner: X` does not appear after the repro moves.

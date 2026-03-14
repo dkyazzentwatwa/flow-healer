@@ -19,6 +19,8 @@ from .codex_app_server_connector import CodexAppServerConnector
 from .codex_cli_connector import CodexCliConnector
 from .config import AppConfig, RelaySettings
 from .fallback_connector import FailoverConnector
+from .gemini_cli_connector import GeminiCliConnector
+from .gh_cli_healer_tracker import GhCliHealerTracker
 from .healer_loop import AutonomousHealerLoop
 from .healer_preflight import (
     list_cached_preflight_reports,
@@ -68,6 +70,10 @@ class FlowHealerService:
             tracker = LocalHealerTracker(
                 repo_path=Path(repo.healer_repo_path),
                 state_root=self.config.state_root_path() / "repos" / repo.repo_name / "local_tracker",
+            )
+        elif self.config.service.tracker_backend == "gh_cli":
+            tracker = GhCliHealerTracker(
+                repo_path=Path(repo.healer_repo_path),
             )
         else:
             tracker = GitHubHealerTracker(
@@ -119,6 +125,13 @@ class FlowHealerService:
                     timeout=self.config.service.connector_timeout_seconds,
                     model=self.config.service.kilo_cli_model,
                 )
+            elif backend == "gemini_cli":
+                connector = GeminiCliConnector(
+                    workspace=repo.healer_repo_path,
+                    gemini_command=self.config.service.gemini_cli_command,
+                    timeout=self.config.service.connector_timeout_seconds,
+                    model=self.config.service.gemini_cli_model,
+                )
             else:
                 connector = CodexCliConnector(
                     workspace=repo.healer_repo_path,
@@ -152,7 +165,7 @@ class FlowHealerService:
             code_backend = self.config.service.connector_backend
             non_code_backend = self.config.service.connector_backend
             connector = _build_connector(self.config.service.connector_backend)
-            if self.config.service.connector_backend not in {"exec", "app_server"}:
+            if self.config.service.connector_backend not in {"exec", "app_server", "gemini_cli"}:
                 connector = FailoverConnector(
                     primary_backend=self.config.service.connector_backend,
                     primary=connector,

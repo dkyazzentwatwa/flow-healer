@@ -79,6 +79,25 @@ flow-healer start --once --repo demo
 
 Use [agent-remediation-playbook.md](agent-remediation-playbook.md) for repeated-failure doctrine. Use [lane-guides/README.md](lane-guides/README.md) when the failure belongs to a specific fixture or browser app family.
 
+### Infra Pause Preventing Claims
+
+If the worker is alive but no queued issue is being claimed, check whether an infra safety pause is active before treating the queue as stalled.
+
+~~~bash
+sqlite3 ~/.flow-healer/repos/demo/state.db "SELECT key, value FROM kv_state WHERE key IN ('healer_infra_failure_streak', 'healer_infra_pause_until', 'healer_infra_pause_reason');"
+flow-healer --config ~/.flow-healer/config.yaml status --repo demo
+tail -n 80 ~/.flow-healer/flow-healer.log
+~~~
+
+If the pause reason points at a now-closed issue or an already-cleared runtime problem, reset the pause markers so the next tick can claim work again:
+
+~~~bash
+sqlite3 ~/.flow-healer/repos/demo/state.db "UPDATE kv_state SET value = '0' WHERE key = 'healer_infra_failure_streak';"
+sqlite3 ~/.flow-healer/repos/demo/state.db "UPDATE kv_state SET value = '' WHERE key IN ('healer_infra_pause_until', 'healer_infra_pause_reason');"
+~~~
+
+Use [runtime-state.md](runtime-state.md) before manual queue-state edits. Only clear the pause after confirming the triggering blocker is resolved or intentionally bypassed.
+
 ## PR-Open Failures
 
 When an attempt reaches `pr_open_failed`, the patch and push steps already succeeded and the failure happened while talking to GitHub.

@@ -78,6 +78,8 @@ Prefer outcome assertions over progress assertions. Stable outcomes such as the 
 
 When a browser task has a small set of known-valid UI states, use an explicit enumerated assertion such as `expect_any_text A || B`. Use this sparingly and only for clearly bounded valid states; do not use it as a generic fuzzy matcher.
 
+For constructive `allow_success` tasks, prefer a fresh-entry or route-owned deterministic path over UI reset controls. A visible restart button may still be part of the product requirements, but the repro contract should not depend on clicking it unless reset behavior is the thing being verified.
+
 ### `artifact_requirements`
 
 Explicit evidence requirements such as screenshots, console logs, network logs, or other named artifacts. See [docs/evidence-contract.md](/Users/cypher-server/Documents/code/flow-healer/docs/evidence-contract.md).
@@ -124,11 +126,14 @@ browser_repro_mode: allow_success
 
 repro_steps:
 - goto /game
-- expect_any_text Winner: X || Start game
-- click button.restart
-- expect_text Start game
-- expect_text_absent Winner: X
 - expect_url /game
+- expect_any_text Start game || Current turn: X
+- click [aria-label="Cell 1"]
+- click [aria-label="Cell 2"]
+- click [aria-label="Cell 4"]
+- click [aria-label="Cell 5"]
+- click [aria-label="Cell 7"]
+- expect_text Winner: X
 
 artifact_requirements:
 - screenshot: artifacts/game-board.png

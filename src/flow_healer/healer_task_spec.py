@@ -77,7 +77,7 @@ _COMMAND_LINE_RE = re.compile(
 )
 _URL_RE = re.compile(r"\bhttps?://[^\s)>`]+", re.IGNORECASE)
 _DIRECTIVE_LINE_RE = re.compile(r"^(?P<label>[A-Za-z][A-Za-z0-9 _-]+?)\s*:\s*(?P<value>.*)$")
-_LIST_ITEM_PREFIX_RE = re.compile(r"^(?:[-*]\s+|\d+[.)]\s+)")
+_LIST_ITEM_PREFIX_RE = re.compile(r"^(?:[-*•⁃‣◦]\s+|\d+[.)]\s+)")
 
 _CONTRACT_SCALAR_FIELD_NAMES: tuple[str, ...] = (
     "app_target",
@@ -589,7 +589,7 @@ def _explicit_input_context_paths(*, issue_text: str, explicit_paths: tuple[str,
         context = " ".join(part for part in (current_heading, line) if part).strip()
         if not _INPUT_CONTEXT_RE.search(context):
             continue
-        normalized_line = line.strip(" -*")
+        normalized_line = line.strip(" -*•⁃‣◦")
         for path in explicit_paths:
             if path in normalized_line and path not in identified:
                 identified.append(path)
@@ -634,8 +634,9 @@ def _extract_validation_commands(issue_text: str) -> tuple[str, ...]:
     commands: list[str] = []
     seen: set[str] = set()
     for raw_line in issue_text.splitlines():
-        line = raw_line.strip().strip(" -*`")
+        line = raw_line.strip().strip(" -*•⁃‣◦` ")
         if not line:
+
             continue
         match = _COMMAND_LINE_RE.search(line)
         if not match:

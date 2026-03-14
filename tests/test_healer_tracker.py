@@ -115,16 +115,22 @@ def test_find_open_issue_by_fingerprint_uses_search(monkeypatch):
     tracker.repo_slug = "owner/repo"
 
     def fake_request(path: str, *, method: str = "GET", body=None):
-        assert method == "GET"
-        assert "/search/issues?q=" in path
+        assert method == "POST"
+        assert path == "/graphql"
+        assert body is not None
+        assert "FindIssueByFingerprint" in body.get("query", "")
         return {
-            "items": [
-                {
-                    "number": 12,
-                    "html_url": "https://github.com/owner/repo/issues/12",
-                    "title": "sample",
+            "data": {
+                "search": {
+                    "nodes": [
+                        {
+                            "number": 12,
+                            "url": "https://github.com/owner/repo/issues/12",
+                            "title": "sample",
+                        }
+                    ]
                 }
-            ]
+            }
         }
 
     monkeypatch.setattr(tracker, "_request_json", fake_request)
@@ -317,7 +323,8 @@ def test_remove_issue_label_treats_missing_label_404_as_noop(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
 
-    def fake_urlopen(req, timeout=20):
+    def fake_urlopen(req, timeout=5):
+        assert timeout == 5
         raise HTTPError(
             req.full_url,
             404,
@@ -404,24 +411,35 @@ def test_find_pr_for_issue_uses_search_and_detects_merged(monkeypatch):
 
     def fake_request(path: str, *, method: str = "GET", body=None):
         calls.append(path)
-        assert method == "GET"
-        if path == '/search/issues?q=repo%3Aowner/repo%20is%3Apr%20%22issue%20%23123%22&per_page=20':
+        if path == "/graphql":
+            assert method == "POST"
+            assert body is not None
+            assert "FindPRForIssue" in body.get("query", "")
             return {
-                "items": [
-                    {
-                        "number": 11,
-                        "state": "closed",
-                        "updated_at": "2026-03-06T00:00:00Z",
-                        "html_url": "https://github.com/owner/repo/pull/11",
-                    },
-                    {
-                        "number": 12,
-                        "state": "closed",
-                        "updated_at": "2026-03-07T00:00:00Z",
-                        "html_url": "https://github.com/owner/repo/pull/12",
-                    },
-                ]
+                "data": {
+                    "search": {
+                        "nodes": [
+                            {
+                                "number": 11,
+                                "state": "CLOSED",
+                                "url": "https://github.com/owner/repo/pull/11",
+                                "updatedAt": "2026-03-06T00:00:00Z",
+                                "mergedAt": "2026-03-06T00:00:00Z",
+                                "closedAt": "2026-03-06T00:00:00Z",
+                            },
+                            {
+                                "number": 12,
+                                "state": "MERGED",
+                                "url": "https://github.com/owner/repo/pull/12",
+                                "updatedAt": "2026-03-07T00:00:00Z",
+                                "mergedAt": "2026-03-07T00:00:00Z",
+                                "closedAt": "2026-03-07T00:00:00Z",
+                            },
+                        ]
+                    }
+                }
             }
+        assert method == "GET"
         if path == "/repos/owner/repo/pulls/11":
             return {
                 "number": 11,
@@ -452,14 +470,15 @@ def test_find_pr_for_issue_uses_search_and_detects_merged(monkeypatch):
     assert pr.number == 12
     assert pr.state == "merged"
     assert pr.html_url == "https://github.com/owner/repo/pull/12"
-    assert calls[0].startswith("/search/issues?q=")
+    assert calls[0] == "/graphql"
 
 
 def test_request_metrics_snapshot_aggregates_by_path(monkeypatch):
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
 
-    def fake_urlopen(req, timeout=20):
+    def fake_urlopen(req, timeout=5):
+        assert timeout == 5
         class _Response:
             status = 200
             headers = {}
@@ -1023,7 +1042,8 @@ def test_request_json_suppresses_expected_artifact_publish_404_warnings(monkeypa
     tracker = GitHubHealerTracker(repo_path=Path("."), token="x")
     tracker.repo_slug = "owner/repo"
 
-    def fake_urlopen(_req, timeout=20):
+    def fake_urlopen(_req, timeout=5):
+        assert timeout == 5
         raise HTTPError(
             url="https://api.github.com/repos/owner/repo/git/ref/heads/flow-healer-artifacts",
             code=404,

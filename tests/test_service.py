@@ -10,6 +10,7 @@ from flow_healer.codex_cli_connector import CodexCliConnector
 from flow_healer.config import AppConfig, RelaySettings, ServiceSettings
 from flow_healer.fallback_connector import FailoverConnector
 from flow_healer.healer_preflight import preflight_cache_key
+from flow_healer.gh_cli_healer_tracker import GhCliHealerTracker
 from flow_healer.healer_tracker import GitHubHealerTracker
 from flow_healer.kilo_cli_connector import KiloCliConnector
 from flow_healer.local_healer_tracker import LocalHealerTracker
@@ -1560,6 +1561,24 @@ def test_build_runtime_uses_local_tracker_backend(tmp_path) -> None:
     runtime = service.build_runtime(repo)
     assert isinstance(runtime.tracker, LocalHealerTracker)
     assert runtime.tracker.enabled is True
+    service._close_runtime(runtime)
+
+
+def test_build_runtime_uses_gh_cli_tracker_backend(tmp_path) -> None:
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    state_root = tmp_path / "state"
+    repo = RelaySettings(repo_name="demo", healer_repo_path=str(repo_path), healer_repo_slug="owner/repo")
+
+    service = FlowHealerService(
+        AppConfig(
+            service=ServiceSettings(state_root=str(state_root), tracker_backend="gh_cli"),
+            repos=[repo],
+        )
+    )
+
+    runtime = service.build_runtime(repo)
+    assert isinstance(runtime.tracker, GhCliHealerTracker)
     service._close_runtime(runtime)
 
 

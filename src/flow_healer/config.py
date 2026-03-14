@@ -38,6 +38,8 @@ class ServiceSettings:
     cline_act_mode: bool = True
     kilo_cli_command: str = "kilo"
     kilo_cli_model: str = ""
+    gemini_cli_command: str = "gemini"
+    gemini_cli_model: str = ""
     connector_timeout_seconds: int = 300
     tracker_backend: str = "github"
 
@@ -124,6 +126,7 @@ class RelaySettings:
     healer_circuit_breaker_cooldown_seconds: int = 900
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
+    healer_enable_security_review: bool = True
     healer_codex_native_multi_agent_enabled: bool = False
     healer_codex_native_multi_agent_max_subagents: int = 3
     healer_swarm_enabled: bool = False
@@ -231,6 +234,8 @@ class AppConfig:
             cline_act_mode=bool(service_raw.get("cline_act_mode", True)),
             kilo_cli_command=str(service_raw.get("kilo_cli_command") or "kilo"),
             kilo_cli_model=str(service_raw.get("kilo_cli_model") or ""),
+            gemini_cli_command=str(service_raw.get("gemini_cli_command") or "gemini"),
+            gemini_cli_model=str(service_raw.get("gemini_cli_model") or ""),
             connector_timeout_seconds=int(service_raw.get("connector_timeout_seconds") or 300),
             tracker_backend=_normalize_tracker_backend(service_raw.get("tracker_backend")),
         )
@@ -318,6 +323,7 @@ class AppConfig:
                     ),
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
+                    healer_enable_security_review=bool(item.get("enable_security_review", True)),
                     healer_codex_native_multi_agent_enabled=bool(
                         item.get("codex_native_multi_agent_enabled", False)
                     ),
@@ -513,7 +519,7 @@ def _coerce_app_runtime_profile(raw_profile: dict[str, Any]) -> Any:
         return profile_data
 
 
-_SUPPORTED_CONNECTOR_BACKENDS = {"exec", "app_server", "claude_cli", "cline", "kilo_cli"}
+_SUPPORTED_CONNECTOR_BACKENDS = {"exec", "app_server", "claude_cli", "cline", "kilo_cli", "gemini_cli"}
 
 
 def _normalize_connector_backend(value: Any) -> str:
@@ -526,6 +532,8 @@ def _normalize_connector_backend(value: Any) -> str:
         return "claude_cli"
     if raw == "kilo":
         return "kilo_cli"
+    if raw == "gemini":
+        return "gemini_cli"
     return "app_server"
 
 
@@ -581,8 +589,10 @@ def _normalize_web_auth_mode(value: Any) -> str:
 
 def _normalize_tracker_backend(value: Any) -> str:
     raw = str(value or "github").strip().lower().replace("-", "_")
-    if raw in {"github", "local_fs"}:
+    if raw in {"github", "gh_cli", "local_fs"}:
         return raw
+    if raw in {"gh", "github_cli"}:
+        return "gh_cli"
     if raw in {"local", "localfs"}:
         return "local_fs"
     return "github"

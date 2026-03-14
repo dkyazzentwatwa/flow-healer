@@ -63,6 +63,8 @@ If you need to build context in code after reading the docs, start here:
 - Read [docs/runtime-state.md](docs/runtime-state.md) before changing queue states, lease handling, retries, locks, migrations, or SQLite resets.
 - Missing named artifact outputs are real blockers for browser-evidence issues even when the UI looks correct.
 - Do not ad hoc rename artifacts, reinterpret queue states, or clear state blindly.
+- If the worker is ticking but not claiming, check for an active infra pause before assuming the queue is stuck. Inspect `healer_infra_pause_until` and `healer_infra_pause_reason` in the repo state DB, and confirm with `flow-healer status --repo <repo>` or recent `~/.flow-healer/flow-healer.log` lines.
+- If an infra pause was triggered by an issue that is now closed or otherwise resolved, clear `healer_infra_failure_streak`, `healer_infra_pause_until`, and `healer_infra_pause_reason` in the repo state DB so the next tick can resume claims.
 
 ## Remediation Doctrine
 
