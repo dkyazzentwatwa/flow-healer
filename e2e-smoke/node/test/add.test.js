@@ -145,6 +145,18 @@ test('addMany normalizes numeric string operands across variadic inputs', () => 
   assert.equal(addMany('1', ' 2 ', '3', '4'), 10);
 });
 
+test('addMany unwraps value-wrapped operands across variadic inputs', () => {
+  assert.equal(
+    addMany(
+      { value: '1' },
+      { value: { value: '2' } },
+      { value: 3 },
+      { value: { value: ' 4 ' } },
+    ),
+    10,
+  );
+});
+
 test('addMany rejects an invalid operand among a longer list', () => {
   assert.throws(() => addMany(1, 2, Number.POSITIVE_INFINITY, 4), {
     name: 'TypeError',
@@ -365,6 +377,13 @@ test('add normalizes object operands at the public entrypoint', () => {
 
   assert.equal(add(numericObject), 5);
   assert.equal(add(numericObject, 2), 7);
+});
+
+test('add unwraps value-wrapped operands before normalization', () => {
+  const wrappedLeft = { value: { value: 2 } };
+  const wrappedRight = { value: 3 };
+
+  assert.equal(add(wrappedLeft, wrappedRight), 5);
 });
 
 test('add rejects string-like operands for single-value calls', () => {
