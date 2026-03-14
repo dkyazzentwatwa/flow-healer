@@ -1,3 +1,4 @@
+from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -78,6 +79,8 @@ ADD_SUCCESS_CASES = (
     pytest.param(IndexStableInt(4), -1, 3, id="uses_exact_index_for_int_subclass"),
     pytest.param(OverflowingInt(6), "-2", 4, id="ignores_overflowing_int_hook"),
     pytest.param("1_000", "2_000", 3000, id="adds_underscored_integer_strings"),
+    pytest.param(Decimal("2.5"), 2, 5, id="adds_decimal_operand_with_half_up_rounding"),
+    pytest.param(Decimal("-2.5"), 1, -2, id="adds_negative_decimal_operand_with_half_up_rounding"),
 )
 
 ADD_TYPE_ERROR_CASES = (
@@ -86,10 +89,12 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param("not-a-number", 1, id="rejects_non_numeric_string_operand"),
     pytest.param(float("nan"), 1, id="rejects_nan_float_operand"),
     pytest.param(float("inf"), 1, id="rejects_infinite_float_operand"),
+    pytest.param(Decimal("NaN"), 1, id="rejects_decimal_nan_operand"),
+    pytest.param(Decimal("Infinity"), 1, id="rejects_decimal_infinite_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 15
-EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 5
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 17
+EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 7
 
 
 def _call_add(left: object, right: object) -> int:
@@ -337,6 +342,25 @@ def test_normalize_operand_rounds_float_inputs_deterministically(
     expected: int,
 ) -> None:
     """Float operands should round predictably before addition."""
+    assert _normalize_operand(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        pytest.param(Decimal("2.5"), 3, id="rounds_positive_decimal_half_up"),
+        pytest.param(Decimal("-2.5"), -3, id="rounds_negative_decimal_half_up"),
+        pytest.param(Decimal("2.49"), 2, id="rounds_positive_decimal_fraction_down"),
+        pytest.param(Decimal("-2.49"), -2, id="rounds_negative_decimal_fraction_toward_zero"),
+        pytest.param(Decimal("1.005"), 1, id="uses_decimal_input_for_stable_rounding"),
+        pytest.param(Decimal("1E100"), 10**100, id="handles_large_decimal_scientific_notation"),
+    ),
+)
+def test_normalize_operand_rounds_decimal_inputs_deterministically(
+    value: Decimal,
+    expected: int,
+) -> None:
+    """Decimal operands should round predictably before addition."""
     assert _normalize_operand(value) == expected
 
 
