@@ -4,10 +4,20 @@ def add(a: int | str, b: int | str) -> int:
     return _coerce_int(a) + _coerce_int(b)
 
 
-def add_many(first: int | str, second: int | str, third: int | str) -> int:
-    """Return an integer sum for three FastAPI-style numeric inputs."""
+def add_many(
+    first: int | str,
+    second: int | str,
+    third: int | str,
+    *rest: int | str,
+) -> int:
+    """Return an integer sum for one or more FastAPI-style numeric inputs."""
 
-    return _coerce_int(first) + _coerce_int(second) + _coerce_int(third)
+    total = _coerce_int(first) + _coerce_int(second) + _coerce_int(third)
+
+    for value in rest:
+        total += _coerce_int(value)
+
+    return total
 
 
 def _coerce_int(value: int | str) -> int:
