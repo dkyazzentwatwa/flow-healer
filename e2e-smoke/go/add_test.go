@@ -11,9 +11,23 @@ func TestAdd(t *testing.T) {
 	}
 }
 
-func TestAddMany(t *testing.T) {
-	if got := AddMany(2, 3, 4); got != 9 {
-		t.Fatalf("AddMany(2, 3, 4) = %d, want 9", got)
+func TestAddManyVariadicSum(t *testing.T) {
+	testCases := []struct {
+		name   string
+		inputs []int
+		want   int
+	}{
+		{name: "three numbers", inputs: []int{1, 2, 3}, want: 6},
+		{name: "mix of negative and positive", inputs: []int{-2, 4, 3}, want: 5},
+		{name: "no inputs", inputs: nil, want: 0},
+		{name: "single value", inputs: []int{7}, want: 7},
+		{name: "longer list", inputs: []int{1, 2, 3, 4, 5}, want: 15},
+	}
+
+	for _, tc := range testCases {
+		if got := AddMany(tc.inputs...); got != tc.want {
+			t.Fatalf("AddMany(%v) = %d, want %d", tc.inputs, got, tc.want)
+		}
 	}
 }
 

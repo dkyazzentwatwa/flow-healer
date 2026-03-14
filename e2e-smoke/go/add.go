@@ -4,8 +4,12 @@ func Add(left int, right int) int {
 	return left + right
 }
 
-func AddMany(left int, right int, extra int) int {
-	return left + right + extra
+func AddMany(nums ...int) int {
+	sum := 0
+	for _, num := range nums {
+		sum += num
+	}
+	return sum
 }
 
 func AutonomousGitHubAgentSummary() string {
