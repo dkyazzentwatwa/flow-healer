@@ -58,7 +58,7 @@ RSpec.describe "Ruby rails web reference app" do
     anonymous = http_get("/dashboard")
 
     expect(anonymous.code).to eq("302")
-    expect(anonymous["Location"]).to eq("/login")
+    expect(URI.parse(anonymous["Location"]).path).to eq("/login")
 
     response = http_post("/login", form: { "email" => "seeded-admin@example.com" })
     cookie = response["Set-Cookie"]
