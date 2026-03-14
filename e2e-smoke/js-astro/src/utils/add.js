@@ -1,26 +1,28 @@
 function add(a, b) {
-  const left = toFiniteNumber(a);
-  const right = toFiniteNumber(b);
-
-  if (!Number.isFinite(left) || !Number.isFinite(right)) {
-    throw new TypeError('add expects finite numeric inputs');
-  }
+  const left = normalizeFiniteNumber(a);
+  const right = normalizeFiniteNumber(b);
 
   return left + right;
 }
 
-function toFiniteNumber(value) {
+function normalizeFiniteNumber(value) {
   if (typeof value === 'string') {
     const trimmed = value.trim();
 
     if (trimmed === '') {
-      return Number.NaN;
+      throw new TypeError('add expects finite numeric inputs');
     }
 
-    return Number(trimmed);
+    value = Number(trimmed);
+  } else if (typeof value !== 'number') {
+    throw new TypeError('add expects finite numeric inputs');
   }
 
-  return Number(value);
+  if (!Number.isFinite(value)) {
+    throw new TypeError('add expects finite numeric inputs');
+  }
+
+  return value;
 }
 
 module.exports = { add };
