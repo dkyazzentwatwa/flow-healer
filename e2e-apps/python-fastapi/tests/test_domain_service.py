@@ -230,6 +230,33 @@ def test_complete_todo_backfills_non_text_timestamp_for_completed_item() -> None
     assert repository.get("1").completed_at is not None
 
 
+def test_complete_todo_accepts_plus_prefixed_request_ids() -> None:
+    service = TodoService(repository=InMemoryTodoRepository())
+    created = service.create_todo("Ship release")
+
+    completed = service.complete_todo(f" +{int(created.id):02} ")
+
+    assert completed.completed is True
+    assert completed.completed_at is not None
+    assert completed.id == created.id
+
+
+def test_complete_todo_handles_prefixed_legacy_ids() -> None:
+    repository = InMemoryTodoRepository(
+        [TodoRecord(id=" +09 ", title="Legacy id", completed=False)]
+    )
+    service = TodoService(repository=repository)
+
+    completed = service.complete_todo("9")
+
+    assert completed.completed is True
+    assert completed.completed_at is not None
+    assert completed.id == "9"
+    stored = repository.get(" +09 ")
+    assert stored is not None
+    assert stored.completed is True
+
+
 def test_complete_todo_raises_for_blank_or_non_text_ids() -> None:
     service = TodoService(repository=InMemoryTodoRepository())
 
