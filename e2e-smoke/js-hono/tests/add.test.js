@@ -29,6 +29,22 @@ assert.deepStrictEqual(handler(invalidContext), {
   status: 400,
 });
 
+const fallbackContext = {
+  req: {
+    query() {
+      return { a: '4', b: '6' };
+    },
+  },
+  json(body, status = 200) {
+    return { body, status };
+  },
+};
+
+assert.deepStrictEqual(handler(fallbackContext), {
+  body: { result: 10 },
+  status: 200,
+});
+
 function createContext(query) {
   return {
     req: {
