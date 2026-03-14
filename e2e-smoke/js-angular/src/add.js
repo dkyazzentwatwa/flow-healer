@@ -6,6 +6,12 @@ function add(a, b) {
 }
 
 function toFiniteNumber(value) {
+  if (value && typeof value === 'object' && 'value' in value) {
+    value = value.value;
+  } else if (value !== null && typeof value === 'object') {
+    throw new TypeError('add expects finite numeric inputs');
+  }
+
   if (typeof value === 'string') {
     const trimmed = value.trim();
 
