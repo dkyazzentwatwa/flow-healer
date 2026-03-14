@@ -23,5 +23,15 @@ public final class AddTest {
         if (mixedSignSum != -3) {
             throw new AssertionError("expected -3 but got " + mixedSignSum);
         }
+
+        int multiOperandSum = Add.addMany(1, 2, 3, 4, 5);
+        if (multiOperandSum != 15) {
+            throw new AssertionError("expected 15 but got " + multiOperandSum);
+        }
+
+        int emptySum = Add.addMany();
+        if (emptySum != 0) {
+            throw new AssertionError("expected 0 but got " + emptySum);
+        }
     }
 }
