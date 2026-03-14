@@ -254,12 +254,18 @@ export function add(...operands) {
   return sumOperands(operands.map(normalizeAddOperand));
 }
 
-export function addMany(a, b, c) {
-  return (
-    normalizeFiniteNumberOperand(a)
-    + normalizeFiniteNumberOperand(b)
-    + normalizeFiniteNumberOperand(c)
-  );
+export function addMany(...operands) {
+  if (operands.length < 3) {
+    throwFiniteNumberOperandTypeError();
+  }
+
+  let total = 0;
+
+  for (const operand of operands) {
+    total += normalizeFiniteNumberOperand(operand);
+  }
+
+  return total;
 }
 
 export default add;
