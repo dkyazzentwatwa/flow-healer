@@ -50,6 +50,22 @@ class ExplodingIndex:
         raise RuntimeError("boom")
 
 
+class RealLikeNumber:
+    """Mimic numbers.Real implementations without Integral semantics."""
+
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def __float__(self) -> float:
+        return self._value
+
+    def __int__(self) -> int:
+        raise RuntimeError("float coercion should be preferred")
+
+    def __repr__(self) -> str:
+        return f"RealLikeNumber({self._value!r})"
+
+
 def _load_smoke_math_module() -> ModuleType:
     spec = spec_from_file_location("smoke_math", SMOKE_MATH_PATH)
     assert spec is not None and spec.loader is not None
@@ -90,6 +106,8 @@ ADD_SUCCESS_CASES = (
         2,
         id="adds_half_fraction_operands_round_up",
     ),
+    pytest.param(RealLikeNumber(2.5), 0, 3, id="adds_real_like_operand_with_half_up_rounding"),
+    pytest.param(RealLikeNumber(-2.5), 0, -3, id="adds_negative_real_like_operand_with_half_up_rounding"),
 )
 
 ADD_TYPE_ERROR_CASES = (
@@ -100,10 +118,11 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(float("inf"), 1, id="rejects_infinite_float_operand"),
     pytest.param(Decimal("NaN"), 1, id="rejects_decimal_nan_operand"),
     pytest.param(Decimal("Infinity"), 1, id="rejects_decimal_infinite_operand"),
+    pytest.param(RealLikeNumber(float("nan")), 1, id="rejects_real_like_nan_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 20
-EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 7
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 22
+EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 8
 
 
 def _call_add(left: object, right: object) -> int:
@@ -370,6 +389,21 @@ def test_normalize_operand_rounds_decimal_inputs_deterministically(
     expected: int,
 ) -> None:
     """Decimal operands should round predictably before addition."""
+    assert _normalize_operand(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        pytest.param(RealLikeNumber(2.5), 3, id="rounds_positive_real_like_half_up"),
+        pytest.param(RealLikeNumber(-2.5), -3, id="rounds_negative_real_like_half_up"),
+    ),
+)
+def test_normalize_operand_rounds_real_like_inputs_deterministically(
+    value: RealLikeNumber,
+    expected: int,
+) -> None:
+    """Real-like operands should round predictably before addition."""
     assert _normalize_operand(value) == expected
 
 
