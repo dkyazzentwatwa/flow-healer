@@ -9,7 +9,7 @@ This guide covers everyday CLI workflows. For issue-body semantics, lane-safe ed
 | `flow-healer doctor [--repo NAME]` | Validate environment, git, Docker, and API setup. |
 | `flow-healer status [--repo NAME]` | Show issue counts, state, and recent attempts. |
 | `flow-healer export [--repo NAME] [--formats csv,jsonl] [--output-dir PATH]` | Write telemetry exports for spreadsheet and structured analysis workflows. |
-| `flow-healer tui [--repo NAME] [--once] [--refresh-seconds N]` | Open the read-only terminal operator view. |
+| `flow-healer tui [--repo NAME] [--once] [--refresh-seconds N]` | Open the interactive terminal operator view, or print a one-shot text snapshot with `--once`. |
 | `flow-healer start [--repo NAME] [--once]` | Run the healing loop continuously or for a single pass. |
 | `flow-healer pause [--repo NAME]` | Pause autonomous processing for a repo. |
 | `flow-healer resume [--repo NAME]` | Resume autonomous processing. |
@@ -41,6 +41,14 @@ Use the built-in terminal UI for lightweight live inspection:
 flow-healer tui --repo my-project
 flow-healer tui --repo my-project --once
 ~~~
+
+Live TUI controls:
+
+- `↑` / `↓`: move selection
+- `Tab`: switch pane
+- `←` / `→`: switch inspector tabs
+- `r`: refresh
+- `q`: quit
 
 Use [telemetry-exports.md](telemetry-exports.md) for the export contract and [dashboard.md](dashboard.md) for the remaining control-plane/UI boundaries.
 

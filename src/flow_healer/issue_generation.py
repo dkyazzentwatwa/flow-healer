@@ -49,6 +49,7 @@ PYTHON_DATA_ML_FAMILY = "python-data-ml"
 MEGA_FINAL_WAVE_1_FAMILY = "mega-final-wave-1"
 MEGA_FINAL_WAVE_2_FAMILY = "mega-final-wave-2"
 PROD_EVAL_HYBRID_HEAVY_FAMILY = "prod-eval-hybrid-heavy"
+HARD_NON_PROSPER_FAMILY = "hard-non-prosper"
 
 
 def available_issue_families() -> tuple[str, ...]:
@@ -61,6 +62,7 @@ def available_issue_families() -> tuple[str, ...]:
         MEGA_FINAL_WAVE_1_FAMILY,
         MEGA_FINAL_WAVE_2_FAMILY,
         PROD_EVAL_HYBRID_HEAVY_FAMILY,
+        HARD_NON_PROSPER_FAMILY,
     )
 
 
@@ -134,6 +136,8 @@ def get_issue_templates(family: str) -> tuple[IssueTemplate, ...]:
         return _mega_final_wave_2_templates()
     if normalized_family == PROD_EVAL_HYBRID_HEAVY_FAMILY:
         return _prod_eval_hybrid_heavy_templates()
+    if normalized_family == HARD_NON_PROSPER_FAMILY:
+        return _hard_non_prosper_templates()
     raise ValueError(
         f"unknown issue family '{family}'. Available families: {', '.join(available_issue_families())}"
     )
@@ -1391,6 +1395,88 @@ def _prod_eval_hybrid_heavy_templates() -> tuple[IssueTemplate, ...]:
             difficulty="medium",
             source="e2e-apps",
             extra_labels=("eval:messy",),
+        ),
+    )
+
+
+def _hard_non_prosper_templates() -> tuple[IssueTemplate, ...]:
+    return (
+        _template(
+            kind="Hard app: Nobi API entry routes contract",
+            targets=("e2e-apps/nobi-owl-trader/api/main.py", "e2e-apps/nobi-owl-trader/tests/test_routes_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard app: Nobi risk guardrails",
+            targets=("e2e-apps/nobi-owl-trader/api/risk.py", "e2e-apps/nobi-owl-trader/tests/test_risk.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard app: Nobi portfolio engine weirdness",
+            targets=("e2e-apps/nobi-owl-trader/api/portfolio.py", "e2e-apps/nobi-owl-trader/tests/test_portfolio.py"),
+            validation_command="cd e2e-apps/nobi-owl-trader && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard app: Node Next notification digest stability",
+            targets=("e2e-apps/node-next/lib/notification-digest.js", "e2e-apps/node-next/tests/notification-digest.test.js"),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard app: Node Next todo route contract under invalid payloads",
+            targets=(
+                "e2e-apps/node-next/app/api/todos/route.js",
+                "e2e-apps/node-next/lib/todo-service.js",
+                "e2e-apps/node-next/tests/todo-service.test.js",
+            ),
+            validation_command="cd e2e-apps/node-next && npm test -- --passWithNoTests",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard app: FastAPI API contract metadata restoration",
+            targets=("e2e-apps/python-fastapi/app/api.py", "e2e-apps/python-fastapi/tests/test_api_contract.py"),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard app: FastAPI token refresh flow",
+            targets=(
+                "e2e-apps/python-fastapi/app/token_service.py",
+                "e2e-apps/python-fastapi/tests/test_token_service.py",
+            ),
+            validation_command="cd e2e-apps/python-fastapi && pytest -q",
+            difficulty="hard",
+            source="e2e-apps",
+        ),
+        _template(
+            kind="Hard smoke: Django numeric string compatibility",
+            targets=("e2e-smoke/py-django/app/add.py", "e2e-smoke/py-django/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-django && python -m pytest -q",
+            difficulty="hard",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Hard smoke: pandas helper stays pandas-specific",
+            targets=("e2e-smoke/py-data-pandas/app/add.py", "e2e-smoke/py-data-pandas/tests/test_add.py"),
+            validation_command="cd e2e-smoke/py-data-pandas && pytest -q",
+            difficulty="hard",
+            source="e2e-smoke",
+        ),
+        _template(
+            kind="Hard smoke: Qwik utility behavior",
+            targets=("e2e-smoke/js-qwik/src/utils/add.ts", "e2e-smoke/js-qwik/tests/add.test.ts"),
+            validation_command="cd e2e-smoke/js-qwik && npm test -- --passWithNoTests",
+            difficulty="hard",
+            source="e2e-smoke",
         ),
     )
 

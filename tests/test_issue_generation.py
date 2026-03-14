@@ -4,6 +4,7 @@ from pathlib import Path
 
 from flow_healer.issue_generation import (
     DEFAULT_FAMILY,
+    HARD_NON_PROSPER_FAMILY,
     JS_FRAMEWORK_FAMILY,
     MEGA_FINAL_WAVE_1_FAMILY,
     MEGA_FINAL_WAVE_2_FAMILY,
@@ -111,6 +112,7 @@ def test_render_issue_body_includes_runtime_contract_for_java_browser_app() -> N
 
 def test_available_issue_families_include_framework_expansions() -> None:
     families = available_issue_families()
+    assert HARD_NON_PROSPER_FAMILY in families
     assert JS_FRAMEWORK_FAMILY in families
     assert PYTHON_FRAMEWORK_FAMILY in families
     assert PYTHON_DATA_ML_FAMILY in families
@@ -210,6 +212,33 @@ def test_build_issue_drafts_supports_prod_eval_hybrid_heavy_family() -> None:
     assert "Required code outputs:" in messy.body
 
 
+def test_build_issue_drafts_supports_hard_non_prosper_family() -> None:
+    drafts = build_issue_drafts(
+        count=10,
+        prefix="Hard batch",
+        ready_label="healer:ready",
+        extra_labels=("campaign:hard-non-prosper",),
+        family=HARD_NON_PROSPER_FAMILY,
+    )
+
+    assert len(drafts) == 10
+    assert all("healer:ready" in draft.labels for draft in drafts)
+    assert all("campaign:hard-non-prosper" in draft.labels for draft in drafts)
+    assert all("difficulty:hard" in draft.labels for draft in drafts)
+    assert all("prosper" not in draft.title.lower() for draft in drafts)
+    assert all("prosper" not in draft.body.lower() for draft in drafts)
+
+    execution_roots: set[str] = set()
+    for draft in drafts:
+        spec = compile_task_spec(issue_title=draft.title, issue_body=draft.body)
+        execution_roots.add(spec.execution_root)
+
+    assert "e2e-apps/nobi-owl-trader" in execution_roots
+    assert "e2e-apps/node-next" in execution_roots
+    assert "e2e-apps/python-fastapi" in execution_roots
+    assert any(root.startswith("e2e-smoke/") for root in execution_roots)
+
+
 def test_validate_issue_drafts_accepts_mega_final_catalog() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     wave_1 = build_issue_drafts(
@@ -239,6 +268,19 @@ def test_validate_issue_drafts_accepts_prod_eval_hybrid_heavy_catalog() -> None:
         ready_label="healer:ready",
         extra_labels=("campaign:prod-eval",),
         family=PROD_EVAL_HYBRID_HEAVY_FAMILY,
+    )
+
+    validate_issue_drafts(drafts, repo_root=repo_root)
+
+
+def test_validate_issue_drafts_accepts_hard_non_prosper_catalog() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    drafts = build_issue_drafts(
+        count=10,
+        prefix="Hard batch",
+        ready_label="healer:ready",
+        extra_labels=("campaign:hard-non-prosper",),
+        family=HARD_NON_PROSPER_FAMILY,
     )
 
     validate_issue_drafts(drafts, repo_root=repo_root)
@@ -351,6 +393,22 @@ def test_prod_eval_hybrid_heavy_catalog_round_trips_through_task_spec_parser() -
     for draft in drafts:
         spec = compile_task_spec(issue_title=draft.title, issue_body=draft.body)
         assert spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/"))
+        assert spec.validation_commands
+        assert spec.output_targets
+
+
+def test_hard_non_prosper_catalog_round_trips_through_task_spec_parser() -> None:
+    drafts = build_issue_drafts(
+        count=10,
+        prefix="Parser check hard batch",
+        ready_label="healer:ready",
+        family=HARD_NON_PROSPER_FAMILY,
+    )
+
+    for draft in drafts:
+        spec = compile_task_spec(issue_title=draft.title, issue_body=draft.body)
+        assert spec.execution_root.startswith(("e2e-smoke/", "e2e-apps/"))
+        assert "prosper" not in spec.execution_root.lower()
         assert spec.validation_commands
         assert spec.output_targets
 

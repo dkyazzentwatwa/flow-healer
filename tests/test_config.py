@@ -40,7 +40,7 @@ def test_load_reads_github_token_from_env_file(tmp_path, monkeypatch) -> None:
     assert config.service.connector_routing_mode == "single_backend"
     assert config.service.code_connector_backend == "app_server"
     assert config.service.non_code_connector_backend == "app_server"
-    assert config.service.connector_model == "gpt-5.4"
+    assert config.service.connector_model == "gpt-5.1-codex-mini"
     assert config.service.connector_reasoning_effort == "medium"
     assert config.control.web.enabled is True
     assert config.control.web.auth_mode == "token"

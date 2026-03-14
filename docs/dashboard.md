@@ -11,15 +11,15 @@ Flow Healer now has three operator-facing surfaces:
 - `flow-healer serve`: Python HTTP control plane for JSON APIs, artifact serving, and custom integrations
 
 The old `apps/dashboard` Next.js app is retired and should not be reintroduced as a supported operator surface.
-The TUI intentionally uses compact terminal panels and sparkline-style summaries inspired by tools like Chartli and Terminui, but it stays Python-native so the repo no longer depends on a separate Node UI stack.
+The TUI intentionally uses compact terminal panels and sparkline-style summaries inspired by tools like Chartli, Terminui, and Codex CLI, but it stays Python-native so the repo no longer depends on a separate Node UI stack.
 
 ## Canonical Anchors
 
-- [src/flow_healer/cli.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/cli.py)
-- [src/flow_healer/telemetry_exports.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/telemetry_exports.py)
-- [src/flow_healer/tui.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/tui.py)
-- [src/flow_healer/web_dashboard.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/web_dashboard.py)
-- [src/flow_healer/dashboard_cockpit.py](/Users/cypher/Documents/GitHub/flow-healer/src/flow_healer/dashboard_cockpit.py)
+- [src/flow_healer/cli.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/cli.py)
+- [src/flow_healer/telemetry_exports.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/telemetry_exports.py)
+- [src/flow_healer/tui.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/tui.py)
+- [src/flow_healer/web_dashboard.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/web_dashboard.py)
+- [src/flow_healer/dashboard_cockpit.py](/Users/cypher-server/Documents/code/flow-healer/src/flow_healer/dashboard_cockpit.py)
 
 ## Operator Workflows
 
@@ -36,6 +36,21 @@ Read-only terminal view:
 flow-healer tui --repo <repo-name>
 flow-healer tui --repo <repo-name> --once
 ```
+
+Live TUI mode uses a Codex-style split layout:
+
+- a compact repo health header
+- a selectable queue pane on the left
+- an inspector pane on the right with `Attempts`, `Events`, and `Logs` tabs
+- a wrapped detail panel for the current selection
+
+Keybindings:
+
+- `↑` / `↓`: move within the active pane
+- `Tab`: switch between queue and inspector panes
+- `←` / `→`: switch inspector tabs
+- `r`: refresh immediately
+- `q`: quit
 
 HTTP control plane:
 
@@ -87,6 +102,6 @@ When changing Python API payloads or artifact serving:
 
 This doc does not define issue-body semantics, evidence completeness, or retry/state transitions. Use:
 
-- [docs/issue-contracts.md](/Users/cypher/Documents/GitHub/flow-healer/docs/issue-contracts.md)
-- [docs/evidence-contract.md](/Users/cypher/Documents/GitHub/flow-healer/docs/evidence-contract.md)
-- [docs/healing-state-machine.md](/Users/cypher/Documents/GitHub/flow-healer/docs/healing-state-machine.md)
+- [docs/issue-contracts.md](/Users/cypher-server/Documents/code/flow-healer/docs/issue-contracts.md)
+- [docs/evidence-contract.md](/Users/cypher-server/Documents/code/flow-healer/docs/evidence-contract.md)
+- [docs/healing-state-machine.md](/Users/cypher-server/Documents/code/flow-healer/docs/healing-state-machine.md)

@@ -113,6 +113,20 @@ def test_validate_drafts_or_die_accepts_prod_eval_hybrid_heavy_wave() -> None:
     module.validate_drafts_or_die(drafts)
 
 
+def test_validate_drafts_or_die_accepts_hard_non_prosper_wave() -> None:
+    module = _load_module()
+    drafts = module.build_issue_drafts(
+        count=10,
+        prefix="Hard non-Prosper",
+        ready_label="healer:ready",
+        extra_labels=("campaign:hard-non-prosper",),
+        family="hard-non-prosper",
+    )
+
+    assert all(module._is_python_js_only_draft(draft.body) for draft in drafts)
+    module.validate_drafts_or_die(drafts)
+
+
 def test_validate_drafts_or_die_rejects_missing_target() -> None:
     module = _load_module()
     draft = module.build_issue_drafts(

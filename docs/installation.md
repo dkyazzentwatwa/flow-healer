@@ -38,7 +38,7 @@ Global settings for the Flow Healer service.
 | `tracker_backend` | Issue/PR tracker transport: `github`, `gh_cli`, or `local_fs`. Use `gh_cli` when direct API access is unreliable but `gh` works. | `github` |
 | `connector_backend` | Which Codex transport to use: `exec` or `app_server`. | `exec` |
 | `connector_command` | The CLI command for the AI connector (e.g., `codex`). | `codex` |
-| `connector_model` | Model name to pass to the connector. | `gpt-5.4` |
+| `connector_model` | Model name to pass to the connector. | `gpt-5.1-codex-mini` |
 | `connector_timeout_seconds` | Max time allowed for AI generation. | `300` |
 
 ### Repo Settings

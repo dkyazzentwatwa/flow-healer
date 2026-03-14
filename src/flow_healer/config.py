@@ -27,7 +27,7 @@ class ServiceSettings:
     code_connector_backend: str = "exec"
     non_code_connector_backend: str = "app_server"
     connector_command: str = "codex"
-    connector_model: str = "gpt-5.4"
+    connector_model: str = "gpt-5.1-codex-mini"
     connector_reasoning_effort: str = "medium"
     claude_cli_command: str = "claude"
     claude_cli_model: str = ""
@@ -221,7 +221,7 @@ class AppConfig:
                 service_raw.get("non_code_connector_backend") or "app_server"
             ),
             connector_command=str(service_raw.get("connector_command") or "codex"),
-            connector_model=str(service_raw.get("connector_model") or "gpt-5.4"),
+            connector_model=str(service_raw.get("connector_model") or "gpt-5.1-codex-mini"),
             connector_reasoning_effort=str(service_raw.get("connector_reasoning_effort") or "medium"),
             claude_cli_command=str(service_raw.get("claude_cli_command") or "claude"),
             claude_cli_model=str(service_raw.get("claude_cli_model") or ""),

@@ -13,7 +13,7 @@ service:
 
   # Codex settings
   connector_command: codex
-  connector_model: gpt-5.4
+  connector_model: gpt-5.1-codex-mini
   connector_reasoning_effort: medium
 
   # Claude CLI settings (used when backend is claude_cli)

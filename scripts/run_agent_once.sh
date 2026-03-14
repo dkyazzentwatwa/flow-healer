@@ -68,7 +68,7 @@ service:
   poll_interval_seconds: 30
   state_root: ~/.flow-healer
   connector_command: codex
-  connector_model: gpt-5.4
+  connector_model: gpt-5.1-codex-mini
   connector_reasoning_effort: medium
   connector_timeout_seconds: 900
   connector_routing_mode: exec_for_code
