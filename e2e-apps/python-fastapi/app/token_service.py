@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -78,10 +79,9 @@ def _resolve_expiry(
     *,
     fallback: datetime,
 ) -> datetime:
-    if isinstance(raw_expires_at, datetime):
-        if raw_expires_at.tzinfo is None:
-            return raw_expires_at.replace(tzinfo=UTC)
-        return raw_expires_at
+    parsed_expiry = _parse_expiry(raw_expires_at)
+    if parsed_expiry is not None:
+        return parsed_expiry
 
     if raw_expires_in is None:
         return fallback
@@ -94,3 +94,57 @@ def _resolve_expiry(
     if expires_in < 0:
         return fallback
     return now + timedelta(seconds=expires_in)
+
+
+def _parse_expiry(raw_expires_at: object) -> datetime | None:
+    if isinstance(raw_expires_at, datetime):
+        return raw_expires_at.replace(tzinfo=UTC) if raw_expires_at.tzinfo is None else raw_expires_at
+
+    if isinstance(raw_expires_at, (int, float)):
+        return _datetime_from_timestamp(float(raw_expires_at))
+
+    if isinstance(raw_expires_at, str):
+        parsed = _parse_iso_datetime(raw_expires_at)
+        if parsed is not None:
+            return parsed
+        return _parse_timestamp_string(raw_expires_at)
+
+    return None
+
+
+def _datetime_from_timestamp(value: float) -> datetime | None:
+    if not math.isfinite(value):
+        return None
+
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OSError, OverflowError):
+        return None
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+
+    normalized = trimmed
+    if normalized.endswith("Z") and len(normalized) > 1:
+        normalized = f"{normalized[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _parse_timestamp_string(value: str) -> datetime | None:
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    try:
+        timestamp = float(trimmed)
+    except ValueError:
+        return None
+    return _datetime_from_timestamp(timestamp)
