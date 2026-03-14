@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from flow_healer.app_harness import AppRuntimeProfile
+from flow_healer.app_harness import AppHarnessBootResult, AppRuntimeProfile
 from flow_healer.browser_harness import BrowserJourneyResult
 from flow_healer.healer_loop import (
     AutonomousHealerLoop,
@@ -5588,7 +5588,18 @@ def test_maybe_run_harness_canaries_records_success(tmp_path, monkeypatch):
 
     class _FakeCanaryAppHarness:
         def boot(self, runtime_profile):
-            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+            return (
+                AppHarnessBootResult(
+                    profile=runtime_profile,
+                    pid=4321,
+                    readiness_url=runtime_profile.readiness_url,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="Local: http://127.0.0.1:3000/",
+                ),
+                _FakeCanarySession(),
+            )
 
     class _FakeCanaryBrowserHarness:
         def check_runtime_available(self):
@@ -5615,6 +5626,7 @@ def test_maybe_run_harness_canaries_records_success(tmp_path, monkeypatch):
 
     monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
     monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+    loop.tracker.publish_artifact_files.return_value = [SimpleNamespace(name="canary.png")]
 
     summary = loop._maybe_run_harness_canaries(force=True)
 
@@ -5646,10 +5658,10 @@ def test_maybe_run_harness_canaries_use_boot_result_readiness_url(tmp_path, monk
     class _FakeCanaryAppHarness:
         def boot(self, runtime_profile):
             return (
-                SimpleNamespace(
+                AppHarnessBootResult(
                     profile=runtime_profile,
-                    readiness_url="http://localhost:3001/",
                     pid=4321,
+                    readiness_url="http://localhost:3001/",
                     ready_via_url=True,
                     ready_via_log=False,
                     startup_seconds=0.2,
@@ -5684,6 +5696,7 @@ def test_maybe_run_harness_canaries_use_boot_result_readiness_url(tmp_path, monk
 
     monkeypatch.setattr(loop, "_new_canary_app_harness", lambda: _FakeCanaryAppHarness())
     monkeypatch.setattr(loop, "_new_canary_browser_harness", lambda: _FakeCanaryBrowserHarness())
+    loop.tracker.publish_artifact_files.return_value = [SimpleNamespace(name="canary.png")]
 
     summary = loop._maybe_run_harness_canaries(force=True)
 
@@ -5712,7 +5725,18 @@ def test_maybe_run_harness_canaries_records_failure_counters(tmp_path, monkeypat
 
     class _FakeCanaryAppHarness:
         def boot(self, runtime_profile):
-            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+            return (
+                AppHarnessBootResult(
+                    profile=runtime_profile,
+                    pid=4321,
+                    readiness_url=runtime_profile.readiness_url,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="Local: http://127.0.0.1:3000/",
+                ),
+                _FakeCanarySession(),
+            )
 
     class _FailingCanaryBrowserHarness:
         def check_runtime_available(self):
@@ -5764,7 +5788,18 @@ def test_maybe_run_harness_canaries_coerces_dict_backed_profiles(tmp_path, monke
             assert isinstance(runtime_profile, AppRuntimeProfile)
             assert runtime_profile.command == ("npm", "run", "dev")
             assert runtime_profile.cwd == runtime_root.resolve()
-            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+            return (
+                AppHarnessBootResult(
+                    profile=runtime_profile,
+                    pid=4321,
+                    readiness_url=runtime_profile.readiness_url,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="Local: http://127.0.0.1:3000/",
+                ),
+                _FakeCanarySession(),
+            )
 
     class _FakeCanaryBrowserHarness:
         def check_runtime_available(self):
@@ -5825,7 +5860,18 @@ def test_maybe_run_harness_canaries_covers_multiple_reference_app_profiles(tmp_p
 
     class _FakeCanaryAppHarness:
         def boot(self, runtime_profile):
-            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+            return (
+                AppHarnessBootResult(
+                    profile=runtime_profile,
+                    pid=4321,
+                    readiness_url=runtime_profile.readiness_url,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="Local: http://127.0.0.1:3000/",
+                ),
+                _FakeCanarySession(),
+            )
 
     class _FakeCanaryBrowserHarness:
         def check_runtime_available(self):
@@ -5915,7 +5961,18 @@ def test_maybe_run_harness_canaries_validates_multiple_browser_stacks(tmp_path, 
         def boot(self, runtime_profile):
             assert isinstance(runtime_profile, AppRuntimeProfile)
             assert runtime_profile.cwd == runtime_roots[runtime_profile.name].resolve()
-            return SimpleNamespace(profile=runtime_profile), _FakeCanarySession()
+            return (
+                AppHarnessBootResult(
+                    profile=runtime_profile,
+                    pid=4321,
+                    readiness_url=runtime_profile.readiness_url,
+                    ready_via_url=True,
+                    ready_via_log=False,
+                    startup_seconds=0.2,
+                    output_tail="Local: http://127.0.0.1:3000/",
+                ),
+                _FakeCanarySession(),
+            )
 
     class _FakeCanaryBrowserHarness:
         def check_runtime_available(self):
