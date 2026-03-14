@@ -157,6 +157,48 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class RouteEntry(BaseModel):
+    path: str
+    method: str
+    description: str
+
+
+class RoutesResponse(BaseModel):
+    routes: List[RouteEntry]
+
+
+PORTFOLIO_ENTRY_ROUTES = [
+    {
+        "path": "/api/portfolio/summary",
+        "method": "GET",
+        "description": "Summarizes cash, positions, total value, and P&L.",
+    },
+    {
+        "path": "/api/portfolio/positions",
+        "method": "GET",
+        "description": "Lists open positions with current market values.",
+    },
+    {
+        "path": "/api/portfolio/metrics",
+        "method": "GET",
+        "description": "Returns aggregated performance metrics for the portfolio.",
+    },
+    {
+        "path": "/api/portfolio/history",
+        "method": "GET",
+        "description": "Exposes historical snapshots for the portfolio chart.",
+    },
+]
+
+
+@app.get("/api/routes/portfolio", response_model=RoutesResponse, tags=["portfolio"])
+async def get_portfolio_route_contract():
+    """
+    Return the canonical entry routes for the portfolio surface.
+    """
+    return RoutesResponse(routes=[RouteEntry(**route) for route in PORTFOLIO_ENTRY_ROUTES])
+
+
 # API Endpoints
 @app.get("/", tags=["Health"])
 async def root():

@@ -192,6 +192,30 @@ def test_portfolio_routes_tolerate_exchange_failures(client, setup_test_data, mo
     assert positions[0]["unrealizedPnl"] == 0.0
 
 
+def test_portfolio_route_contract_listing(client):
+    """Ensure the portfolio surface exposes its entry routes contract."""
+    response = client.get("/api/routes/portfolio")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "routes" in data
+    assert isinstance(data["routes"], list)
+
+    expected_paths = {
+        "/api/portfolio/summary",
+        "/api/portfolio/positions",
+        "/api/portfolio/metrics",
+        "/api/portfolio/history",
+    }
+    actual_paths = {route["path"] for route in data["routes"]}
+    assert actual_paths == expected_paths
+    assert len(data["routes"]) == len(expected_paths)
+
+    for route in data["routes"]:
+        assert route["method"] == "GET"
+        assert route["description"]
+
+
 def test_get_performance_metrics_empty(client):
     """Test GET /api/portfolio/metrics with no trades"""
     response = client.get("/api/portfolio/metrics")
