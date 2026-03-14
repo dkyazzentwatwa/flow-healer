@@ -94,3 +94,12 @@ def test_add_many_preserves_pandas_dataframe_behavior() -> None:
 
     expected = pd.DataFrame({"value": [111, 112, 113]})
     pd.testing.assert_frame_equal(result, expected)
+
+
+def test_add_many_supports_additional_operands_and_transform_outputs() -> None:
+    values = pd.Series([1, 2, 3], name="value").transform(lambda column: column + 1)
+
+    result = add_many(values, 10, 100, 1)
+
+    expected = pd.Series([113, 114, 115], name="value")
+    pd.testing.assert_series_equal(result, expected)
