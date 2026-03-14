@@ -107,6 +107,7 @@ export function toPublicTodo(todo) {
     id: Number(normalizeTodoId(todo?.id)),
     title: todo.title,
     completed: todo.completed,
+    completedAt: todo.completedAt ?? null,
   };
 }
 

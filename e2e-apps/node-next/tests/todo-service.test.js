@@ -18,10 +18,14 @@ test("listTodos returns todo objects with the stable fields the API exposes", ()
   assert.ok(Array.isArray(todos));
 
   for (const todo of todos) {
-    assert.deepEqual(Object.keys(todo).sort(), ["completed", "id", "title"]);
+    assert.deepEqual(
+      Object.keys(todo).sort(),
+      ["completed", "completedAt", "id", "title"],
+    );
     assert.equal(typeof todo.id, "number");
     assert.equal(typeof todo.title, "string");
     assert.equal(typeof todo.completed, "boolean");
+    assert.ok(todo.completedAt === null || typeof todo.completedAt === "string");
   }
 });
 
@@ -253,19 +257,20 @@ test("toPublicTodo strips internal fields and normalizes the id type", () => {
       id: 7,
       title: "Ship it",
       completed: true,
+      completedAt: "2026-03-08T12:05:00.000Z",
     },
   );
 });
 
 test("toPublicTodo normalizes public ids before exposing them", () => {
-  assert.equal(
-    toPublicTodo({
-      id: " +09 ",
-      title: "Legacy spacing",
-      completed: false,
-    }).id,
-    9,
-  );
+  const normalized = toPublicTodo({
+    id: " +09 ",
+    title: "Legacy spacing",
+    completed: false,
+  });
+
+  assert.equal(normalized.id, 9);
+  assert.equal(normalized.completedAt, null);
 });
 
 test("todo payload helpers keep the collection and item route shape stable", () => {
@@ -284,6 +289,7 @@ test("todo payload helpers keep the collection and item route shape stable", () 
       id: 7,
       title: "Ship it",
       completed: true,
+      completedAt: "2026-03-08T12:05:00.000Z",
     },
   ]);
   assert.deepEqual(toTodoListPayload(todos), {
@@ -292,6 +298,7 @@ test("todo payload helpers keep the collection and item route shape stable", () 
         id: 7,
         title: "Ship it",
         completed: true,
+        completedAt: "2026-03-08T12:05:00.000Z",
       },
     ],
   });
@@ -300,6 +307,7 @@ test("todo payload helpers keep the collection and item route shape stable", () 
       id: 7,
       title: "Ship it",
       completed: true,
+      completedAt: "2026-03-08T12:05:00.000Z",
     },
   });
 });
@@ -366,6 +374,7 @@ test("POST returns the same stable public todo fields as GET", async () => {
       id: listTodos().at(-1)?.id,
       title: "Ship stable payload",
       completed: false,
+      completedAt: null,
     },
   });
 });
@@ -402,13 +411,12 @@ test("complete route returns the stable public todo fields", async () => {
   });
 
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    item: {
-      id: createdPayload.item.id,
-      title: "Close the loop",
-      completed: true,
-    },
-  });
+  const payload = await response.json();
+  assert.equal(payload.item.id, createdPayload.item.id);
+  assert.equal(payload.item.title, "Close the loop");
+  assert.equal(payload.item.completed, true);
+  assert.ok(payload.item.completedAt);
+  assert.equal(typeof payload.item.completedAt, "string");
 });
 
 test("complete route stays idempotent across repeated requests", async () => {
@@ -445,16 +453,11 @@ test("complete route normalizes the path id and persists the completed state", a
   });
 
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    item: {
-      id: createdPayload.item.id,
-      title: "Trim the dynamic route id",
-      completed: true,
-    },
-  });
-  assert.deepEqual(listTodos().at(-1), {
-    id: createdPayload.item.id,
-    title: "Trim the dynamic route id",
-    completed: true,
-  });
+  const payload = await response.json();
+  assert.equal(payload.item.id, createdPayload.item.id);
+  assert.equal(payload.item.title, "Trim the dynamic route id");
+  assert.equal(payload.item.completed, true);
+  assert.ok(payload.item.completedAt);
+  assert.equal(typeof payload.item.completedAt, "string");
+  assert.deepEqual(listTodos().at(-1), payload.item);
 });
