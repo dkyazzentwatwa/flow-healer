@@ -259,13 +259,9 @@ export function addMany(...operands) {
     throwFiniteNumberOperandTypeError();
   }
 
-  let total = 0;
+  const normalizedOperands = operands.map(normalizeFiniteNumberOperand);
 
-  for (const operand of operands) {
-    total += normalizeFiniteNumberOperand(operand);
-  }
-
-  return total;
+  return sumOperands(normalizedOperands);
 }
 
 export default add;
