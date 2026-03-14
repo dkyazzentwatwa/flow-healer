@@ -130,6 +130,7 @@ class RiskManager:
             "can_trade": False,
             "reason": f"Invalid {field_name}",
             "warning": None,
+            "risk_metrics": {},
         }
 
     def check_can_trade(
@@ -160,11 +161,47 @@ class RiskManager:
             return self._invalid_input_result("peak equity")
 
         # Check daily loss limit
+        position_pct = 0.0
+        exposure_pct = 0.0
+        if portfolio_value > 0:
+            position_pct = (position_size / portfolio_value) * 100
+            exposure_pct = (total_exposure / portfolio_value) * 100
+
+        drawdown = 0.0
+        drawdown_pct = 0.0
+        if peak_equity and peak_equity > 0:
+            drawdown = max(peak_equity - portfolio_value, 0.0)
+            drawdown_pct = drawdown / peak_equity
+
+        daily_loss_pct = (
+            (abs(today_pnl) / self.limits.max_daily_loss) * 100
+            if self.limits.max_daily_loss > 0
+            else 0.0
+        )
+
+        risk_metrics = {
+            "today_pnl": today_pnl,
+            "portfolio_value": portfolio_value,
+            "position_size": position_size,
+            "total_exposure": total_exposure,
+            "position_pct": position_pct,
+            "exposure_pct": exposure_pct,
+            "peak_equity": peak_equity,
+            "drawdown": drawdown,
+            "drawdown_pct": drawdown_pct,
+            "daily_loss_pct": daily_loss_pct,
+            "max_daily_loss": self.limits.max_daily_loss,
+            "max_drawdown_pct": self.limits.max_drawdown_pct,
+            "max_position_size_pct": self.limits.max_position_size_pct,
+            "max_exposure_pct": self.limits.max_exposure_pct,
+        }
+
         if today_pnl <= -self.limits.max_daily_loss:
             return {
                 "can_trade": False,
                 "reason": f"Daily loss limit of ${self.limits.max_daily_loss} reached",
-                "warning": None
+                "warning": None,
+                "risk_metrics": risk_metrics,
             }
 
         # Warning if approaching limit (80%)
@@ -174,38 +211,40 @@ class RiskManager:
 
         # Check position size limit
         if portfolio_value > 0:
-            position_pct = (position_size / portfolio_value) * 100
             if position_pct > self.limits.max_position_size_pct:
                 return {
                     "can_trade": False,
                     "reason": f"Position size {position_pct:.1f}% exceeds limit of {self.limits.max_position_size_pct}%",
-                    "warning": warning
+                    "warning": warning,
+                    "risk_metrics": risk_metrics,
                 }
 
         # Check total exposure limit
         if portfolio_value > 0:
-            exposure_pct = (total_exposure / portfolio_value) * 100
             if exposure_pct > self.limits.max_exposure_pct:
                 return {
                     "can_trade": False,
                     "reason": f"Total exposure {exposure_pct:.1f}% exceeds limit of {self.limits.max_exposure_pct}%",
-                    "warning": warning
+                    "warning": warning,
+                    "risk_metrics": risk_metrics,
                 }
 
         # Check max drawdown vs peak equity
+        max_drawdown_fraction = self.limits.max_drawdown_pct / 100
         if peak_equity and peak_equity > 0:
-            drawdown_pct = (peak_equity - portfolio_value) / peak_equity
-            if drawdown_pct >= (self.limits.max_drawdown_pct / 100):
+            if drawdown_pct >= max_drawdown_fraction:
                 return {
                     "can_trade": False,
                     "reason": f"Max drawdown limit reached ({drawdown_pct:.2%})",
-                    "warning": warning
+                    "warning": warning,
+                    "risk_metrics": risk_metrics
                 }
 
         return {
             "can_trade": True,
             "reason": "All risk checks passed",
-            "warning": warning
+            "warning": warning,
+            "risk_metrics": risk_metrics,
         }
 
     def calculate_position_size(
