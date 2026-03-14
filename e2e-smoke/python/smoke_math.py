@@ -151,6 +151,13 @@ def _normalize_operand(value: object) -> int:
     if isinstance(value, float):
         return _normalize_float_operand(value)
 
+    if hasattr(value, "__float__"):
+        try:
+            float_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise _operand_type_error(cause=exc)
+        return _normalize_float_operand(float_value)
+
     if isinstance(value, str):
         return _normalize_string_operand(value)
 
