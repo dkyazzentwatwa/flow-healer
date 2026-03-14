@@ -1,0 +1,110 @@
+name: 05 Workflow Lint
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "scripts/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "scripts/**"
+  workflow_dispatch:
+
+concurrency:
+  group: workflow-lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Run actionlint
+        run: |
+          ./actionlint -color
+
+  shellcheck:
+    name: shellcheck-inline-and-scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck and yq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck jq
+          sudo wget -qO//usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Shellcheck repo scripts
+        run: |
+          find scripts -type f -name "*.sh" -print0 | xargs -0 -r shellcheck
+
+      - name: Extract and shellcheck inline run blocks
+        run: |
+          tmpdir="$(mktemp -d)"
+          idx=0
+          for wf in .github/workflows/*.yml; do
+            while IFS= read -r block; do
+              idx=$((idx + 1))
+              file="${tmpdir}/run-${idx}.sh"
+              printf '%s\n' "$block" > "$file"
+              shellcheck "$file"
+            done < <(yq -r '.. | .run? // empty' "$wf")
+          done
+
+  workflow-policy:
+    name: workflow-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate workflow guardrails
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import yaml
+
+          failures = []
+
+          for path in pathlib.Path(".github/workflows").glob("*.yml"):
+              data = yaml.safe_load(path.read_text()) or {}
+              jobs = data.get("jobs", {})
+              if "permissions" not in data:
+                  failures.append(f"{path}: missing top-level permissions")
+              if "concurrency" not in data:
+                  failures.append(f"{path}: missing top-level concurrency")
+              for job_name, job in jobs.items():
+                  if "timeout-minutes" not in job:
+                      failures.append(f"{path}:{job_name}: missing timeout-minutes")
+
+          if failures:
+            print("Workflow policy violations:")
+            for failure in failures:
+                print(f" - {failure}")
+            sys.exit(1)
+
+          print("Workflow policy checks passed.")
+          PY
