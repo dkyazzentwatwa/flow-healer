@@ -6,8 +6,18 @@ fn adds_two_numbers() {
 }
 
 #[test]
-fn adds_three_numbers() {
-    assert_eq!(add_many(2, 3, 4), 9);
+fn adds_many_numbers() {
+    let test_cases: &[(&str, &[i32], i32)] = &[
+        ("three numbers", &[1, 2, 3], 6),
+        ("mix of negative and positive", &[-2, 4, 3], 5),
+        ("no inputs", &[], 0),
+        ("single value", &[7], 7),
+        ("longer list", &[1, 2, 3, 4, 5], 15),
+    ];
+
+    for (name, values, want) in test_cases {
+        assert_eq!(add_many(values), *want, "{}", name);
+    }
 }
 
 #[test]
