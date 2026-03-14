@@ -27,6 +27,10 @@ def test_add_many_accepts_whitespace_padded_integer_strings() -> None:
     assert add_many(" 2 ", "\n3\t", " 4\n") == 9
 
 
+def test_add_many_supports_additional_operands() -> None:
+    assert add_many(" 2 ", "3", 4, "5 ", 6) == 20
+
+
 def test_add_many_rejects_blank_string_operands() -> None:
     with pytest.raises(TypeError, match="blank string operands are not allowed"):
         add_many("2", " ", "4")
