@@ -1,3 +1,5 @@
+const FINITE_INPUT_ERROR_MESSAGE = 'add expects finite numeric inputs';
+
 function add(a, b) {
   const left = toFiniteNumber(a);
   const right = toFiniteNumber(b);
@@ -6,27 +8,37 @@ function add(a, b) {
 }
 
 function toFiniteNumber(value) {
-  while (value && typeof value === 'object' && 'value' in value) {
-    value = value.value;
-  }
+  value = unwrapValue(value);
 
   if (typeof value === 'string') {
     const trimmed = value.trim();
 
     if (trimmed === '') {
-      throw new TypeError('add expects finite numeric inputs');
+      throw new TypeError(FINITE_INPUT_ERROR_MESSAGE);
     }
 
-    value = trimmed;
+    value = Number(trimmed);
+  } else if (typeof value !== 'number') {
+    throw new TypeError(FINITE_INPUT_ERROR_MESSAGE);
   }
 
-  const number = Number(value);
-
-  if (!Number.isFinite(number)) {
-    throw new TypeError('add expects finite numeric inputs');
+  if (!Number.isFinite(value)) {
+    throw new TypeError(FINITE_INPUT_ERROR_MESSAGE);
   }
 
-  return number;
+  return value;
+}
+
+function unwrapValue(value) {
+  while (isValueWrapper(value)) {
+    value = value.value;
+  }
+
+  return value;
+}
+
+function isValueWrapper(value) {
+  return value !== null && typeof value === 'object' && 'value' in value;
 }
 
 module.exports = { add };
