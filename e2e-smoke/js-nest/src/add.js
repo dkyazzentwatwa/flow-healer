@@ -6,6 +6,10 @@ function add(a, b) {
 }
 
 function normalizeFiniteNumber(value) {
+  while (value && typeof value === 'object' && 'value' in value) {
+    value = value.value;
+  }
+
   if (typeof value === 'string') {
     const trimmed = value.trim();
 
