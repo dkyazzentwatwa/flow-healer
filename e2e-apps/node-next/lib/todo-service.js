@@ -56,6 +56,10 @@ export function normalizeTodoTitle(title) {
   return normalized;
 }
 
+export function isTodoPayload(payload) {
+  return payload !== null && typeof payload === "object" && typeof payload.title === "string";
+}
+
 function getNextTodoId(todos) {
   let maxId = 0;
 

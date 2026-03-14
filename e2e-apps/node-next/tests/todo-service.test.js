@@ -312,7 +312,7 @@ test("todo payload helpers keep the collection and item route shape stable", () 
   });
 });
 
-test("POST rejects blank and malformed titles", async () => {
+test("POST rejects blank titles with title_required", async () => {
   const todosBefore = listTodos().length;
   const blankResponse = await POST(
     new Request("http://localhost/api/todos", {
@@ -321,18 +321,42 @@ test("POST rejects blank and malformed titles", async () => {
       body: JSON.stringify({ title: "  \n\t  " }),
     }),
   );
-  const malformedResponse = await POST(
+
+  assert.equal(blankResponse.status, 400);
+  assert.deepEqual(await blankResponse.json(), { error: "title_required" });
+  assert.equal(listTodos().length, todosBefore);
+});
+
+test("POST rejects malformed payloads with invalid_payload", async () => {
+  const todosBefore = listTodos().length;
+  const missingTitleResponse = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }),
+  );
+  const nonStringTitleResponse = await POST(
     new Request("http://localhost/api/todos", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: { text: "Ship it" } }),
     }),
   );
+  const primitivePayloadResponse = await POST(
+    new Request("http://localhost/api/todos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(42),
+    }),
+  );
 
-  assert.equal(blankResponse.status, 400);
-  assert.deepEqual(await blankResponse.json(), { error: "title_required" });
-  assert.equal(malformedResponse.status, 400);
-  assert.deepEqual(await malformedResponse.json(), { error: "title_required" });
+  assert.equal(missingTitleResponse.status, 400);
+  assert.deepEqual(await missingTitleResponse.json(), { error: "invalid_payload" });
+  assert.equal(nonStringTitleResponse.status, 400);
+  assert.deepEqual(await nonStringTitleResponse.json(), { error: "invalid_payload" });
+  assert.equal(primitivePayloadResponse.status, 400);
+  assert.deepEqual(await primitivePayloadResponse.json(), { error: "invalid_payload" });
   assert.equal(listTodos().length, todosBefore);
 });
 
