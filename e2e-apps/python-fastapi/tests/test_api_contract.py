@@ -8,6 +8,11 @@ from fastapi.testclient import TestClient
 from app.api import complete_todo, create_app, create_todo, health, list_todos
 
 APP_NAME = "Flow Healer Python FastAPI Sandbox"
+SERVICE_METADATA = {
+    "language": "python",
+    "framework": "fastapi",
+    "target": "python-fastapi",
+}
 
 
 def _expected_todo_payload(
@@ -26,7 +31,13 @@ def _expected_todo_payload(
 
 
 def _expected_health_payload() -> dict[str, object]:
-    return {"status": "ok", "service": {"name": APP_NAME}}
+    return {
+        "status": "ok",
+        "service": {
+            "name": APP_NAME,
+            "metadata": dict(SERVICE_METADATA),
+        },
+    }
 
 
 def _route_endpoint_for(app, path: str, method: str):
@@ -50,7 +61,7 @@ def _route_for(app, path: str, method: str):
 
 
 def test_health_returns_ok_status() -> None:
-    assert health() == {"status": "ok", "service": {"name": APP_NAME}}
+    assert health() == _expected_health_payload()
 
 
 def test_health_route_returns_service_metadata_contract() -> None:
@@ -65,6 +76,7 @@ def test_health_route_returns_service_metadata_contract() -> None:
 def test_health_payload_returns_fresh_contract_copy() -> None:
     response_one = health()
     response_one["service"]["name"] = "tampered-name"
+    response_one["service"]["metadata"]["framework"] = "tampered-framework"
     assert health() == _expected_health_payload()
 
 

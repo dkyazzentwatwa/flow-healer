@@ -6,6 +6,11 @@ from .service import TodoItem, TodoService
 
 APP_NAME = "Flow Healer Python FastAPI Sandbox"
 HEALTH_SERVICE_NAME: Final[str] = APP_NAME
+HEALTH_SERVICE_METADATA: Final[dict[str, str]] = {
+    "language": "python",
+    "framework": "fastapi",
+    "target": "python-fastapi",
+}
 
 try:
     from fastapi import Body, FastAPI, HTTPException
@@ -52,7 +57,13 @@ service = TodoService()
 
 
 def health() -> dict[str, object]:
-    return {"status": "ok", "service": {"name": HEALTH_SERVICE_NAME}}
+    return {
+        "status": "ok",
+        "service": {
+            "name": HEALTH_SERVICE_NAME,
+            "metadata": dict(HEALTH_SERVICE_METADATA),
+        },
+    }
 
 
 def _service_for(request_service: TodoService | None) -> TodoService:
