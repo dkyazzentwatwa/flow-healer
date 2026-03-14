@@ -5,9 +5,9 @@ public func add(_ leftOperand: Int, _ rightOperand: Int) -> Int {
     return total
 }
 
-/// Adds three integers using Swift's standard integer addition semantics.
+/// Adds zero or more integers using Swift's standard integer addition semantics.
 @inlinable
-public func addMany(_ firstOperand: Int, _ secondOperand: Int, _ thirdOperand: Int) -> Int {
-    let total = firstOperand + secondOperand + thirdOperand
+public func addMany(_ operands: Int...) -> Int {
+    let total = operands.reduce(0, +)
     return total
 }

@@ -40,6 +40,7 @@ private let commutativePairs: [(left: Int, right: Int)] = [
     (left: Int.min, right: 0),
 ]
 
+
 @Test func addAddsTwoPositiveOperands() {
     #expect(add(2, 3) == 5)
 }
@@ -94,4 +95,22 @@ private let commutativePairs: [(left: Int, right: Int)] = [
 
 @Test func addManyTreatsZeroAsTheAdditiveIdentity() {
     #expect(addMany(0, 7, 0) == 7)
+}
+
+@Test func addManyHandlesEmptyOperandList() {
+    #expect(addMany() == 0)
+}
+
+@Test func addManyAddsTwoOperands() {
+    #expect(addMany(1, 2) == 3)
+    #expect(addMany(-5, 5) == 0)
+}
+
+@Test func addManyAddsFiveOperands() {
+    #expect(addMany(1, 2, 3, 4, 5) == 15)
+}
+
+@Test func addManySupportsMixedSignAndLargeOperands() {
+    #expect(addMany(-3, 1, 2, -1) == -1)
+    #expect(addMany(Int.max - 1, 1) == Int.max)
 }
