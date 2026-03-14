@@ -18,6 +18,17 @@ def test_add_accepts_stringable_values() -> None:
     assert add(DjangoStringable("2"), DjangoStringable("3")) == 5
 
 
+def test_add_unwraps_value_wrappers() -> None:
+    class DjangoValueWrapper:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    wrapped = DjangoValueWrapper(DjangoValueWrapper(" 2 "))
+    unwrapped = DjangoValueWrapper("3")
+
+    assert add(wrapped, unwrapped) == 5
+
+
 def test_add_accepts_numeric_string_wrappers_with_broken_int_conversion() -> None:
     class DjangoBoundaryValue:
         def __init__(self, value: str) -> None:
