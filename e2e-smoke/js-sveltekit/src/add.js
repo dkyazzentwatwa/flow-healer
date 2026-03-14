@@ -25,4 +25,6 @@ function normalizeFiniteNumber(value) {
   return value;
 }
 
-module.exports = { add };
+module.exports = add;
+module.exports.add = add;
+module.exports.default = add;

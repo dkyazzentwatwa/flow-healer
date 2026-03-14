@@ -20,3 +20,10 @@ assert.throws(() => add(null, 2), {
   name: 'TypeError',
   message: 'add expects finite numeric inputs',
 });
+
+(async () => {
+  const importedModule = await import('../src/add.js');
+
+  assert.strictEqual(importedModule.default(1, 2), 3);
+  assert.strictEqual(importedModule.add(1, 2), 3);
+})();
