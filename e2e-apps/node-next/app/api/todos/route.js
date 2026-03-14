@@ -1,5 +1,4 @@
 import {
-  normalizeTodoTitle,
   toTodoItemPayload,
   toTodoListPayload,
   todoService,
@@ -25,9 +24,12 @@ export async function POST(request) {
   }
 
   try {
-    const created = todoService.create(normalizeTodoTitle(payload.title));
+    const created = todoService.create(payload.title);
     return Response.json(toTodoItemPayload(created), { status: 201 });
   } catch (error) {
-    return Response.json({ error: String(error.message || "create_failed") }, { status: 400 });
+    return Response.json(
+      { error: String(error?.message) === "title_required" ? "title_required" : "create_failed" },
+      { status: 400 },
+    );
   }
 }
