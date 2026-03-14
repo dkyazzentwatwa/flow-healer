@@ -531,6 +531,12 @@ class PortfolioEngine:
 
         return max_drawdown
 
+    @staticmethod
+    def _allocate_fee_for_amount(fee: float, amount: float, total: float) -> float:
+        if total <= 0 or amount <= 0:
+            return 0.0
+        return fee * (amount / total)
+
     def update_positions_from_trade(self, trade: Trade) -> None:
         """
         Update positions table when a trade executes.
@@ -543,6 +549,7 @@ class PortfolioEngine:
             trade: The trade that was executed
         """
         current_position = self.position_repo.get_by_symbol(trade.symbol)
+        allow_shorts = os.getenv("ALLOW_SHORT_POSITIONS", "false").lower() == "true"
 
         if trade.side == "buy":
             if current_position is None:
@@ -557,8 +564,8 @@ class PortfolioEngine:
                     last_updated=trade.timestamp
                 )
                 self.position_repo.upsert(position)
-            else:
-                # Update existing position
+            elif current_position.side == "long":
+                # Update existing long position
                 new_total_cost = current_position.total_cost + (trade.amount * trade.price + trade.fee)
                 new_amount = current_position.amount + trade.amount
                 new_avg_price = (new_total_cost / new_amount) if new_amount > 0 else 0.0
@@ -568,16 +575,48 @@ class PortfolioEngine:
                     amount=new_amount,
                     avg_entry_price=new_avg_price,
                     total_cost=new_total_cost,
-                    side=current_position.side,
+                    side="long",
                     opened_at=current_position.opened_at,
                     last_updated=trade.timestamp
                 )
                 self.position_repo.upsert(position)
+            else:
+                # Closing or reducing a short position
+                if trade.amount >= current_position.amount:
+                    closing_fee = self._allocate_fee_for_amount(trade.fee, current_position.amount, trade.amount)
+                    remaining_fee = trade.fee - closing_fee
+                    leftover_amount = trade.amount - current_position.amount
+                    self.position_repo.delete(trade.symbol)
+
+                    if leftover_amount > 1e-8:
+                        position = Position(
+                            symbol=trade.symbol,
+                            amount=leftover_amount,
+                            avg_entry_price=trade.price,
+                            total_cost=leftover_amount * trade.price + max(remaining_fee, 0.0),
+                            side="long",
+                            opened_at=trade.timestamp,
+                            last_updated=trade.timestamp
+                        )
+                        self.position_repo.upsert(position)
+                else:
+                    new_amount = current_position.amount - trade.amount
+                    new_total_cost = current_position.total_cost * (new_amount / current_position.amount)
+
+                    position = Position(
+                        symbol=trade.symbol,
+                        amount=new_amount,
+                        avg_entry_price=current_position.avg_entry_price,
+                        total_cost=new_total_cost,
+                        side="short",
+                        opened_at=current_position.opened_at,
+                        last_updated=trade.timestamp
+                    )
+                    self.position_repo.upsert(position)
 
         elif trade.side == "sell":
             if current_position is None:
                 # Check if shorting is allowed (disabled by default for spot trading)
-                allow_shorts = os.getenv("ALLOW_SHORT_POSITIONS", "false").lower() == "true"
                 if not allow_shorts:
                     logger.warning(f"Sell order for {trade.symbol} with no existing position - ignoring (shorting disabled)")
                     return
@@ -593,14 +632,49 @@ class PortfolioEngine:
                     last_updated=trade.timestamp
                 )
                 self.position_repo.upsert(position)
+            elif current_position.side == "short":
+                # Increase short exposure
+                new_amount = current_position.amount + trade.amount
+                new_total_cost = current_position.total_cost + (trade.amount * trade.price - trade.fee)
+                new_avg_price = (new_total_cost / new_amount) if new_amount > 0 else 0.0
+
+                position = Position(
+                    symbol=trade.symbol,
+                    amount=new_amount,
+                    avg_entry_price=new_avg_price,
+                    total_cost=new_total_cost,
+                    side="short",
+                    opened_at=current_position.opened_at,
+                    last_updated=trade.timestamp
+                )
+                self.position_repo.upsert(position)
             else:
-                # Reduce or close position
+                # Reduce or close long position, possibly flipping to short
                 new_amount = current_position.amount - trade.amount
 
-                if new_amount <= 1e-8:  # Position closed
+                if new_amount <= 1e-8:
+                    closing_fee = self._allocate_fee_for_amount(trade.fee, current_position.amount, trade.amount)
+                    remaining_fee = trade.fee - closing_fee
+                    leftover_amount = trade.amount - current_position.amount
                     self.position_repo.delete(trade.symbol)
+
+                    if leftover_amount > 1e-8:
+                        if not allow_shorts:
+                            logger.warning(f"Sell order for {trade.symbol} exceeded available long position and shorting is disabled; ignoring excess.")
+                            return
+
+                        position = Position(
+                            symbol=trade.symbol,
+                            amount=leftover_amount,
+                            avg_entry_price=trade.price,
+                            total_cost=leftover_amount * trade.price - max(remaining_fee, 0.0),
+                            side="short",
+                            opened_at=trade.timestamp,
+                            last_updated=trade.timestamp
+                        )
+                        self.position_repo.upsert(position)
                 else:
-                    # Reduce position size but keep same avg entry price
+                    # Reduce long position size but keep same avg entry price
                     # Proportionally reduce total cost
                     new_total_cost = current_position.total_cost * (new_amount / current_position.amount)
 
@@ -609,7 +683,7 @@ class PortfolioEngine:
                         amount=new_amount,
                         avg_entry_price=current_position.avg_entry_price,
                         total_cost=new_total_cost,
-                        side=current_position.side,
+                        side="long",
                         opened_at=current_position.opened_at,
                         last_updated=trade.timestamp
                     )
