@@ -6,7 +6,7 @@ function add(a, b) {
 }
 
 function toFiniteNumber(value) {
-  if (value && typeof value === 'object' && 'value' in value) {
+  while (value && typeof value === 'object' && 'value' in value) {
     value = value.value;
   }
 
@@ -17,16 +17,18 @@ function toFiniteNumber(value) {
       throw new TypeError('add expects finite numeric inputs');
     }
 
-    value = trimmed;
+    value = Number(trimmed);
   }
 
-  const number = Number(value);
-
-  if (!Number.isFinite(number)) {
+  if (typeof value !== 'number') {
     throw new TypeError('add expects finite numeric inputs');
   }
 
-  return number;
+  if (!Number.isFinite(value)) {
+    throw new TypeError('add expects finite numeric inputs');
+  }
+
+  return value;
 }
 
 module.exports = { add };
