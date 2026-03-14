@@ -83,6 +83,26 @@ def test_add_uses_native_add_for_pandas_objects_only() -> None:
     assert result.used_native_add is True
 
 
+def test_add_prefers_pandas_add_when_second_operand_is_pandas_object() -> None:
+    class TrackingPandasObject(pd.core.base.PandasObject):
+        def __init__(self, value: int) -> None:
+            self.value = value
+            self.used_native_add = False
+
+        def add(self, other: int) -> "TrackingPandasObject":
+            result = TrackingPandasObject(self.value + other)
+            result.used_native_add = True
+            return result
+
+        def __radd__(self, other: int) -> "TrackingPandasObject":
+            raise AssertionError("pandas add should be used without falling back to __radd__")
+
+    result = add(2, TrackingPandasObject(1))
+
+    assert result.value == 3
+    assert result.used_native_add is True
+
+
 def test_add_many_with_scalars() -> None:
     assert add_many(2, 3, 4) == 9
 
