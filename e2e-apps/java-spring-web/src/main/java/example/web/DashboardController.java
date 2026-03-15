@@ -5,6 +5,7 @@ public class DashboardController {
         if (userEmail == null || userEmail.isBlank()) {
             return ResponsePlan.redirect("/login");
         }
+        String escapedUser = escapeHtml(userEmail);
         return ResponsePlan.html(
             200,
             """
@@ -15,11 +16,12 @@ public class DashboardController {
                     <div id="session-user" style="margin-bottom: 20px; font-size: 16px;">Signed in as %s</div>
                     <div style="margin-bottom: 20px; font-size: 15px; font-weight: 600; color: #6d4c2c;">Seeded alerts are ready.</div>
                     <p style="margin: 0 0 16px; font-size: 18px; line-height: 1.7;">Autonomous code agents read issue instructions, edit only the allowed files, run checks, and report their progress back on GitHub. They keep the work scoped so each change lines up with the task contract and leaves a clear audit trail.</p>
-                    <p style="margin: 0 0 16px; font-size: 18px; line-height: 1.7;">In plain language, the loop starts with an issue, makes the smallest safe code update, runs the requested validation command, and then shares the result with evidence so the next person can see what changed and why.</p>
+                    <p style="margin: 0 0 16px; font-size: 18px; line-height: 1.7;">Autonomous code agents read the issue instructions, make the smallest safe edit, and run the requested validation command before reporting the outcome. The dashboard surface documents that workflow so the next reviewer easily understands what changed and why.</p>
+                    <p style="margin: 0 0 16px; font-size: 18px; line-height: 1.7;">A healthy run keeps the edit scope tight, executes the requested checks, and publishes artifacts so the repair remains auditable and reproducible.</p>
                     <p style="margin: 0; font-size: 18px; line-height: 1.7;">That workflow helps teams clear routine engineering work faster because small fixes move forward with less manual coordination, while the guardrails keep each automated pass focused, reviewable, and easy to trust.</p>
                 </div>
             </section>
-            """.formatted(escapeHtml(userEmail))
+            """.formatted(escapedUser)
         );
     }
 
@@ -28,6 +30,7 @@ public class DashboardController {
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
-            .replace("\"", "&quot;");
+            .replace("\"", "&quot;")
+            .replace("'", "&#x27;");
     }
 }
