@@ -4,6 +4,7 @@ public class HealthControllerTest {
     public static void main(String[] args) {
         healthEndpointReturnsOk();
         loginFormRendersDeterministicEvidenceMarker();
+        loginFormEscapesSessionUser();
         loginEndpointIssuesCookieBackedSession();
         loginEndpointFallsBackForBlankEmailInput();
         loginEndpointFallsBackForMalformedEmailInput();
@@ -20,6 +21,18 @@ public class HealthControllerTest {
         ResponsePlan response = new LoginController().loginForm("");
         assertEquals(200, response.status(), "login form status");
         assertContains(response.body(), "Evidence TC 3", "login form evidence marker");
+    }
+
+    private static void loginFormEscapesSessionUser() {
+        String sessionUserWithApostrophe = "seeded-admin'o@example.com";
+        ResponsePlan response = new LoginController().loginForm(sessionUserWithApostrophe);
+        assertEquals(200, response.status(), "login form status");
+        assertContains(
+            response.body(),
+            "seeded-admin&#x27;o@example.com",
+            "login form escapes apostrophes in session user"
+        );
+        assertNotContains(response.body(), sessionUserWithApostrophe, "login form raw session user");
     }
 
     private static void loginEndpointIssuesCookieBackedSession() {
@@ -71,6 +84,12 @@ public class HealthControllerTest {
     private static void assertContains(String body, String expected, String label) {
         if (body == null || !body.contains(expected)) {
             throw new AssertionError(label + " missing expected fragment: " + expected);
+        }
+    }
+
+    private static void assertNotContains(String body, String unexpected, String label) {
+        if (body != null && body.contains(unexpected)) {
+            throw new AssertionError(label + " contains unexpected fragment: " + unexpected);
         }
     }
 }
