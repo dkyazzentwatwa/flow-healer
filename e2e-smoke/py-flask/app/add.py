@@ -21,8 +21,16 @@ def add_many(
 def _coerce_int(value: int | str) -> int:
     if isinstance(value, bool):
         raise TypeError("boolean operands are not allowed")
+    if isinstance(value, int):
+        return value
+
     if isinstance(value, str):
         value = value.strip()
         if not value:
             raise TypeError("blank string operands are not allowed")
-    return int(value)
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise TypeError("integer operands are required") from exc
+
+    raise TypeError("integer operands are required")
