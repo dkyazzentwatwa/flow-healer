@@ -5,13 +5,13 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.api import complete_todo, create_app, create_todo, health, list_todos
+from app.api import APP_NAME, APP_VERSION, complete_todo, create_app, create_todo, health, list_todos
 
-APP_NAME = "Flow Healer Python FastAPI Sandbox"
 SERVICE_METADATA = {
     "language": "python",
     "framework": "fastapi",
     "target": "python-fastapi",
+    "version": APP_VERSION,
 }
 
 
