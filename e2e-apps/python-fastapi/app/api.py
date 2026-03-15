@@ -5,11 +5,13 @@ from typing import Final
 from .service import TodoItem, TodoService
 
 APP_NAME = "Flow Healer Python FastAPI Sandbox"
+APP_VERSION = "1.0.0"
 HEALTH_SERVICE_NAME: Final[str] = APP_NAME
 HEALTH_SERVICE_METADATA: Final[dict[str, str]] = {
     "language": "python",
     "framework": "fastapi",
     "target": "python-fastapi",
+    "version": APP_VERSION,
 }
 
 try:
