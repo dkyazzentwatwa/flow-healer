@@ -41,14 +41,17 @@ function getQueryValue(context, name) {
     }
 
     const query = request.query();
+    const extracted = getValueFromQueryLike(query, name);
 
-    if (query && typeof query === 'object') {
-      return query[name];
+    if (extracted !== undefined) {
+      return extracted;
     }
   }
 
-  if (request.query && typeof request.query === 'object') {
-    return request.query[name];
+  const extracted = getValueFromQueryLike(request.query, name);
+
+  if (extracted !== undefined) {
+    return extracted;
   }
 
   if (request.url) {
@@ -56,6 +59,18 @@ function getQueryValue(context, name) {
   }
 
   return undefined;
+}
+
+function getValueFromQueryLike(query, name) {
+  if (!query || typeof query !== 'object') {
+    return undefined;
+  }
+
+  if (typeof query.get === 'function') {
+    return query.get(name);
+  }
+
+  return query[name];
 }
 
 function json(context, body, status = 200) {
