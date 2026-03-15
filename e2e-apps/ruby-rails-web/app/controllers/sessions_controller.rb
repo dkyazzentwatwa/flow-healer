@@ -1,13 +1,20 @@
+require "erb"
+
 # frozen_string_literal: true
 
 class SessionsController
   def new(request:, session_user:)
+    profile_display = if session_user.empty?
+      "anonymous"
+    else
+      ERB::Util.html_escape(session_user)
+    end
     {
       status: 200,
       content_type: "text/html",
       body: <<~HTML
         <h1>Ruby Rails Web</h1>
-        <p class="fixture-profile">#{session_user.empty? ? "anonymous" : session_user}</p>
+        <p class="fixture-profile">#{profile_display}</p>
         <p>Evidence TC 2</p>
         <form action="/login" method="post">
           <label>Email <input name="email" type="email" /></label>

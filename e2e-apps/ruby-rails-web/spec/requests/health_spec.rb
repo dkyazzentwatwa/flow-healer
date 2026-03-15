@@ -1,3 +1,4 @@
+require "cgi"
 require "net/http"
 require "timeout"
 require "uri"
@@ -76,5 +77,16 @@ RSpec.describe "Ruby rails web reference app" do
 
     expect(login.code).to eq("200")
     expect(login.body).to include("Evidence TC 2")
+  end
+
+  it "escapes the session user embedded on /login" do
+    malicious_session_user = "<script>alert(foo)</script>"
+    cookie = "healer_session=#{CGI.escape(malicious_session_user)}"
+
+    login = http_get("/login", cookie: cookie)
+
+    expect(login.code).to eq("200")
+    expect(login.body).to include("&lt;script&gt;alert(foo)&lt;/script&gt;")
+    expect(login.body).not_to include(malicious_session_user)
   end
 end
