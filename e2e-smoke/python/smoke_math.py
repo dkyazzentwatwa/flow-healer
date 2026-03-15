@@ -161,6 +161,12 @@ def _normalize_operand(value: object) -> int:
     if isinstance(value, str):
         return _normalize_string_operand(value)
 
+    if hasattr(value, "__int__"):
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _operand_type_error(cause=exc)
+
     return _normalize_integral_operand(value)
 
 

@@ -93,6 +93,7 @@ ADD_SUCCESS_CASES = (
     pytest.param("١٢", "３", 15, id="adds_unicode_decimal_digit_strings"),
     pytest.param(True, False, 1, id="adds_boolean_operands"),
     pytest.param(FancyInt(7), 3, 10, id="adds_integer_subclass_operand"),
+    pytest.param(IntLikeButNotIntegral(), 1, 10, id="adds_int_like_non_integral_operand"),
     pytest.param(IndexStableInt(4), -1, 3, id="uses_exact_index_for_int_subclass"),
     pytest.param(OverflowingInt(6), "-2", 4, id="ignores_overflowing_int_hook"),
     pytest.param("1_000", "2_000", 3000, id="adds_underscored_integer_strings"),
@@ -121,7 +122,7 @@ ADD_TYPE_ERROR_CASES = (
     pytest.param(RealLikeNumber(float("nan")), 1, id="rejects_real_like_nan_operand"),
 )
 
-EXPECTED_ADD_SUCCESS_CASE_COUNT = 22
+EXPECTED_ADD_SUCCESS_CASE_COUNT = 23
 EXPECTED_ADD_TYPE_ERROR_CASE_COUNT = 8
 
 
@@ -178,11 +179,6 @@ def test_add_type_error_cases_raise_type_error(
         pytest.param("1_000_", 1, id="rejects_trailing_underscore_integer_string_operand"),
         pytest.param(b"2", 1, id="rejects_bytes_operand"),
         pytest.param(object(), 1, id="rejects_object_operand"),
-        pytest.param(
-            IntLikeButNotIntegral(),
-            1,
-            id="rejects_int_like_non_integral_operand",
-        ),
         pytest.param("1\x00", 1, id="rejects_embedded_nul_in_string_operand"),
     ),
 )
@@ -424,6 +420,11 @@ def test_normalize_operand_rounds_fraction_inputs_deterministically(
 ) -> None:
     """Fraction operands should round predictably before addition."""
     assert _normalize_operand(value) == expected
+
+
+def test_normalize_operand_accepts_int_like_non_integral_operands() -> None:
+    """Int-like objects should normalize via their __int__ conversion."""
+    assert _normalize_operand(IntLikeButNotIntegral()) == 9
 
 
 def test_coerce_operands_ignores_overflowing_int_hook_for_integral_subclass() -> None:
