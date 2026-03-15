@@ -16,6 +16,18 @@ def test_add_coerces_flask_string_inputs() -> None:
     assert add("2", "3") == 5
 
 
+@pytest.mark.parametrize("value", [2.5, "two"])
+def test_add_rejects_non_integer_operands(value: object) -> None:
+    with pytest.raises(TypeError, match="integer operands are required"):
+        add(value, 3)
+
+
+@pytest.mark.parametrize("a, b", [("", "3"), ("2", " "), ("\t", "\n")])
+def test_add_rejects_blank_string_operands(a: str, b: str) -> None:
+    with pytest.raises(TypeError, match="blank string operands are not allowed"):
+        add(a, b)
+
+
 @pytest.mark.parametrize("a, b", [(True, 3), (2, False), (True, False)])
 def test_add_rejects_boolean_operands(a: int | bool, b: int | bool) -> None:
     with pytest.raises(TypeError, match="boolean operands are not allowed"):
@@ -35,3 +47,9 @@ def test_add_many_rejects_boolean_operands() -> None:
 def test_add_many_rejects_blank_string_operands() -> None:
     with pytest.raises(TypeError, match="blank string operands are not allowed"):
         add_many("2", "", "4")
+
+
+@pytest.mark.parametrize("value", [2.5, "two"])
+def test_add_many_rejects_non_integer_operands(value: object) -> None:
+    with pytest.raises(TypeError, match="integer operands are required"):
+        add_many("2", value, "4")
