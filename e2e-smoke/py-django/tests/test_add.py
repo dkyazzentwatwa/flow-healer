@@ -53,6 +53,12 @@ def test_add_rejects_blank_string_operands(a: str, b: str) -> None:
         add(a, b)
 
 
+@pytest.mark.parametrize("value", [2.5, "two"])
+def test_add_rejects_non_integer_operands(value: object) -> None:
+    with pytest.raises(TypeError, match="integer operands are required"):
+        add(value, 3)
+
+
 def test_add_rejects_boolean_operands() -> None:
     with pytest.raises(TypeError):
         add(True, 2)
