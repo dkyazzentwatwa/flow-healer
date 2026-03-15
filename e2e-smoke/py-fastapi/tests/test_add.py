@@ -19,6 +19,12 @@ def test_add_accepts_whitespace_padded_integer_strings() -> None:
     assert add(" 2 ", "\n3\t") == 5
 
 
+@pytest.mark.parametrize("value", [2.5, "two"])
+def test_add_rejects_non_integer_operands(value: object) -> None:
+    with pytest.raises(TypeError, match="integer operands are required"):
+        add(value, 3)
+
+
 def test_add_many_coerces_integer_strings() -> None:
     assert add_many("2", "3", "4") == 9
 
@@ -29,6 +35,12 @@ def test_add_many_accepts_whitespace_padded_integer_strings() -> None:
 
 def test_add_many_supports_additional_operands() -> None:
     assert add_many(" 2 ", "3", 4, "5 ", 6) == 20
+
+
+@pytest.mark.parametrize("value", [2.5, "two"])
+def test_add_many_rejects_non_integer_operands(value: object) -> None:
+    with pytest.raises(TypeError, match="integer operands are required"):
+        add_many("2", value, "4")
 
 
 def test_add_many_rejects_blank_string_operands() -> None:
