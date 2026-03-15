@@ -27,6 +27,13 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--dry-run", action="store_true")
         if name == "doctor":
             cmd.add_argument("--preflight", action="store_true")
+            cmd.add_argument(
+                "--plain",
+                action="store_true",
+                default=True,
+                help="Show human-readable output (default). Use --no-plain for JSON.",
+            )
+            cmd.add_argument("--no-plain", dest="plain", action="store_false")
         if name == "serve":
             cmd.add_argument("--host")
             cmd.add_argument("--port", type=int)
@@ -39,6 +46,58 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--once", action="store_true")
             cmd.add_argument("--refresh-seconds", type=int, default=5)
     return parser
+
+
+def format_doctor_rows_plain(rows: list[dict]) -> str:
+    """Format doctor_rows as human-readable plain text with remediation hints."""
+    if not rows:
+        return "(no repos configured)"
+
+    lines: list[str] = []
+    for row in rows:
+        repo = str(row.get("repo") or row.get("repo_name") or "unknown")
+        lines.append(f"\n=== {repo} ===")
+
+        checks = [
+            (
+                "GITHUB_TOKEN present",
+                row.get("token_present"),
+                "Set the GITHUB_TOKEN env var: export GITHUB_TOKEN=ghp_...",
+            ),
+            (
+                "Git repo accessible",
+                row.get("git_ok"),
+                "Check the 'path:' field in your config.yaml points to a valid git repo",
+            ),
+            (
+                "Connector found",
+                row.get("connector_found"),
+                "Install the connector (default: npm install -g @openai/codex) or set connector_backend in config",
+            ),
+            (
+                "State database accessible",
+                row.get("db_ok"),
+                "Check disk space and permissions under ~/.flow-healer",
+            ),
+        ]
+        for label, ok, hint in checks:
+            if ok:
+                lines.append(f"  ✓  {label}")
+            elif ok is False:
+                lines.append(f"  ✗  {label}")
+                lines.append(f"     → {hint}")
+            # ok is None means the check didn't run — skip silently
+
+        preflight = row.get("preflight_summary") or {}
+        issues = preflight.get("issues") or []
+        if preflight.get("ready"):
+            lines.append("  ✓  Preflight checks passed")
+        elif issues:
+            lines.append("  ✗  Preflight issues detected:")
+            for issue in issues[:5]:
+                lines.append(f"     → {issue}")
+
+    return "\n".join(lines)
 
 
 def _configure_logging(config: AppConfig) -> None:
@@ -90,8 +149,12 @@ def main() -> None:
             print(json.dumps(row, indent=2, default=str))
         return
     if args.command == "doctor":
-        for row in service.doctor_rows(args.repo, preflight=bool(args.preflight)):
-            print(json.dumps(row, indent=2, default=str))
+        rows = service.doctor_rows(args.repo, preflight=bool(args.preflight))
+        if getattr(args, "plain", True):
+            print(format_doctor_rows_plain(rows))
+        else:
+            for row in rows:
+                print(json.dumps(row, indent=2, default=str))
         return
     if args.command == "serve":
         run_serve(
