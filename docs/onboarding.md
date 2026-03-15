@@ -29,7 +29,7 @@ flow-healer --help
 mkdir -p ~/.flow-healer
 ```
 
-Download `config.example.yaml` from the repo and copy it to `~/.flow-healer/config.yaml`. Then open it and set:
+Copy `config.example.yaml` (at the root of the Flow Healer repo) to `~/.flow-healer/config.yaml`. If you installed via pip without cloning the repo, download it from the [GitHub repo root](https://github.com/flow-healer/flow-healer/blob/main/config.example.yaml). Then open it and set:
 
 ```yaml
 repos:
@@ -38,7 +38,7 @@ repos:
     repo_slug: yourname/your-repo
     default_branch: main
     enable_autonomous_healer: true
-    issue_contract_mode: lenient
+    issue_contract_mode: lenient  # "lenient" infers outputs/validation — see docs/safe-scope.md
 ```
 
 Set your GitHub token:

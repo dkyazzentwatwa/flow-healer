@@ -38,7 +38,7 @@ With a row selected in the TUI:
 | Key | Action |
 |---|---|
 | `r` | Retry the issue (re-queue with current context) |
-| `p` | Pause the entire repo (stops new work) |
+| `p` | Pause the selected repo (stops new work for that repo only) |
 | `o` | Open the draft PR link in your browser |
 | `q` | Quit |
 
