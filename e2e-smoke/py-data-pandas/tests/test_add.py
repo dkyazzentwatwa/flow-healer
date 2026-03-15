@@ -103,6 +103,28 @@ def test_add_prefers_pandas_add_when_second_operand_is_pandas_object() -> None:
     assert result.used_native_add is True
 
 
+def test_add_prefers_pandas_add_for_transform_outputs_from_pandas_module() -> None:
+    class TransformProxy:
+        __module__ = "pandas.core.transform"
+
+        def __init__(self, value: int) -> None:
+            self.value = value
+            self.used_native_add = False
+
+        def add(self, other: int) -> "TransformProxy":
+            result = TransformProxy(self.value + other)
+            result.used_native_add = True
+            return result
+
+        def __radd__(self, other: int) -> "TransformProxy":
+            raise AssertionError("pandas add should be used without falling back to __radd__")
+
+    result = add(2, TransformProxy(1))
+
+    assert result.value == 3
+    assert result.used_native_add is True
+
+
 def test_add_many_with_scalars() -> None:
     assert add_many(2, 3, 4) == 9
 
