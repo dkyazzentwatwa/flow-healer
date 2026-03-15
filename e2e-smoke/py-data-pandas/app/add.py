@@ -2,9 +2,15 @@ import pandas as pd
 from typing import Any
 
 
+def _is_pandas_addable(value: Any) -> bool:
+    return isinstance(value, pd.core.base.PandasObject) and callable(getattr(value, "add", None))
+
+
 def add(a: Any, b: Any) -> Any:
-    if isinstance(a, pd.core.base.PandasObject) and callable(getattr(a, "add", None)):
+    if _is_pandas_addable(a):
         return a.add(b)
+    if _is_pandas_addable(b):
+        return b.add(a)
     return a + b
 
 
