@@ -353,6 +353,91 @@ class HealerRunResult:
 
 
 @dataclass(slots=True, frozen=True)
+class EvidenceBundle:
+    """Operator-facing evidence for one healing attempt. Feeds PR body and TUI detail pane."""
+
+    issue_id: str
+    repo: str
+    summary: str
+    files_changed: list[str]
+    diff_summary: str
+    validation_commands: list[str]
+    validation_passed: bool
+    risk_level: str  # "low" | "medium" | "high"
+    failure_reason: str  # one of 6 operator-visible codes, or ""
+    verifier_summary: str = ""
+    reviewer_summary: str = ""
+
+
+# Operator-visible failure code mapping (internal → operator label)
+_OPERATOR_FAILURE_MAP: dict[str, str] = {
+    "tests_failed": "validation_failed",
+    "verifier_failed": "validation_failed",
+    "diff_too_large": "diff_too_large",
+    "diff_files_exceeded": "diff_too_large",
+    "diff_lines_exceeded": "diff_too_large",
+    "scope_violation": "scope_violation",
+    "output_target_violation": "scope_violation",
+    "no_workspace_change": "no_confident_fix",
+    "connector_unavailable": "no_confident_fix",
+    "connector_runtime_error": "no_confident_fix",
+    "circuit_breaker_open": "repo_blocked",
+    "healer_paused": "repo_blocked",
+    "review_required": "review_required",
+}
+
+
+def _operator_failure_reason(failure_class: str) -> str:
+    """Map internal failure class to one of the 6 operator-visible codes."""
+    if not failure_class:
+        return ""
+    if str(failure_class).startswith("no_workspace_change:"):
+        return "no_confident_fix"
+    return _OPERATOR_FAILURE_MAP.get(failure_class, "validation_failed")
+
+
+def _risk_level_from_result(run_result: HealerRunResult) -> str:
+    """Derive risk level from diff size and test results."""
+    diff_lines = run_result.diff_lines or 0
+    diff_files = run_result.diff_files or 0
+    failed = (run_result.test_summary or {}).get("failed", 0)
+    if failed > 0 or diff_lines > 200 or diff_files > 4:
+        return "high"
+    if diff_lines > 50 or diff_files > 2:
+        return "medium"
+    return "low"
+
+
+def build_evidence_bundle(
+    *,
+    run_result: HealerRunResult,
+    issue_id: str,
+    repo: str,
+    summary: str,
+    validation_commands: list[str],
+    verifier_summary: str = "",
+    reviewer_summary: str = "",
+) -> EvidenceBundle:
+    """Build an operator-facing EvidenceBundle from a HealerRunResult."""
+    diff_files = run_result.diff_files or 0
+    diff_lines = run_result.diff_lines or 0
+    diff_summary = f"{diff_files} file(s) changed, {diff_lines} line(s)"
+    return EvidenceBundle(
+        issue_id=issue_id,
+        repo=repo,
+        summary=summary,
+        files_changed=list(run_result.diff_paths or []),
+        diff_summary=diff_summary,
+        validation_commands=validation_commands,
+        validation_passed=bool(run_result.success),
+        risk_level=_risk_level_from_result(run_result),
+        failure_reason=_operator_failure_reason(run_result.failure_class),
+        verifier_summary=verifier_summary,
+        reviewer_summary=reviewer_summary,
+    )
+
+
+@dataclass(slots=True, frozen=True)
 class ResolvedExecution:
     language_detected: str
     language_effective: str
