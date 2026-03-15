@@ -26,15 +26,12 @@ function readSessionFromRequest(request) {
     return null;
   }
 
-  const sessionCookie = rawCookieHeader
-    .split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith("session="));
-  if (!sessionCookie) {
+  const sessionCookieValue = findSessionCookieValue(rawCookieHeader);
+  if (!sessionCookieValue) {
     return null;
   }
 
-  const rawValue = normalizeCookieValue(sessionCookie.slice("session=".length));
+  const rawValue = normalizeCookieValue(sessionCookieValue);
   if (!rawValue) {
     return null;
   }
@@ -69,6 +66,30 @@ function normalizeCookieValue(value) {
   }
 
   return trimmedValue.slice(1, -1).trim();
+}
+
+function findSessionCookieValue(cookieHeader) {
+  const cookieParts = typeof cookieHeader === "string" ? cookieHeader.split(";") : [];
+  for (const part of cookieParts) {
+    const trimmedPart = part.trim();
+    if (!trimmedPart) {
+      continue;
+    }
+
+    const equalsIndex = trimmedPart.indexOf("=");
+    if (equalsIndex === -1) {
+      continue;
+    }
+
+    const name = trimmedPart.slice(0, equalsIndex).trim().toLowerCase();
+    if (name !== "session") {
+      continue;
+    }
+
+    return trimmedPart.slice(equalsIndex + 1);
+  }
+
+  return null;
 }
 
 function normalizeUser(user) {

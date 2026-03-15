@@ -91,3 +91,37 @@ test("GET normalizes quoted session cookies before parsing the session payload",
     },
   });
 });
+
+test("GET finds the session cookie regardless of casing or whitespace around the name", async () => {
+  const response = await GET(
+    new Request("http://localhost/api/auth/session", {
+      headers: {
+        cookie: [
+          "tracking=session-inline",
+          `SESSION = ${encodeURIComponent(
+            JSON.stringify({
+              user: {
+                name: "Jamie",
+                email: "jamie@example.com",
+              },
+              expires: "2026-04-01T12:00:00.000Z",
+            }),
+          )}`,
+          "theme=dark",
+        ].join("; "),
+      },
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    authenticated: true,
+    session: {
+      user: {
+        name: "Jamie",
+        email: "jamie@example.com",
+      },
+      expires: "2026-04-01T12:00:00.000Z",
+    },
+  });
+});
