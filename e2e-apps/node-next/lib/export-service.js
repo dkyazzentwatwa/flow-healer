@@ -1,4 +1,4 @@
-const TODO_EXPORT_COLUMNS = ["id", "title", "completed"];
+export const TODO_EXPORT_COLUMNS = ["id", "title", "completed", "completedAt"];
 
 export function escapeCsvValue(value) {
   const normalized = String(value ?? "");
