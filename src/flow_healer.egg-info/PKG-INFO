@@ -24,105 +24,95 @@ Dynamic: license-file
 [![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](docs/test-strategy.md)
 [![GitHub](https://img.shields.io/badge/automation-GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](docs/issue-contracts.md)
 
-**Trusted issue-to-PR automation with guarded fixes, isolated worktrees, validation gates, and an operator-first control plane.**
+**Flow Healer opens draft PRs for flaky tests and safe repo maintenance issues — with validation evidence attached — so you can review, approve, or retry in one place.**
 
-[Documentation](docs/README.md) · [Installation](docs/installation.md) · [Usage](docs/usage.md) · [Dashboard](docs/dashboard.md) · [Operations](docs/operations.md)
+[Get Started in 15 Minutes →](docs/onboarding.md) · [MVP Scope](docs/mvp.md) · [Operator Guide](docs/operator-workflow.md) · [Safe Scope Contract](docs/safe-scope.md)
 
 </div>
 
-## Why Flow Healer
-
-Flow Healer helps repositories automate issue-driven repairs without turning the repo into an opaque agent sandbox. It watches GitHub issues, creates isolated worktrees, asks the configured connector to propose a fix, runs validation gates, verifies artifacts and evidence when needed, and only then opens or updates a pull request.
-
-It is built as an operations loop, not just a patch generator. Durable SQLite state, retry and quarantine handling, feedback ingestion, lane-aware validation, and export-first operator visibility are all first-class parts of the product.
-
 ## What It Does
 
-- Monitors one or many repositories from a single config file.
-- Processes only issues that match the repo's required labels, `healer:ready` by default.
-- Parses issue bodies into an explicit task contract: outputs, input-only context, execution root, runtime profile, evidence requirements, and validation commands.
-- Creates isolated git worktrees per attempt.
-- Runs guarded local and Docker-backed validation where the lane supports it.
-- Tracks queue state, attempts, locks, lessons, events, and runtime health in SQLite.
-- Opens or updates PRs only after verification and evidence checks pass.
-- Re-queues work when humans leave PR feedback comments.
-- Exposes export-first telemetry, a built-in read-only TUI, and a Python control plane for operator visibility and integrations.
-
-## Start Here
-
-- [docs/README.md](docs/README.md): canonical documentation index
-- [docs/issue-contracts.md](docs/issue-contracts.md): issue-body semantics and scope rules
-- [docs/healing-state-machine.md](docs/healing-state-machine.md): claim-to-resolution runtime flow
-- [docs/runtime-state.md](docs/runtime-state.md): SQLite state model, attempts, and locks
-- [docs/dashboard.md](docs/dashboard.md): dashboard and control-plane boundaries
-- [docs/lane-guides/README.md](docs/lane-guides/README.md): lane-safe editing guides for `e2e-smoke/` and `e2e-apps/`
-- [docs/evidence-contract.md](docs/evidence-contract.md): browser artifact and evidence rules
-- [AGENTS.md](AGENTS.md): coding-agent operating contract for this repo
-
-## Core Workflow
+Flow Healer watches your GitHub issues labeled `healer:ready`, proposes a fix, runs validation, and opens a draft PR with evidence attached. You review and decide.
 
 ```text
-GitHub issue labeled healer:ready
-                |
-                v
-      Flow Healer claims work
-                |
-                v
-  Issue body becomes a task contract:
-  outputs, context, execution root,
-  runtime profile, evidence, validation
-                |
-                v
-  Isolated worktree + connector attempt
-                |
-                v
-    Local and/or Docker validation
-                |
-                v
-   Verifier + evidence completeness
-                |
-        +-------+-------+
-        |               |
-        v               v
-   open/update PR    retry, quarantine,
-   and await review  or clarification
+GitHub issue (healer:ready)
+         │
+         ▼
+  Flow Healer claims it
+         │
+         ▼
+  AI connector proposes fix
+         │
+         ▼
+  Validation runs (local / Docker)
+         │
+         ▼
+  Evidence bundle built
+    ┌────┴────┐
+    ▼         ▼
+Draft PR    retry / clarify
+opened      (operator notified)
 ```
 
-For the full decision flow, read [docs/healing-state-machine.md](docs/healing-state-machine.md). For the durable state model behind retries, claims, and locks, read [docs/runtime-state.md](docs/runtime-state.md).
+## Issue Classes Supported
 
-## Documentation Model
+**Class A — Flaky Test Repair:** Fix intermittently failing tests. Output targets must be test files only.
 
-The repo now separates product overview from canonical operating docs:
+**Class B — Safe CI / Config / Doc Fixes:** Fix `.github/`, `Makefile`, `pyproject.toml`, `requirements*.txt`, `*.md`, and similar safe files.
 
-- `README.md` is the short product-facing overview.
-- [docs/README.md](docs/README.md) is the canonical index.
-- [docs/issue-contracts.md](docs/issue-contracts.md), [docs/evidence-contract.md](docs/evidence-contract.md), [docs/runtime-state.md](docs/runtime-state.md), and [docs/healing-state-machine.md](docs/healing-state-machine.md) define how the system is expected to operate.
-- [docs/lane-guides/README.md](docs/lane-guides/README.md) defines how to work safely inside `e2e-smoke/` and `e2e-apps/`.
-- Planning documents under [docs/plans/](docs/plans/) are historical references, not the source of truth for current behavior.
+Both classes require an explicit `Required code outputs` section and a `Validation command` in the issue body. See [docs/safe-scope.md](docs/safe-scope.md) for the full contract.
 
-## Getting Started
+## Get Started
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
+pip install flow-healer
 mkdir -p ~/.flow-healer
 cp config.example.yaml ~/.flow-healer/config.yaml
-export GITHUB_TOKEN=your_token_here
+# edit config.yaml with your repo path and slug
+export GITHUB_TOKEN=ghp_your_token
 flow-healer doctor
 flow-healer start --once
-flow-healer status
 ```
+
+Read the [15-minute onboarding guide](docs/onboarding.md) for a full walkthrough.
+
+## Operator Interface
+
+```bash
+# Terminal UI — review queue, retry, open PRs
+flow-healer tui
+
+# CLI status
+flow-healer status
+
+# Diagnose setup issues
+flow-healer doctor
+```
+
+The TUI shows a **Review Queue** of draft PRs ready to approve, a **Blocked** tab for failures needing attention, and a **Repo Health** tab.
+
+## Not Magic
+
+- All state is local SQLite (`~/.flow-healer/repos/<name>/state.db`)
+- All fixes are auditable — every diff and validation run is in the PR body
+- No production code changes without explicit issue contracts
+- You approve every merge
+
+## Documentation
+
+- [docs/onboarding.md](docs/onboarding.md) — 15-minute setup guide
+- [docs/mvp.md](docs/mvp.md) — what's in scope at MVP
+- [docs/safe-scope.md](docs/safe-scope.md) — file scope rules and examples
+- [docs/operator-workflow.md](docs/operator-workflow.md) — TUI / CLI operator guide
+- [docs/README.md](docs/README.md) — full documentation index
+- [AGENTS.md](AGENTS.md) — coding-agent operating contract
 
 ## Development
 
-High-value verification commands:
-
 ```bash
-pytest tests/test_healer_task_spec.py -v
-pytest tests/test_healer_runner.py -v
-pytest tests/test_healer_loop.py -v
-pytest tests/e2e/test_flow_healer_e2e.py -k mixed_repo_sandbox -v
-python scripts/validate_repro_contract_examples.py
-python scripts/check_harness_doc_drift.py
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+pytest
+flow-healer doctor
+flow-healer start --once
 ```

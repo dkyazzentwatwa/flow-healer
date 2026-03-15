@@ -66,6 +66,48 @@ If you need to build context in code after reading the docs, start here:
 - If the worker is ticking but not claiming, check for an active infra pause before assuming the queue is stuck. Inspect `healer_infra_pause_until` and `healer_infra_pause_reason` in the repo state DB, and confirm with `flow-healer status --repo <repo>` or recent `~/.flow-healer/flow-healer.log` lines.
 - If an infra pause was triggered by an issue that is now closed or otherwise resolved, clear `healer_infra_failure_streak`, `healer_infra_pause_until`, and `healer_infra_pause_reason` in the repo state DB so the next tick can resume claims.
 
+## Deep Reset (Circuit Breaker / State Cleanup)
+
+When the service enters an infrastructure pause due to repeated connector failures (e.g., quota limits, API errors), or when you've changed connector backends and need a clean slate:
+
+```bash
+# 1. Stop the running service
+pkill -9 -f "flow_healer.cli.*start"
+
+# 2. Clear the repo state database (resets circuit breaker, attempt history, queue)
+rm ~/.flow-healer/repos/<repo-name>/state.db*
+
+# 3. Update config if needed (e.g., switch connector backend, credentials, etc.)
+# Edit ~/.flow-healer/config.yaml and change:
+# - connector_backend (e.g., gemini_cli → claude_cli)
+# - connector_command (e.g., /opt/homebrew/bin/gemini → /Users/.../.local/bin/claude)
+# - connector_model (e.g., gemini-2.5-flash → claude-haiku-4-5-20251001)
+
+# 4. Restart the service with fresh state
+source .venv/bin/activate
+flow-healer start > ~/.flow-healer/flow-healer.log 2>&1 &
+
+# 5. Verify it's working (should see "ticking" status, not "infra safety pause")
+sleep 5 && tail -20 ~/.flow-healer/flow-healer.log
+```
+
+**When to use:**
+- After hitting API quota limits (429 errors)
+- When switching connector backends mid-operation
+- After config changes to connector credentials or models
+- When an infra pause is blocking all work and the underlying issue is resolved
+
+**What gets reset:**
+- Circuit breaker state (failure streak and pause timing)
+- Attempt history for all issues
+- Queue states and claims
+- All leases and locks
+
+**What's preserved:**
+- GitHub issue state (no issues are modified)
+- Config file settings (unless you edit them)
+- Logs (appended to `~/.flow-healer/flow-healer.log`)
+
 ## Remediation Doctrine
 
 - When the system fails repeatedly, prefer docs, contracts, tests, fixtures, or guardrails before adding connector cleverness.

@@ -40,7 +40,7 @@ BEGIN
       AND constraint_name = 'business_settings_business_id_key_unique'
       AND column_name IN ('business_id', 'key')
     GROUP BY constraint_name
-    HAVING array_agg(column_name ORDER BY ordinal_position) = ARRAY['business_id', 'key']
+    HAVING array_agg(column_name ORDER BY ordinal_position)::text[] = ARRAY['business_id', 'key']
   ) THEN
     RAISE EXCEPTION 'business_settings uniqueness constraint is not aligned on (business_id, key).';
   END IF;

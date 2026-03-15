@@ -1,4 +1,8 @@
+from __future__ import annotations
+
+import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -243,3 +247,41 @@ def close_db():
     if _connection:
         _connection.close()
         _connection = None
+
+def bootstrap_db(db_path: str = None):
+    """Bootstrap database with initial defaults (idempotent)."""
+    if _connection is None:
+        init_db(db_path)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Seed risk limits if not already present
+    row = cursor.execute("SELECT COUNT(*) as cnt FROM risk_limits").fetchone()
+    if row and row["cnt"] == 0:
+        now = int(time.time() * 1000)
+        cursor.execute(
+            """
+            INSERT INTO risk_limits (
+                id, max_daily_loss, max_drawdown_pct, max_position_size_pct,
+                max_exposure_pct, stop_loss_pct, take_profit_pct, trailing_stop_pct, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, 500.0, 20.0, 20.0, 80.0, 5.0, 10.0, 3.0, now),
+        )
+        conn.commit()
+
+    # Seed paper balances if not already present
+    row = cursor.execute("SELECT COUNT(*) as cnt FROM paper_balances").fetchone()
+    if row and row["cnt"] == 0:
+        base_currency = os.getenv("PAPER_BASE_CURRENCY", "USDT")
+        start_balance = float(os.getenv("PAPER_START_BALANCE", "10000"))
+        now = int(time.time() * 1000)
+        cursor.execute(
+            """
+            INSERT INTO paper_balances (currency, total, available, locked, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (base_currency, start_balance, start_balance, 0.0, now),
+        )
+        conn.commit()

@@ -8,8 +8,8 @@ service:
   poll_interval_seconds: 30
   # [solo dev] Where Flow Healer stores its state database. Default ~/.flow-healer is fine.
   state_root: ~/.flow-healer
-  # [solo dev] Use 'exec' for the default codex CLI. Options: exec | claude_cli | cline | kilo_cli | app_server
-  # Valid backends: exec | app_server | claude_cli | cline | kilo_cli
+  # [solo dev] Use 'exec' for the default codex CLI. Options: exec | claude_cli | cline | kilo_cli | app_server | gemini_cli
+  # Valid backends: exec | app_server | claude_cli | cline | kilo_cli | gemini_cli
   connector_backend: exec
   # [advanced] Route code vs non-code tasks to different connectors.
   # Optional split routing: single_backend | exec_for_code
@@ -41,6 +41,11 @@ service:
   # [advanced] Only needed if using the kilo_cli backend.
   kilo_cli_command: kilo
   kilo_cli_model: ""
+
+  # Gemini CLI settings (used when backend is gemini_cli)
+  # [advanced] Only needed if using the gemini_cli backend.
+  gemini_cli_command: gemini
+  gemini_cli_model: gemini-2.5-flash
 
   # [advanced] Max seconds to wait for the connector. 300 is usually enough.
   connector_timeout_seconds: 300

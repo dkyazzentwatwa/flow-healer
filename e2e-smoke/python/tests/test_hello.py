@@ -17,4 +17,4 @@ def _load_hello_module():
 def test_hello_returns_world() -> None:
     module = _load_hello_module()
 
-    assert module.hello() == "world"
+    assert module.hello() == "Hello, world!"

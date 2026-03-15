@@ -32,11 +32,12 @@ function normalizeRole(role: unknown): TranscriptMessage["role"] | null {
 }
 
 function normalizeContent(value: TranscriptCandidate): string | null {
-  const rawContent = typeof value.content === "string"
-    ? value.content
-    : typeof value.text === "string"
-      ? value.text
-      : null;
+  const rawContent =
+    typeof value.content === "string"
+      ? value.content
+      : typeof value.text === "string"
+        ? value.text
+        : null;
 
   if (rawContent === null) {
     return null;
@@ -46,7 +47,9 @@ function normalizeContent(value: TranscriptCandidate): string | null {
   return content.length > 0 ? content : null;
 }
 
-export function normalizeTranscriptMessages(value: unknown): TranscriptMessage[] {
+export function normalizeTranscriptMessages(
+  value: unknown,
+): TranscriptMessage[] {
   if (!Array.isArray(value)) {
     return [];
   }

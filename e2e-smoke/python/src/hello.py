@@ -1,3 +1,3 @@
-def hello() -> str:
-    """Return the classic greeting target."""
-    return "world"
+def hello(name: str = "world") -> str:
+    """Return a greeting for the given name."""
+    return f"Hello, {name}!"

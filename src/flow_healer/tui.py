@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import (
     Button,
     DataTable,
@@ -43,6 +44,7 @@ from .telemetry_exports import collect_telemetry_datasets, default_export_dir, w
 # ---------------------------------------------------------------------------
 
 FLOW_HEALER_THEMES = [
+    "anthropic",
     "textual-dark",
     "nord",
     "gruvbox",
@@ -51,6 +53,21 @@ FLOW_HEALER_THEMES = [
     "monokai",
     "textual-light",
 ]
+
+_ANTHROPIC_THEME = Theme(
+    name="anthropic",
+    dark=True,
+    background="#191919",
+    surface="#232323",
+    panel="#2D2D2D",
+    primary="#CC785C",
+    secondary="#B5825A",
+    accent="#E8906A",
+    warning="#E8B85A",
+    error="#E05C5C",
+    success="#4CAF7D",
+    boost="#F5EDE6",
+)
 
 # ---------------------------------------------------------------------------
 # State colours
@@ -793,6 +810,7 @@ class FlowHealerApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.register_theme(_ANTHROPIC_THEME)
         self.theme = self._prefs.theme
         self._setup_tables()
         self.action_refresh_data()

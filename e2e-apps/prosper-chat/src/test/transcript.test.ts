@@ -79,7 +79,9 @@ describe("normalizeTranscriptMessages", () => {
   });
 
   it("returns an empty list for non-array transcript payloads", () => {
-    expect(normalizeTranscriptMessages({ role: "user", content: "hello" } as Json)).toEqual([]);
+    expect(
+      normalizeTranscriptMessages({ role: "user", content: "hello" } as Json),
+    ).toEqual([]);
     expect(normalizeTranscriptMessages(null)).toEqual([]);
   });
 });
