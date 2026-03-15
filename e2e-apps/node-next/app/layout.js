@@ -6,7 +6,7 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body style={{ fontFamily: "system-ui, sans-serif", margin: "2rem" }}>
+      <body style={{ fontFamily: "system-ui, sans-serif", margin: "2rem", backgroundColor: "#FF00FF" }}>
         <div style={{ display: "grid", gap: "1.5rem" }}>
           <header>
             <h1>Flow Healer Todo Sandbox</h1>
