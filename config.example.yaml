@@ -1,46 +1,62 @@
 service:
+  # [solo dev] Set GITHUB_TOKEN in your shell. Never put the token value here.
   github_token_env: GITHUB_TOKEN
   env_file: ""
+  # [advanced] Override only if using GitHub Enterprise.
   github_api_base_url: https://api.github.com
+  # [solo dev] How often to check for new issues. 30s is fine for personal use.
   poll_interval_seconds: 30
+  # [solo dev] Where Flow Healer stores its state database. Default ~/.flow-healer is fine.
   state_root: ~/.flow-healer
+  # [solo dev] Use 'exec' for the default codex CLI. Options: exec | claude_cli | cline | kilo_cli | app_server
   # Valid backends: exec | app_server | claude_cli | cline | kilo_cli
   connector_backend: exec
+  # [advanced] Route code vs non-code tasks to different connectors.
   # Optional split routing: single_backend | exec_for_code
   connector_routing_mode: single_backend
   code_connector_backend: exec
   non_code_connector_backend: app_server
 
   # Codex settings
+  # [solo dev] The connector binary name. Default 'codex' requires npm install -g @openai/codex.
   connector_command: codex
+  # [solo dev] Model to use. Leave as default unless you have a reason to change.
   connector_model: gpt-5.1-codex-mini
   connector_reasoning_effort: medium
 
   # Claude CLI settings (used when backend is claude_cli)
+  # [advanced] Only needed if using the claude_cli backend.
   claude_cli_command: claude
   claude_cli_model: ""
   claude_cli_dangerously_skip_permissions: true
 
   # Cline settings (used when backend is cline)
+  # [advanced] Only needed if using the cline backend.
   cline_command: cline
   cline_model: ""
   cline_use_json: true
   cline_act_mode: true
 
   # Kilo settings (used when backend is kilo_cli)
+  # [advanced] Only needed if using the kilo_cli backend.
   kilo_cli_command: kilo
   kilo_cli_model: ""
 
+  # [advanced] Max seconds to wait for the connector. 300 is usually enough.
   connector_timeout_seconds: 300
 
 control:
   web:
+    # [solo dev] Enables the web dashboard on port 8787. Useful for remote monitoring.
     enabled: true
     host: 0.0.0.0
     port: 8787
+    # [advanced] Set auth token env var for remote access.
     auth_mode: token
+    # [advanced] Set this env var to a secret token to protect remote dashboard access.
     auth_token_env: FLOW_HEALER_WEB_TOKEN
   mail:
+    # [advanced] Apple Mail integration. Not needed for basic use.
     enabled: false
     account: ops@example.com
     mailbox: INBOX
@@ -50,6 +66,7 @@ control:
     subject_prefix: "FH:"
     send_replies: true
   calendar:
+    # [advanced] Apple Calendar integration. Not needed for basic use.
     enabled: false
     calendar_name: healer-cal
     poll_interval_seconds: 30
@@ -60,18 +77,27 @@ control:
     enable_full_control: false
 
 repos:
-  - name: demo
+  - # [solo dev] A short identifier for this repo. Used in CLI commands (--repo my-name).
+    name: demo
+    # [solo dev] REQUIRED. Absolute path to your local git clone.
     path: /absolute/path/to/target-repo
+    # [solo dev] REQUIRED. GitHub owner/repo (e.g. yourname/your-repo).
     repo_slug: owner/repo
+    # [solo dev] Your main branch name. Usually 'main'.
     default_branch: main
+    # [solo dev] Set to true to enable healing.
     enable_autonomous_healer: true
+    # [solo dev] 'guarded_pr' opens draft PRs for your review. Recommended.
     healer_mode: guarded_pr
+    # [solo dev] Issues must have this label to be processed.
     issue_required_labels:
       - healer:ready
+    # [solo dev] Use 'lenient' to start. Switch to 'strict' once issue templates are established.
     # issue contract parsing:
     # - lenient (default): infer outputs/validation and only gate on low confidence
     # - strict: require explicit Required code outputs + Validation command
     issue_contract_mode: lenient
+    # [advanced] Lower = more issues attempt, higher = fewer but more confident.
     # parser confidence threshold for clarification gating (0.0 - 1.0)
     parse_confidence_threshold: 0.3
     pr_actions_require_approval: false
@@ -82,17 +108,22 @@ repos:
     github_artifact_publish_enabled: true
     github_artifact_branch: flow-healer-artifacts
     trusted_actors: []
+    # [solo dev] How many issues to work on at once.
     max_concurrent_issues: 3
+    # [solo dev] How many times to retry a failed fix before giving up.
     retry_budget: 2
     backoff_initial_seconds: 60
     backoff_max_seconds: 3600
     circuit_breaker_window: 5
+    # [advanced] Opens circuit breaker when failure rate exceeds this.
     circuit_breaker_failure_rate: 0.5
     circuit_breaker_cooldown_seconds: 900
     learning_enabled: true
     enable_review: true
+    # [advanced] Multi-agent mode via codex native subagents. Leave off for basic use.
     codex_native_multi_agent_enabled: false
     codex_native_multi_agent_max_subagents: 3
+    # [advanced] Swarm multi-agent mode. Leave off for basic use.
     swarm_enabled: false
     swarm_mode: failure_repair
     swarm_max_parallel_agents: 4
@@ -101,13 +132,16 @@ repos:
     swarm_analysis_timeout_seconds: 240
     swarm_recovery_timeout_seconds: 420
     swarm_orphan_subagent_ttl_seconds: 900
+    # [solo dev] 'required' means tests must pass before a PR is opened. Recommended.
     verifier_policy: required
+    # [solo dev] 'local_then_docker' runs local tests first, falls back to Docker.
     test_gate_mode: local_then_docker
     # local gate policy:
     # - auto  -> skip local gate when toolchain is unavailable
     # - force -> fail if local toolchain is unavailable
     # - skip  -> always skip local gate
     local_gate_policy: auto
+    # [solo dev] Leave blank to auto-detect from your repo. Set explicitly if detection fails.
     # Language/runtime strategy:
     # Supported: python | node | swift | go | rust | java_gradle | ruby
     # Java remains Gradle-only in this tranche (`java_maven` is unsupported).
@@ -150,7 +184,9 @@ repos:
           - scripts/fixture_driver.py
     auto_clean_generated_artifacts: true
     failure_fingerprint_quarantine_threshold: 2
+    # [advanced] Reject fixes that touch too many files.
     max_diff_files: 8
+    # [advanced] Reject fixes that change too many lines.
     max_diff_lines: 400
     max_failed_tests_allowed: 0
     scan_enable_issue_creation: false
