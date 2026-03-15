@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.repository import InMemoryTodoRepository, ServiceRecord, ServiceRepository, TodoRecord
-from app.service import DomainService, TodoService
+from app.service import DomainService, SERVICE_NOT_FOUND, TodoService
 
 
 class _FalsyServices(list[ServiceRecord]):
@@ -155,6 +155,41 @@ def test_domain_service_create_service_rejects_invalid_fields() -> None:
 
     with pytest.raises(ValueError, match="service_id_required"):  # type: ignore[arg-type]
         service.create_service(None, "billing")
+
+
+def test_domain_service_get_service_returns_detached_record_by_id() -> None:
+    repository = ServiceRepository(
+        [
+            ServiceRecord(
+                service_id="svc-1",
+                name="billing",
+                tags=["core"],
+                metadata={"region": "us-west-2"},
+            )
+        ]
+    )
+    service = DomainService(repository)
+
+    retrieved = service.get_service("  svc-1  ")
+    retrieved.tags.append("mutated")
+    retrieved.metadata["region"] = "eu-central-1"
+
+    fresh = service.get_service("svc-1")
+    repository_services = repository.list_services()
+
+    assert fresh.name == "billing"
+    assert fresh.tags == ["core"]
+    assert fresh.metadata == {"region": "us-west-2"}
+    assert repository_services[0].metadata == {"region": "us-west-2"}
+
+
+def test_domain_service_get_service_raises_for_unknown_id() -> None:
+    service = DomainService(ServiceRepository())
+
+    with pytest.raises(KeyError) as exc_info:
+        service.get_service("missing")
+
+    assert exc_info.value.args[0] == SERVICE_NOT_FOUND
 
 
 def test_create_todo_trims_title_and_assigns_incrementing_ids() -> None:
