@@ -57,7 +57,7 @@ def _extract_items(payload: object) -> list[Mapping[str, object]]:
 
 
 def _parse_payload(payload: object) -> object:
-    if isinstance(payload, str):
+    if isinstance(payload, (str, bytes, bytearray)):
         try:
             return json.loads(payload)
         except json.JSONDecodeError as exc:

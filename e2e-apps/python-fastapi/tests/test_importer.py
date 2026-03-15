@@ -35,6 +35,18 @@ def test_import_todos_accepts_mapping_with_items_key() -> None:
     assert imported[0].title == "Backfill analytics"
 
 
+@pytest.mark.parametrize("payload", [
+    b"[{\"title\": \"Bytes import\", \"completed\": true}]",
+    bytearray(b"[{\"title\": \"Bytearray import\", \"completed\": true}]")
+])
+def test_import_todos_accepts_bytes_like_payload(payload: bytes) -> None:
+    imported = import_todos(payload)
+
+    assert len(imported) == 1
+    assert imported[0].title in {"Bytes import", "Bytearray import"}
+    assert imported[0].completed is True
+
+
 def test_import_todos_rejects_invalid_payload_shapes() -> None:
     with pytest.raises(ValueError, match="items_payload_required"):
         import_todos(None)
