@@ -76,6 +76,16 @@ def _colored_state(state: str) -> Text:
 
 
 # ---------------------------------------------------------------------------
+# Tab IDs (MVP review-queue-first layout)
+# ---------------------------------------------------------------------------
+
+TAB_REVIEW_QUEUE = "tab-review-queue"
+TAB_BLOCKED = "tab-blocked"
+TAB_REPO_HEALTH = "tab-repo-health"
+TAB_HISTORY = "tab-history"
+
+
+# ---------------------------------------------------------------------------
 # TUI preferences (persisted across sessions)
 # ---------------------------------------------------------------------------
 
@@ -800,6 +810,12 @@ class FlowHealerApp(App[None]):
         logs_table = self.query_one("#logs-table", DataTable)
         logs_table.add_columns("Log Line")
 
+        try:
+            blocked_table = self.query_one("#blocked-table", DataTable)
+            blocked_table.add_columns("#", "State", "Title", "Failure")
+        except Exception:
+            pass  # blocked-table may not exist in test environments
+
     def action_refresh_data(self) -> None:
         loader = self.query_one("#refresh-loader", LoadingIndicator)
         loader.add_class("loading")
@@ -856,6 +872,22 @@ class FlowHealerApp(App[None]):
         logs_table.clear()
         for line in self._snapshot.get("log_lines") or []:
             logs_table.add_row(str(line))
+
+        try:
+            blocked_table = self.query_one("#blocked-table", DataTable)
+            blocked_table.clear()
+            blocked_states = {"failed", "error", "blocked"}
+            for row in self._snapshot.get("queue_rows") or []:
+                if str(row.get("state", "")).lower() in blocked_states:
+                    _display = _format_attempt_row_for_display(row)
+                    blocked_table.add_row(
+                        f"#{row.get('issue_id', '')}",
+                        _colored_state(str(row.get("state", ""))),
+                        str(row.get("title", "")),
+                        str(_display.get("operator_failure", "")),
+                    )
+        except Exception:
+            pass  # blocked-table may not exist in test environments
 
     def _update_details(self) -> None:
         details = self.query_one("#details", Static)

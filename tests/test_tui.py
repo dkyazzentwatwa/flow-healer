@@ -377,3 +377,16 @@ def test_format_attempt_row_for_display_preserves_original_fields():
     assert display["attempt_id"] == "x"
     assert display["issue_id"] == "7"
     assert display["operator_failure"] == "scope_violation"
+
+
+def test_tui_tab_constants_defined():
+    """MVP tab ID constants must all be importable from tui module."""
+    import flow_healer.tui as tui_mod
+    assert hasattr(tui_mod, "TAB_REVIEW_QUEUE"), "Missing TAB_REVIEW_QUEUE"
+    assert hasattr(tui_mod, "TAB_BLOCKED"), "Missing TAB_BLOCKED"
+    assert hasattr(tui_mod, "TAB_REPO_HEALTH"), "Missing TAB_REPO_HEALTH"
+    assert hasattr(tui_mod, "TAB_HISTORY"), "Missing TAB_HISTORY"
+    assert tui_mod.TAB_REVIEW_QUEUE == "tab-review-queue"
+    assert tui_mod.TAB_BLOCKED == "tab-blocked"
+    assert tui_mod.TAB_REPO_HEALTH == "tab-repo-health"
+    assert tui_mod.TAB_HISTORY == "tab-history"
