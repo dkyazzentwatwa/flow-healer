@@ -37,7 +37,7 @@ public class LoginController {
             return defaultValue;
         }
         String trimmedSessionUser = rawSessionUser.trim();
-        if (!trimmedSessionUser.matches("[A-Za-z0-9._%+-@]+")) {
+        if (!trimmedSessionUser.matches("[A-Za-z0-9._%+-@']+")) {
             return defaultValue;
         }
         return trimmedSessionUser;
@@ -48,6 +48,7 @@ public class LoginController {
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
-            .replace("\"", "&quot;");
+            .replace("\"", "&quot;")
+            .replace("'", "&#x27;");
     }
 }
