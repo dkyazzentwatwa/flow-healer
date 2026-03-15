@@ -8,6 +8,7 @@ from app.repository import ServiceRecord, ServiceRepository
 
 from .repository import InMemoryTodoRepository, TodoRecord
 
+SERVICE_NOT_FOUND = "service_not_found"
 TODO_NOT_FOUND = "todo_not_found"
 
 
@@ -17,6 +18,13 @@ class DomainService:
 
     def list_services(self) -> list[ServiceRecord]:
         return deepcopy(self._repository.list_services())
+
+    def get_service(self, service_id: str) -> ServiceRecord:
+        normalized_id = self._require_text(service_id, "service_id_required")
+        for record in self._repository.list_services():
+            if record.service_id == normalized_id:
+                return deepcopy(record)
+        raise KeyError(SERVICE_NOT_FOUND)
 
     def create_service(
         self,
