@@ -6,6 +6,8 @@ function add(a, b) {
 }
 
 function normalizeFiniteNumber(value) {
+  value = unwrapValue(value);
+
   if (typeof value === 'string') {
     const trimmed = value.trim();
 
@@ -20,6 +22,14 @@ function normalizeFiniteNumber(value) {
 
   if (!Number.isFinite(value)) {
     throw new TypeError('add expects finite numeric inputs');
+  }
+
+  return value;
+}
+
+function unwrapValue(value) {
+  while (value && typeof value === 'object' && 'value' in value) {
+    value = value.value;
   }
 
   return value;
