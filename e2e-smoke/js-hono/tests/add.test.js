@@ -45,13 +45,39 @@ assert.deepStrictEqual(handler(fallbackContext), {
   status: 200,
 });
 
+const searchParamsFunctionContext = createSearchParamsContext({ a: '4', b: '6' });
+assert.deepStrictEqual(handler(searchParamsFunctionContext), {
+  body: { result: 10 },
+  status: 200,
+});
+
+const searchParamsObjectContext = createContextFromRequest({
+  query: new URLSearchParams({ a: '4', b: '6' }),
+});
+assert.deepStrictEqual(handler(searchParamsObjectContext), {
+  body: { result: 10 },
+  status: 200,
+});
+
 function createContext(query) {
-  return {
-    req: {
-      query(name) {
-        return query[name];
-      },
+  return createContextFromRequest({
+    query(name) {
+      return query[name];
     },
+  });
+}
+
+function createSearchParamsContext(queryParams) {
+  return createContextFromRequest({
+    query() {
+      return new URLSearchParams(queryParams);
+    },
+  });
+}
+
+function createContextFromRequest(req) {
+  return {
+    req,
     json(body, status = 200) {
       return { body, status };
     },
