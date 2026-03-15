@@ -131,6 +131,18 @@ test('addMany normalizes numeric string operands like add input normalization', 
   assert.equal(addMany('1', '2', '3'), 6);
 });
 
+test('addMany handles an empty operand list', () => {
+  assert.equal(addMany(), 0);
+});
+
+test('addMany adds two finite operands', () => {
+  assert.equal(addMany(5, 7), 12);
+});
+
+test('addMany preserves the identity of a single operand', () => {
+  assert.equal(addMany(5), 5);
+});
+
 test('addMany rejects one invalid operand', () => {
   assert.throws(() => addMany(1, Number.POSITIVE_INFINITY, 3), {
     name: 'TypeError',

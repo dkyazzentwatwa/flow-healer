@@ -265,10 +265,6 @@ export function add(...operands) {
 }
 
 export function addMany(...operands) {
-  if (operands.length < 3) {
-    throwFiniteNumberOperandTypeError();
-  }
-
   const normalizedOperands = operands.map(normalizeFiniteNumberOperand);
 
   return sumOperands(normalizedOperands);
