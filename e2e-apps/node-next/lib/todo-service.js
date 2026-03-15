@@ -106,9 +106,20 @@ function normalizeCompletedFlag(value) {
   return value === 1;
 }
 
+function getPublicTodoId(value) {
+  const normalizedId = normalizeTodoId(value);
+  if (/^-?\d+$/.test(normalizedId)) {
+    const numericId = Number.parseInt(normalizedId, 10);
+    if (Number.isSafeInteger(numericId)) {
+      return numericId;
+    }
+  }
+  return normalizedId;
+}
+
 export function toPublicTodo(todo) {
   return {
-    id: Number(normalizeTodoId(todo?.id)),
+    id: getPublicTodoId(todo?.id),
     title: todo.title,
     completed: todo.completed,
     completedAt: todo.completedAt ?? null,

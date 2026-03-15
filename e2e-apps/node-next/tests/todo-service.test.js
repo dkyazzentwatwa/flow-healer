@@ -312,6 +312,62 @@ test("todo payload helpers keep the collection and item route shape stable", () 
   });
 });
 
+test("todo payload helpers preserve non-numeric ids", () => {
+  const todos = [
+    {
+      id: "task-09",
+      title: "Legacy id",
+      completed: true,
+      completedAt: "2026-03-08T12:05:00.000Z",
+    },
+    {
+      id: "legacy:prefixed",
+      title: "Prefixed legacy id",
+      completed: false,
+      completedAt: null,
+    },
+  ];
+
+  assert.deepEqual(toPublicTodoList(todos), [
+    {
+      id: "task-09",
+      title: "Legacy id",
+      completed: true,
+      completedAt: "2026-03-08T12:05:00.000Z",
+    },
+    {
+      id: "legacy:prefixed",
+      title: "Prefixed legacy id",
+      completed: false,
+      completedAt: null,
+    },
+  ]);
+  assert.deepEqual(toTodoListPayload(todos), {
+    todos: [
+      {
+        id: "task-09",
+        title: "Legacy id",
+        completed: true,
+        completedAt: "2026-03-08T12:05:00.000Z",
+      },
+      {
+        id: "legacy:prefixed",
+        title: "Prefixed legacy id",
+        completed: false,
+        completedAt: null,
+      },
+    ],
+  });
+  assert.deepEqual(toTodoItemPayload(todos[1]), {
+    item: {
+      id: "legacy:prefixed",
+      title: "Prefixed legacy id",
+      completed: false,
+      completedAt: null,
+    },
+  });
+});
+
 test("POST rejects blank titles with title_required", async () => {
   const todosBefore = listTodos().length;
   const blankResponse = await POST(
