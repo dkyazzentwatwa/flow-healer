@@ -38,7 +38,12 @@ function unwrapValue(value) {
 }
 
 function isValueWrapper(value) {
-  return value !== null && typeof value === 'object' && 'value' in value;
+  if (value === null) {
+    return false;
+  }
+
+  const valueType = typeof value;
+  return (valueType === 'object' || valueType === 'function') && 'value' in value;
 }
 
 module.exports = { add };
