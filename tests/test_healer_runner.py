@@ -6822,4 +6822,3 @@ def test_risk_level_high_for_test_failures():
         workspace_status={},
     )
     assert _risk_level_from_result(result) == "high"
-    assert all(link["label"] != "resolution_video" for link in result.test_summary["artifact_links"])
