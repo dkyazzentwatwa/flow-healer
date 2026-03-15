@@ -201,17 +201,15 @@ function shouldDemoteOverflowPromotedBigInt(
 }
 
 function sumOperands(operands) {
-  const normalizedOperands = operands.map(normalizeAddOperand);
-
   // Start from the original first operand so oversized numbers keep plain-number
   // semantics until a later bigint operand intentionally promotes the result.
-  let accumulatedSum = getInitialAccumulatedSum(normalizedOperands);
+  let accumulatedSum = getInitialAccumulatedSum(operands);
   let hasOverflowBoundaryPromotion = false;
   let hasExplicitBigIntOperand = typeof accumulatedSum === 'bigint';
   let hasUnsafeIntegerOperand = isUnsafeIntegerNumber(accumulatedSum);
 
-  for (let index = 1; index < normalizedOperands.length; index += 1) {
-    const operand = normalizedOperands[index];
+  for (let index = 1; index < operands.length; index += 1) {
+    const operand = operands[index];
 
     if (typeof accumulatedSum === 'number' && Number.isNaN(accumulatedSum)) {
       return Number.NaN;
