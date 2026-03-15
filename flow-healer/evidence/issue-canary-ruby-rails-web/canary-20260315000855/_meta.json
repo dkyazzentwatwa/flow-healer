@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "content_type": "image/png",
+      "name": "canary.png",
+      "remote_path": "flow-healer/evidence/issue-canary-ruby-rails-web/canary-20260315000855/canary.png"
+    },
+    {
+      "content_type": "text/plain",
+      "name": "canary-console.log",
+      "remote_path": "flow-healer/evidence/issue-canary-ruby-rails-web/canary-20260315000855/canary-console.log"
+    },
+    {
+      "content_type": "application/x-ndjson",
+      "name": "canary-network.jsonl",
+      "remote_path": "flow-healer/evidence/issue-canary-ruby-rails-web/canary-20260315000855/canary-network.jsonl"
+    }
+  ],
+  "attempt_id": "canary-20260315000855",
+  "canary": true,
+  "canary_profile": "ruby-rails-web",
+  "generated_at": "2026-03-15T00:10:54Z",
+  "issue_id": "canary-ruby-rails-web",
+  "retention_until": "2026-04-14T00:10:54Z",
+  "run_key": "canary-20260315000855"
+}
