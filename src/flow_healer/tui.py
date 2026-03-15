@@ -33,6 +33,7 @@ from textual.widgets import (
 from textual import work
 
 from .config import AppConfig
+from .healer_runner import _operator_failure_reason
 from .service import FlowHealerService
 from .store import SQLiteStore
 from .telemetry_exports import collect_telemetry_datasets, default_export_dir, write_telemetry_exports
@@ -212,6 +213,15 @@ def tui_detail_lines(item: Any, *, width: int) -> list[str]:
         wrapped = textwrap.wrap(str(field_str), width=width, replace_whitespace=False, drop_whitespace=False)
         lines.extend(wrapped or [""])
     return lines or ["No details available."]
+
+
+def _format_attempt_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
+    """Map internal attempt row fields to operator-visible display values."""
+    failure_class = str(row.get("failure_class") or "")
+    return {
+        **row,
+        "operator_failure": _operator_failure_reason(failure_class),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -822,11 +832,12 @@ class FlowHealerApp(App[None]):
         attempts_table = self.query_one("#attempts-table", DataTable)
         attempts_table.clear()
         for row in self._snapshot.get("attempt_rows") or []:
+            _display = _format_attempt_row_for_display(row)
             attempts_table.add_row(
-                str(row.get("attempt_id", "")),
-                str(row.get("issue_id", "")),
-                _colored_state(str(row.get("state", ""))),
-                str(row.get("failure_class", "")),
+                str(_display.get("attempt_id", "")),
+                str(_display.get("issue_id", "")),
+                _colored_state(str(_display.get("state", ""))),
+                str(_display.get("operator_failure", "")),
             )
 
         events_table = self.query_one("#events-table", DataTable)

@@ -344,3 +344,36 @@ def test_live_events_poll_only_updates_events() -> None:
     # Should not have queried queue or attempts tables
     assert not any("queue" in q for q in queried)
     assert not any("attempts" in q for q in queried)
+
+
+def test_format_attempt_row_for_display_maps_failure_class():
+    """_format_attempt_row_for_display must map internal failure_class to operator label."""
+    from flow_healer.tui import _format_attempt_row_for_display
+    row = {
+        "attempt_id": "abc123",
+        "issue_id": "42",
+        "state": "failed",
+        "failure_class": "tests_failed",
+        "failure_reason": "3 tests failed in test_cache.py",
+    }
+    display = _format_attempt_row_for_display(row)
+    assert display["operator_failure"] == "validation_failed"
+    assert "tests_failed" not in display["operator_failure"]
+
+
+def test_format_attempt_row_for_display_empty_failure():
+    """_format_attempt_row_for_display with no failure_class returns empty string."""
+    from flow_healer.tui import _format_attempt_row_for_display
+    row = {"attempt_id": "abc", "issue_id": "1", "state": "running", "failure_class": ""}
+    display = _format_attempt_row_for_display(row)
+    assert display["operator_failure"] == ""
+
+
+def test_format_attempt_row_for_display_preserves_original_fields():
+    """_format_attempt_row_for_display must preserve all original row fields."""
+    from flow_healer.tui import _format_attempt_row_for_display
+    row = {"attempt_id": "x", "issue_id": "7", "state": "failed", "failure_class": "scope_violation"}
+    display = _format_attempt_row_for_display(row)
+    assert display["attempt_id"] == "x"
+    assert display["issue_id"] == "7"
+    assert display["operator_failure"] == "scope_violation"
