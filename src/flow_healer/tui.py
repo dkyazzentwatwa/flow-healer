@@ -33,6 +33,7 @@ from textual.widgets import (
 from textual import work
 
 from .config import AppConfig
+from .healer_runner import _operator_failure_reason
 from .service import FlowHealerService
 from .store import SQLiteStore
 from .telemetry_exports import collect_telemetry_datasets, default_export_dir, write_telemetry_exports
@@ -72,6 +73,16 @@ STATE_COLORS: dict[str, str] = {
 def _colored_state(state: str) -> Text:
     color = STATE_COLORS.get(state.lower(), "white")
     return Text(state, style=color)
+
+
+# ---------------------------------------------------------------------------
+# Tab IDs (MVP review-queue-first layout)
+# ---------------------------------------------------------------------------
+
+TAB_REVIEW_QUEUE = "tab-review-queue"
+TAB_BLOCKED = "tab-blocked"
+TAB_REPO_HEALTH = "tab-repo-health"
+TAB_HISTORY = "tab-history"
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +223,15 @@ def tui_detail_lines(item: Any, *, width: int) -> list[str]:
         wrapped = textwrap.wrap(str(field_str), width=width, replace_whitespace=False, drop_whitespace=False)
         lines.extend(wrapped or [""])
     return lines or ["No details available."]
+
+
+def _format_attempt_row_for_display(row: dict[str, Any]) -> dict[str, Any]:
+    """Map internal attempt row fields to operator-visible display values."""
+    failure_class = str(row.get("failure_class") or "")
+    return {
+        **row,
+        "operator_failure": _operator_failure_reason(failure_class),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +755,8 @@ class FlowHealerApp(App[None]):
         Binding("ctrl+x", "clear_lock", "Clear lock", show=False),
         Binding("ctrl+c", "copy_issue_id", "Copy ID", show=False),
         Binding("ctrl+p", "open_pr", "Open PR", show=False),
+        Binding("p", "pause_repo", "Pause Repo", show=True),
+        Binding("o", "open_pr", "Open PR", show=True),
     ]
 
     def __init__(
@@ -790,6 +812,12 @@ class FlowHealerApp(App[None]):
         logs_table = self.query_one("#logs-table", DataTable)
         logs_table.add_columns("Log Line")
 
+        try:
+            blocked_table = self.query_one("#blocked-table", DataTable)
+            blocked_table.add_columns("#", "State", "Title", "Failure")
+        except Exception:
+            pass  # blocked-table may not exist in test environments
+
     def action_refresh_data(self) -> None:
         loader = self.query_one("#refresh-loader", LoadingIndicator)
         loader.add_class("loading")
@@ -822,11 +850,12 @@ class FlowHealerApp(App[None]):
         attempts_table = self.query_one("#attempts-table", DataTable)
         attempts_table.clear()
         for row in self._snapshot.get("attempt_rows") or []:
+            _display = _format_attempt_row_for_display(row)
             attempts_table.add_row(
-                str(row.get("attempt_id", "")),
-                str(row.get("issue_id", "")),
-                _colored_state(str(row.get("state", ""))),
-                str(row.get("failure_class", "")),
+                str(_display.get("attempt_id", "")),
+                str(_display.get("issue_id", "")),
+                _colored_state(str(_display.get("state", ""))),
+                str(_display.get("operator_failure", "")),
             )
 
         events_table = self.query_one("#events-table", DataTable)
@@ -845,6 +874,22 @@ class FlowHealerApp(App[None]):
         logs_table.clear()
         for line in self._snapshot.get("log_lines") or []:
             logs_table.add_row(str(line))
+
+        try:
+            blocked_table = self.query_one("#blocked-table", DataTable)
+            blocked_table.clear()
+            blocked_states = {"failed", "error", "blocked"}
+            for row in self._snapshot.get("queue_rows") or []:
+                if str(row.get("state", "")).lower() in blocked_states:
+                    _display = _format_attempt_row_for_display(row)
+                    blocked_table.add_row(
+                        f"#{row.get('issue_id', '')}",
+                        _colored_state(str(row.get("state", ""))),
+                        str(row.get("title", "")),
+                        str(_display.get("operator_failure", "")),
+                    )
+        except Exception:
+            pass  # blocked-table may not exist in test environments
 
     def _update_details(self) -> None:
         details = self.query_one("#details", Static)
@@ -1102,6 +1147,14 @@ class FlowHealerApp(App[None]):
             return
         webbrowser.open(pr_url)
         self.notify(f"Opened PR #{pr_number}", severity="information")
+
+    def action_pause_repo(self) -> None:
+        """Pause the current repo (stops new work for this repo)."""
+        try:
+            self._service.set_paused(True, self._repo_name)
+            self.notify("Repo paused. Use 'flow-healer resume' to restart.", severity="warning")
+        except Exception as exc:
+            self.notify(f"Could not pause repo: {exc}", severity="error")
 
     @work(thread=True)
     def action_export_data(self) -> None:

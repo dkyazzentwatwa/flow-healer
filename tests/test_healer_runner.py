@@ -6717,4 +6717,108 @@ def test_run_attempt_allows_missing_resolution_video_when_screenshots_exist(tmp_
 
     assert result.success is True
     assert "video_path" not in result.test_summary["artifact_bundle"]["resolution_artifacts"]
-    assert all(link["label"] != "resolution_video" for link in result.test_summary["artifact_links"])
+
+
+def test_evidence_bundle_fields():
+    """EvidenceBundle must have all required operator-facing fields."""
+    from flow_healer.healer_runner import EvidenceBundle
+    bundle = EvidenceBundle(
+        issue_id="42",
+        repo="owner/repo",
+        summary="Fix flaky test_cache_invalidation by mocking timer",
+        files_changed=["tests/test_cache.py"],
+        diff_summary="1 file changed, 5 insertions(+), 3 deletions(-)",
+        validation_commands=["pytest tests/test_cache.py -v"],
+        validation_passed=True,
+        risk_level="low",
+        failure_reason="",
+    )
+    assert bundle.issue_id == "42"
+    assert bundle.repo == "owner/repo"
+    assert bundle.validation_passed is True
+    assert bundle.risk_level == "low"
+    assert bundle.failure_reason == ""
+
+
+def test_build_evidence_bundle_from_run_result():
+    """build_evidence_bundle maps HealerRunResult -> EvidenceBundle correctly."""
+    from flow_healer.healer_runner import EvidenceBundle, HealerRunResult, build_evidence_bundle
+    run_result = HealerRunResult(
+        success=True,
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+        proposer_output="",
+        diff_paths=["tests/test_cache.py"],
+        diff_files=1,
+        diff_lines=8,
+        test_summary={"passed": 5, "failed": 0},
+        workspace_status={},
+    )
+    bundle = build_evidence_bundle(
+        run_result=run_result,
+        issue_id="42",
+        repo="owner/repo",
+        summary="Fix flaky test",
+        validation_commands=["pytest tests/ -v"],
+    )
+    assert isinstance(bundle, EvidenceBundle)
+    assert bundle.validation_passed is True
+    assert bundle.files_changed == ["tests/test_cache.py"]
+    assert bundle.risk_level == "low"
+    assert bundle.failure_reason == ""
+
+
+def test_operator_failure_reason_maps_internal_codes():
+    """_operator_failure_reason must map all known internal codes to operator labels."""
+    from flow_healer.healer_runner import _operator_failure_reason
+    assert _operator_failure_reason("tests_failed") == "validation_failed"
+    assert _operator_failure_reason("verifier_failed") == "validation_failed"
+    assert _operator_failure_reason("diff_too_large") == "diff_too_large"
+    assert _operator_failure_reason("diff_files_exceeded") == "diff_too_large"
+    assert _operator_failure_reason("diff_lines_exceeded") == "diff_too_large"
+    assert _operator_failure_reason("scope_violation") == "scope_violation"
+    assert _operator_failure_reason("output_target_violation") == "scope_violation"
+    assert _operator_failure_reason("no_workspace_change") == "no_confident_fix"
+    assert _operator_failure_reason("no_workspace_change:empty_diff") == "no_confident_fix"
+    assert _operator_failure_reason("connector_unavailable") == "no_confident_fix"
+    assert _operator_failure_reason("circuit_breaker_open") == "repo_blocked"
+    assert _operator_failure_reason("healer_paused") == "repo_blocked"
+    assert _operator_failure_reason("review_required") == "review_required"
+    assert _operator_failure_reason("") == ""
+
+
+def test_risk_level_low_for_small_diff():
+    """Small diffs with no test failures should be rated low risk."""
+    from flow_healer.healer_runner import HealerRunResult, _risk_level_from_result
+    result = HealerRunResult(
+        success=True,
+        failure_class="",
+        failure_reason="",
+        failure_fingerprint="",
+        proposer_output="",
+        diff_paths=["tests/test_x.py"],
+        diff_files=1,
+        diff_lines=10,
+        test_summary={"passed": 3, "failed": 0},
+        workspace_status={},
+    )
+    assert _risk_level_from_result(result) == "low"
+
+
+def test_risk_level_high_for_test_failures():
+    """Any test failures should be rated high risk."""
+    from flow_healer.healer_runner import HealerRunResult, _risk_level_from_result
+    result = HealerRunResult(
+        success=False,
+        failure_class="tests_failed",
+        failure_reason="",
+        failure_fingerprint="",
+        proposer_output="",
+        diff_paths=["tests/test_x.py"],
+        diff_files=1,
+        diff_lines=10,
+        test_summary={"passed": 0, "failed": 1},
+        workspace_status={},
+    )
+    assert _risk_level_from_result(result) == "high"

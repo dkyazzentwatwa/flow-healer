@@ -344,3 +344,85 @@ def test_live_events_poll_only_updates_events() -> None:
     # Should not have queried queue or attempts tables
     assert not any("queue" in q for q in queried)
     assert not any("attempts" in q for q in queried)
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Failure taxonomy normalization
+# ---------------------------------------------------------------------------
+
+
+def test_format_attempt_row_for_display_maps_failure_class():
+    """_format_attempt_row_for_display must map internal failure_class to operator label."""
+    from flow_healer.tui import _format_attempt_row_for_display
+    row = {
+        "attempt_id": "abc123",
+        "issue_id": "42",
+        "state": "failed",
+        "failure_class": "tests_failed",
+        "failure_reason": "3 tests failed in test_cache.py",
+    }
+    display = _format_attempt_row_for_display(row)
+    assert display["operator_failure"] == "validation_failed"
+    assert "tests_failed" not in display["operator_failure"]
+
+
+def test_format_attempt_row_for_display_empty_failure():
+    """_format_attempt_row_for_display with no failure_class returns empty string."""
+    from flow_healer.tui import _format_attempt_row_for_display
+    row = {"attempt_id": "abc", "issue_id": "1", "state": "running", "failure_class": ""}
+    display = _format_attempt_row_for_display(row)
+    assert display["operator_failure"] == ""
+
+
+def test_format_attempt_row_for_display_preserves_original_fields():
+    """_format_attempt_row_for_display must preserve all original row fields."""
+    from flow_healer.tui import _format_attempt_row_for_display
+    row = {"attempt_id": "x", "issue_id": "7", "state": "failed", "failure_class": "scope_violation"}
+    display = _format_attempt_row_for_display(row)
+    assert display["attempt_id"] == "x"
+    assert display["issue_id"] == "7"
+    assert display["operator_failure"] == "scope_violation"
+
+
+# ---------------------------------------------------------------------------
+# Task 10: Tab ID constants
+# ---------------------------------------------------------------------------
+
+
+def test_tui_tab_constants_defined():
+    """MVP tab ID constants must all be importable from tui module."""
+    import flow_healer.tui as tui_mod
+    assert hasattr(tui_mod, "TAB_REVIEW_QUEUE"), "Missing TAB_REVIEW_QUEUE"
+    assert hasattr(tui_mod, "TAB_BLOCKED"), "Missing TAB_BLOCKED"
+    assert hasattr(tui_mod, "TAB_REPO_HEALTH"), "Missing TAB_REPO_HEALTH"
+    assert hasattr(tui_mod, "TAB_HISTORY"), "Missing TAB_HISTORY"
+    assert tui_mod.TAB_REVIEW_QUEUE == "tab-review-queue"
+    assert tui_mod.TAB_BLOCKED == "tab-blocked"
+    assert tui_mod.TAB_REPO_HEALTH == "tab-repo-health"
+    assert tui_mod.TAB_HISTORY == "tab-history"
+
+
+# ---------------------------------------------------------------------------
+# Task 11: Row action bindings
+# ---------------------------------------------------------------------------
+
+
+def test_tui_app_has_retry_binding():
+    """TUI must define a key binding for retry action."""
+    from flow_healer.tui import FlowHealerApp
+    binding_keys = [b.key for b in FlowHealerApp.BINDINGS]
+    assert "r" in binding_keys or "ctrl+r" in binding_keys, f"Expected retry binding, got: {binding_keys}"
+
+
+def test_tui_app_has_pause_binding():
+    """TUI must define a key binding for pause repo action."""
+    from flow_healer.tui import FlowHealerApp
+    binding_keys = [b.key for b in FlowHealerApp.BINDINGS]
+    assert "p" in binding_keys, f"Expected 'p' binding for pause, got: {binding_keys}"
+
+
+def test_tui_app_has_open_pr_binding():
+    """TUI must define a key binding for open PR action."""
+    from flow_healer.tui import FlowHealerApp
+    binding_keys = [b.key for b in FlowHealerApp.BINDINGS]
+    assert "o" in binding_keys, f"Expected 'o' binding for open PR, got: {binding_keys}"

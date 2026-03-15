@@ -166,3 +166,70 @@ def test_main_tui_dispatches_run_tui(monkeypatch, tmp_path: Path) -> None:
 
     assert called["run_tui"]["repo_name"] == "demo"
     assert called["run_tui"]["once"] is True
+
+
+def test_format_doctor_rows_plain_green_for_ok_setup():
+    """format_doctor_rows_plain must show ✓ lines for a healthy setup."""
+    from flow_healer.cli import format_doctor_rows_plain
+    rows = [
+        {
+            "repo": "my-repo",
+            "token_present": True,
+            "git_ok": True,
+            "connector_found": True,
+            "db_ok": True,
+            "preflight_summary": {"ready": True, "issues": []},
+        }
+    ]
+    output = format_doctor_rows_plain(rows)
+    assert "my-repo" in output
+    assert "✓" in output or "OK" in output.upper()
+    # Should not show remediation hints when everything is OK
+    assert "→" not in output or output.count("→") == 0
+
+
+def test_format_doctor_rows_plain_red_with_hint_for_missing_token():
+    """format_doctor_rows_plain must show ✗ and a remediation hint for missing token."""
+    from flow_healer.cli import format_doctor_rows_plain
+    rows = [
+        {
+            "repo": "my-repo",
+            "token_present": False,
+            "git_ok": True,
+            "connector_found": True,
+            "db_ok": True,
+            "preflight_summary": {"ready": True, "issues": []},
+        }
+    ]
+    output = format_doctor_rows_plain(rows)
+    assert "✗" in output or "FAIL" in output.upper()
+    assert "GITHUB_TOKEN" in output or "token" in output.lower()
+    assert "→" in output  # remediation hint marker
+
+
+def test_format_doctor_rows_plain_shows_preflight_issues():
+    """format_doctor_rows_plain must surface preflight issue strings."""
+    from flow_healer.cli import format_doctor_rows_plain
+    rows = [
+        {
+            "repo": "test-repo",
+            "token_present": True,
+            "git_ok": True,
+            "connector_found": True,
+            "db_ok": True,
+            "preflight_summary": {
+                "ready": False,
+                "issues": ["Docker not running", "Test command failed"],
+            },
+        }
+    ]
+    output = format_doctor_rows_plain(rows)
+    assert "Docker not running" in output
+    assert "Test command failed" in output
+
+
+def test_format_doctor_rows_plain_handles_empty_rows():
+    """format_doctor_rows_plain must not crash on empty input."""
+    from flow_healer.cli import format_doctor_rows_plain
+    output = format_doctor_rows_plain([])
+    assert isinstance(output, str)
