@@ -53,6 +53,14 @@ def test_add_many_rejects_invalid_operands() -> None:
         module.add_many("two", 3, 4)
 
 
+def test_add_many_with_variable_arguments() -> None:
+    module = _load_add_module()
+
+    assert module.add_many(1, 2) == 3
+    assert module.add_many(1, 2, 3, 4) == 10
+    assert module.add_many("1", 2, "3", 4, "5") == 15
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     (

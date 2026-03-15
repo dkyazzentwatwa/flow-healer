@@ -22,6 +22,9 @@ def add(left: int | str, right: int | str) -> int:
     return _coerce_int(left) + _coerce_int(right)
 
 
-def add_many(first: int | str, second: int | str, third: int | str) -> int:
-    """Return the arithmetic sum for three integer-like inputs."""
-    return _coerce_int(first) + _coerce_int(second) + _coerce_int(third)
+def add_many(*args: int | str) -> int:
+    """Return the arithmetic sum for an arbitrary number of integer-like inputs."""
+    total = 0
+    for arg in args:
+        total += _coerce_int(arg)
+    return total
