@@ -755,6 +755,8 @@ class FlowHealerApp(App[None]):
         Binding("ctrl+x", "clear_lock", "Clear lock", show=False),
         Binding("ctrl+c", "copy_issue_id", "Copy ID", show=False),
         Binding("ctrl+p", "open_pr", "Open PR", show=False),
+        Binding("p", "pause_repo", "Pause Repo", show=True),
+        Binding("o", "open_pr", "Open PR", show=True),
     ]
 
     def __init__(
@@ -1145,6 +1147,14 @@ class FlowHealerApp(App[None]):
             return
         webbrowser.open(pr_url)
         self.notify(f"Opened PR #{pr_number}", severity="information")
+
+    def action_pause_repo(self) -> None:
+        """Pause the current repo (stops new work for this repo)."""
+        try:
+            self._service.set_paused(True, self._repo_name)
+            self.notify("Repo paused. Use 'flow-healer resume' to restart.", severity="warning")
+        except Exception as exc:
+            self.notify(f"Could not pause repo: {exc}", severity="error")
 
     @work(thread=True)
     def action_export_data(self) -> None:
