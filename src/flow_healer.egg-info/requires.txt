@@ -1,4 +1,9 @@
 PyYAML>=6.0
+textual>=0.80
+
+[browser]
+playwright>=1.52
 
 [dev]
 pytest>=8.0
+playwright>=1.52
