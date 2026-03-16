@@ -52,6 +52,8 @@ def _make_loop(store, **overrides):
         healer_learning_enabled=True,
         healer_enable_review=overrides.get("healer_enable_review", True),
         healer_enable_security_review=overrides.get("healer_enable_security_review", True),
+        healer_enable_findings_review=overrides.get("healer_enable_findings_review", False),
+        healer_enable_security_findings=overrides.get("healer_enable_security_findings", False),
         healer_issue_contract_mode=overrides.get("healer_issue_contract_mode", "lenient"),
         healer_parse_confidence_threshold=overrides.get("healer_parse_confidence_threshold", 0.3),
         healer_codex_native_multi_agent_enabled=overrides.get("healer_codex_native_multi_agent_enabled", False),

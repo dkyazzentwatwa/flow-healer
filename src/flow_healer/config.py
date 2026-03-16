@@ -127,6 +127,8 @@ class RelaySettings:
     healer_learning_enabled: bool = True
     healer_enable_review: bool = True
     healer_enable_security_review: bool = True
+    healer_enable_findings_review: bool = False
+    healer_enable_security_findings: bool = False
     healer_codex_native_multi_agent_enabled: bool = False
     healer_codex_native_multi_agent_max_subagents: int = 3
     healer_swarm_enabled: bool = False
@@ -324,6 +326,8 @@ class AppConfig:
                     healer_learning_enabled=bool(item.get("learning_enabled", True)),
                     healer_enable_review=bool(item.get("enable_review", True)),
                     healer_enable_security_review=bool(item.get("enable_security_review", True)),
+                    healer_enable_findings_review=bool(item.get("enable_findings_review", False)),
+                    healer_enable_security_findings=bool(item.get("enable_security_findings", False)),
                     healer_codex_native_multi_agent_enabled=bool(
                         item.get("codex_native_multi_agent_enabled", False)
                     ),

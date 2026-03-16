@@ -35,6 +35,8 @@ from .healer_preflight import (
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
 from .healer_security_reviewer import HealerSecurityReviewer
+from .healer_findings_reviewer import HealerFindingsReviewer, FindingsReviewResult, format_findings_comment
+from .healer_security_findings import HealerSecurityFindings, SecurityFindingsResult, format_security_findings_comment
 from .healer_runner import HealerRunner, _stage_workspace_changes
 from .healer_swarm import HealerSwarm, SwarmRecoveryOutcome, SwarmRecoveryPlan, build_connector_subagent_backend
 from .healer_scan import FlowHealerScanner
@@ -4350,6 +4352,82 @@ class AutonomousHealerLoop:
                     self.tracker.add_pr_comment(pr_number=pr.number, body=review.review_body)
                 except Exception as exc:
                     logger.warning("Failed to generate or post code review for PR #%d: %s", pr.number, exc)
+            _findings_data: dict[str, Any] = {}
+            _sec_findings_data: dict[str, Any] = {}
+            if self.settings.healer_enable_findings_review:
+                try:
+                    _fr = HealerFindingsReviewer(selected_connector)
+                    _fr_result = _fr.review(
+                        issue_id=issue.issue_id,
+                        issue_title=issue.title,
+                        issue_body=issue.body,
+                        diff_paths=run_result.diff_paths,
+                        proposer_output=run_result.proposer_output,
+                        verifier_summary=verification.summary,
+                    )
+                    _findings_data = {
+                        "verdict": _fr_result.verdict,
+                        "findings": [
+                            {
+                                "category": f.category,
+                                "severity": f.severity,
+                                "confidence": f.confidence,
+                                "title": f.title,
+                                "file_path": f.file_path,
+                                "line": f.line,
+                                "evidence": f.evidence,
+                                "why_it_matters": f.why_it_matters,
+                                "suggested_fix": f.suggested_fix,
+                            }
+                            for f in _fr_result.findings
+                        ],
+                    }
+                    _comment_body = format_findings_comment(_fr_result)
+                    if _comment_body:
+                        self.tracker.add_pr_comment(pr_number=pr.number, body=_comment_body)
+                except Exception as exc:
+                    logger.warning("Failed to generate findings review for PR #%d: %s", pr.number, exc)
+            if self.settings.healer_enable_security_findings:
+                try:
+                    _sfr = HealerSecurityFindings(selected_connector)
+                    _sfr_result = _sfr.review(
+                        issue_id=issue.issue_id,
+                        issue_title=issue.title,
+                        issue_body=issue.body,
+                        diff_paths=run_result.diff_paths,
+                        proposer_output=run_result.proposer_output,
+                        verifier_summary=verification.summary,
+                    )
+                    _sec_findings_data = {
+                        "verdict": _sfr_result.verdict,
+                        "findings": [
+                            {
+                                "severity": f.severity,
+                                "confidence": f.confidence,
+                                "title": f.title,
+                                "file_path": f.file_path,
+                                "line": f.line,
+                                "evidence": f.evidence,
+                                "impact": f.impact,
+                                "suggested_fix": f.suggested_fix,
+                            }
+                            for f in _sfr_result.findings
+                        ],
+                    }
+                    _comment_body = format_security_findings_comment(_sfr_result)
+                    if _comment_body:
+                        self.tracker.add_pr_comment(pr_number=pr.number, body=_comment_body)
+                except Exception as exc:
+                    logger.warning("Failed to generate security findings for PR #%d: %s", pr.number, exc)
+            if attempt_id and (_findings_data or _sec_findings_data):
+                try:
+                    self.store.save_attempt_findings(
+                        attempt_id=attempt_id,
+                        findings_review=_findings_data or None,
+                        security_findings=_sec_findings_data or None,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to persist findings for attempt %s: %s", attempt_id, exc)
         finally:
             self._clear_sticky_runtime_status(issue_id=issue.issue_id)
             lease_stop.set()

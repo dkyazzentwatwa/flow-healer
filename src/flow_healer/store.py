@@ -260,6 +260,8 @@ class SQLiteStore:
                 ("artifact_links_json", "ALTER TABLE healer_attempts ADD COLUMN artifact_links_json TEXT NOT NULL DEFAULT '[]'"),
                 ("ci_status_summary_json", "ALTER TABLE healer_attempts ADD COLUMN ci_status_summary_json TEXT NOT NULL DEFAULT '{}'"),
                 ("judgment_reason_code", "ALTER TABLE healer_attempts ADD COLUMN judgment_reason_code TEXT NOT NULL DEFAULT ''"),
+                ("findings_review_json", "ALTER TABLE healer_attempts ADD COLUMN findings_review_json TEXT NOT NULL DEFAULT '{}'"),
+                ("security_findings_json", "ALTER TABLE healer_attempts ADD COLUMN security_findings_json TEXT NOT NULL DEFAULT '{}'"),
             ]
             for column, statement in attempt_migrations:
                 if column not in attempt_cols:
@@ -940,6 +942,32 @@ class SQLiteStore:
                     (failure_class or "")[:120],
                     (failure_reason or "")[:500],
                     (proposer_output_excerpt or "")[:1500],
+                    attempt_id,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def save_attempt_findings(
+        self,
+        *,
+        attempt_id: str,
+        findings_review: dict[str, Any] | None = None,
+        security_findings: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist findings review results for an attempt."""
+        conn = self._connect()
+        with self._lock:
+            cursor = conn.execute(
+                """
+                UPDATE healer_attempts
+                SET findings_review_json = ?,
+                    security_findings_json = ?
+                WHERE attempt_id = ?
+                """,
+                (
+                    json.dumps(findings_review or {}),
+                    json.dumps(security_findings or {}),
                     attempt_id,
                 ),
             )
