@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "sh -c 'if [ -z \"$1\" ]; then node --test test/add.test.js test/file-ops.test.js test/crypto.test.js; else node --test test/$1; fi' --"
+    "test": "sh -c 'if [ -z \"$1\" ]; then node --test test/add.test.js test/file-ops.test.js test/crypto.test.js test/users.test.js test/debounce.test.js; else node --test test/$1; fi' --"
   }
 }
