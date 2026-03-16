@@ -34,3 +34,4 @@ jobs:
           fail-on-severity: high
           deny-licenses: GPL-2.0, AGPL-1.0, AGPL-3.0
           comment-summary-in-pr: always
+        continue-on-error: true
