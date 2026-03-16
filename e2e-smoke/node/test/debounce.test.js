@@ -12,10 +12,9 @@ test('debounced fn is not called before the wait window elapses', async () => {
   const fn = debounce(() => { calls++; }, 50);
 
   fn();
-  // BUG: this delay is too close to the debounce window (50ms).
-  // On a loaded CI runner, setTimeout(r, 40) may take 55ms+ to fire,
-  // causing the debounced fn to execute before the assert runs.
-  await new Promise(r => setTimeout(r, 40));
+  // Safe margin: wait 20ms (well below the 50ms debounce window).
+  // Even on loaded CI runners, this should complete before debounce fires.
+  await new Promise(r => setTimeout(r, 20));
 
   assert.equal(calls, 0, 'fn should not have been called yet');
 });
