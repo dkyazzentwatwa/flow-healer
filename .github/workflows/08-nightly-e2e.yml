@@ -63,6 +63,24 @@ jobs:
         working-directory: e2e-apps/node-next
         run: npm test -- --passWithNoTests
 
+  smoke-node:
+    name: smoke-node
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run smoke-node tests
+        working-directory: e2e-smoke/node
+        run: node --test test/add.test.js test/crypto.test.js test/file-ops.test.js test/users.test.js test/debounce.test.js
+
   smoke-ruby-rails:
     name: smoke-ruby-rails
     runs-on: ubuntu-latest
