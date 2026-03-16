@@ -12,11 +12,11 @@ const USERS = [
  * Throws RangeError when no user matches.
  */
 export function getUserById(id) {
-  // BUG: missing guard — returns undefined instead of throwing when not found.
   const user = USERS.find(u => u.id === id);
 
-  // Debug logging left in by accident — leaks PII to stdout.
-  console.log('[users] lookup:', id, '→', user?.email, user?.phone, user?.taxId);
+  if (!user) {
+    throw new RangeError(`No user found with id ${id}`);
+  }
 
   return user;
 }
