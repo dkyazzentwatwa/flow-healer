@@ -1,0 +1,8 @@
+{"event": "request", "method": "GET", "resource_type": "document", "url": "http://127.0.0.1:3000/"}
+{"event": "response", "resource_type": "document", "status": 200, "url": "http://127.0.0.1:3000/"}
+{"event": "request", "method": "GET", "resource_type": "script", "url": "http://127.0.0.1:3000/_next/static/chunks/webpack.js?v=1773689033590"}
+{"event": "request", "method": "GET", "resource_type": "script", "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1773689033590"}
+{"event": "request", "method": "GET", "resource_type": "script", "url": "http://127.0.0.1:3000/_next/static/chunks/app-pages-internals.js"}
+{"event": "response", "resource_type": "script", "status": 200, "url": "http://127.0.0.1:3000/_next/static/chunks/webpack.js?v=1773689033590"}
+{"event": "response", "resource_type": "script", "status": 200, "url": "http://127.0.0.1:3000/_next/static/chunks/app-pages-internals.js"}
+{"event": "response", "resource_type": "script", "status": 200, "url": "http://127.0.0.1:3000/_next/static/chunks/main-app.js?v=1773689033590"}
