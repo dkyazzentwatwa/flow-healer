@@ -150,6 +150,11 @@ class RelaySettings:
         ]
     )
     healer_swarm_backend_strategy: str = "match_selected_backend"
+    healer_planning_gate_enabled: bool = False
+    healer_planning_gate_strict_scope: bool = True
+    healer_planning_gate_timeout_seconds: int = 120
+    healer_check_runs_enabled: bool = False
+    healer_sandbox_isolated_home: bool = False
     healer_verifier_policy: str = "required"
     healer_test_gate_mode: str = "local_then_docker"
     healer_local_gate_policy: str = "auto"

@@ -191,6 +191,7 @@ def _make_loop(store, **overrides):
     loop.reviewers_by_backend = overrides.get("reviewers_by_backend", {"exec": loop.reviewer})
     loop.swarms_by_backend = overrides.get("swarms_by_backend", {"exec": loop.swarm})
     loop.preflight_by_backend = overrides.get("preflight_by_backend", {"exec": loop.preflight})
+    loop.planners_by_backend = overrides.get("planners_by_backend", {"exec": MagicMock()})
     loop._sticky_runtime_status = overrides.get("_sticky_runtime_status", "")
     loop._sticky_runtime_issue_id = overrides.get("_sticky_runtime_issue_id", "")
     loop._last_harness_canary_at = overrides.get("_last_harness_canary_at", 0.0)

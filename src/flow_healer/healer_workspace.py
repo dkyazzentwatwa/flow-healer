@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +17,47 @@ class WorkspaceInfo:
     issue_id: str
     branch: str
     path: Path
+
+
+@dataclass(slots=True, frozen=True)
+class SandboxEnv:
+    """Per-run process isolation environment.
+
+    Provides an isolated HOME and XDG_CACHE_HOME so that the provider
+    subprocess cannot read or write the operator's real home directory.
+    On Linux this also prevents credential leakage between runs.
+
+    Usage::
+        sandbox = workspace_manager.create_sandbox_env(issue_id=issue_id)
+        try:
+            # pass sandbox.to_env_dict() as env overrides to subprocesses
+            ...
+        finally:
+            sandbox.cleanup()
+    """
+
+    issue_id: str
+    temp_home: Path
+    temp_xdg_cache: Path
+    network_allowed: bool
+
+    def to_env_dict(self) -> dict[str, str]:
+        """Return a dict of env vars to overlay on subprocess environment."""
+        return {
+            "HOME": str(self.temp_home),
+            "XDG_CACHE_HOME": str(self.temp_xdg_cache),
+            "XDG_CONFIG_HOME": str(self.temp_home / ".config"),
+            "XDG_DATA_HOME": str(self.temp_home / ".local" / "share"),
+        }
+
+    def cleanup(self) -> None:
+        """Remove all temp directories created for this sandbox."""
+        for path in (self.temp_home, self.temp_xdg_cache):
+            try:
+                if path.exists():
+                    shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass
 
 
 class HealerWorkspaceManager:
@@ -231,6 +274,37 @@ class HealerWorkspaceManager:
             timeout=10,
         )
         return check.returncode == 0
+
+    def create_sandbox_env(
+        self,
+        *,
+        issue_id: str,
+        network_allowed: bool = True,
+    ) -> SandboxEnv:
+        """Create per-run isolated HOME and XDG_CACHE directories.
+
+        The caller is responsible for calling ``sandbox.cleanup()`` when the
+        attempt finishes (or errors).  The sandbox is intentionally not tied to
+        the worktree lifecycle so that the planner and runner phases can share
+        the same sandbox across the full attempt.
+        """
+        slug = re.sub(r"[^a-z0-9]", "-", str(issue_id or "unknown").lower())[:20]
+        prefix = f"fh-home-{slug}-"
+        temp_home = Path(
+            tempfile.mkdtemp(prefix=prefix, dir=os.getenv("TMPDIR") or None)
+        ).resolve()
+        temp_xdg_cache = Path(
+            tempfile.mkdtemp(prefix=f"fh-cache-{slug}-", dir=os.getenv("TMPDIR") or None)
+        ).resolve()
+        # Pre-create common subdirs to avoid provider startup failures
+        for subdir in (".config", ".local/share", ".ssh"):
+            (temp_home / subdir).mkdir(parents=True, exist_ok=True)
+        return SandboxEnv(
+            issue_id=str(issue_id),
+            temp_home=temp_home,
+            temp_xdg_cache=temp_xdg_cache,
+            network_allowed=network_allowed,
+        )
 
     def list_workspaces(self) -> list[Path]:
         if not self.worktrees_root.exists():

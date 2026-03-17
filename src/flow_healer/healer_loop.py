@@ -32,6 +32,7 @@ from .healer_preflight import (
     execution_root_for_language,
     preflight_report_to_test_summary,
 )
+from .healer_planner import HealerPlanner, PlanResult
 from .healer_reconciler import HealerReconciler
 from .healer_reviewer import HealerReviewer
 from .healer_security_reviewer import HealerSecurityReviewer
@@ -90,6 +91,10 @@ _EXECUTION_CONTRACT_FAILURE_CLASSES = {
     "no_patch",
     "no_workspace_change",
     "patch_apply_failed",
+}
+_PLAN_GATE_FAILURE_CLASSES = {
+    "plan_scope_violation",
+    "plan_unparseable",
 }
 _QUARANTINE_NEUTRAL_FAILURE_CLASSES = {"interrupted", "lease_expired"}
 _STUCK_PR_STATES = {"blocked", "dirty", "has_failure", "behind"}
@@ -200,6 +205,14 @@ _FAILURE_USER_HINTS: dict[str, str] = {
     ),
     "diff_limit_exceeded": (
         "The proposed change was too large. Break this issue into smaller tasks."
+    ),
+    "plan_scope_violation": (
+        "The AI planner proposed edits outside the declared output targets. "
+        "Tighten the 'Required code outputs:' section in the issue body so the scope is unambiguous."
+    ),
+    "plan_unparseable": (
+        "The AI planner did not return a valid JSON plan. "
+        "This is usually a transient connector issue and will resolve on retry."
     ),
 }
 
@@ -314,6 +327,7 @@ class AutonomousHealerLoop:
         self.reviewers_by_backend: dict[str, HealerReviewer] = {}
         self.swarms_by_backend: dict[str, HealerSwarm] = {}
         self.preflight_by_backend: dict[str, HealerPreflight] = {}
+        self.planners_by_backend: dict[str, HealerPlanner] = {}
         for backend, backend_connector in self.connectors_by_backend.items():
             runner = HealerRunner(
                 connector=backend_connector,
@@ -354,6 +368,14 @@ class AutonomousHealerLoop:
                 store=store,
                 runner=runner,
                 repo_path=self.repo_path,
+            )
+            self.planners_by_backend[backend] = HealerPlanner(
+                connector=backend_connector,
+                timeout_seconds=max(
+                    30,
+                    int(getattr(settings, "healer_planning_gate_timeout_seconds", 120)),
+                ),
+                strict_scope=bool(getattr(settings, "healer_planning_gate_strict_scope", True)),
             )
         primary_backend = self._primary_backend()
         self.runner = self.runners_by_backend[primary_backend]
@@ -430,7 +452,7 @@ class AutonomousHealerLoop:
     def _pipeline_for_task(
         self,
         task_spec: HealerTaskSpec,
-    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerSecurityReviewer, HealerSwarm, HealerPreflight]:
+    ) -> tuple[str, ConnectorProtocol, HealerRunner, HealerVerifier, HealerReviewer, HealerSecurityReviewer, HealerSwarm, HealerPreflight, HealerPlanner]:
         backend = self._select_backend_for_task(task_spec)
         connector = self.connectors_by_backend.get(backend, self.connector)
         runner = self.runners_by_backend.get(backend, self.runner)
@@ -457,7 +479,18 @@ class AutonomousHealerLoop:
                 ),
             )
             self.swarms_by_backend[backend] = swarm
-        return backend, connector, runner, verifier, reviewer, security_reviewer, swarm, preflight
+        planner = self.planners_by_backend.get(
+            backend,
+            HealerPlanner(
+                connector=connector,
+                timeout_seconds=max(
+                    30,
+                    int(getattr(self.settings, "healer_planning_gate_timeout_seconds", 120)),
+                ),
+                strict_scope=bool(getattr(self.settings, "healer_planning_gate_strict_scope", True)),
+            ),
+        )
+        return backend, connector, runner, verifier, reviewer, security_reviewer, swarm, preflight, planner
 
     @property
     def enabled(self) -> bool:
@@ -3523,7 +3556,7 @@ class AutonomousHealerLoop:
             return True
 
         try:
-            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_security_reviewer, selected_swarm, selected_preflight = (
+            selected_backend, selected_connector, selected_runner, selected_verifier, selected_reviewer, selected_security_reviewer, selected_swarm, selected_preflight, selected_planner = (
                 self._pipeline_for_task(task_spec)
             )
             if not bool(getattr(self.tracker, "enabled", False)):
@@ -3763,6 +3796,52 @@ class AutonomousHealerLoop:
                     attempt_no=attempt_no,
                     failure_class=failure_class,
                     failure_reason=failure_reason,
+                )
+            if bool(getattr(self.settings, "healer_planning_gate_enabled", False)):
+                plan_result = selected_planner.run_plan(
+                    issue_id=issue.issue_id,
+                    issue_title=issue.title,
+                    issue_body=issue.body,
+                    task_spec=task_spec,
+                    workspace=workspace.path,
+                    feedback_context=feedback_context,
+                )
+                if not plan_result.passed:
+                    failure_class = plan_result.failure_class
+                    failure_reason = plan_result.failure_reason
+                    logger.info(
+                        "Issue #%s attempt %s blocked by plan gate (%s): %s",
+                        issue.issue_id,
+                        attempt_no,
+                        failure_class,
+                        failure_reason[:200],
+                    )
+                    self._post_issue_status(
+                        issue_id=issue.issue_id,
+                        body=self._format_flow_status_comment(
+                            title="Plan Gate Failed",
+                            subtitle=(
+                                f"Attempt {attempt_no} blocked before code edits — "
+                                "the AI planner's proposed scope did not pass validation."
+                            ),
+                            bullets=[
+                                f"Failure class: `{failure_class}`",
+                                f"Reason: {failure_reason[:300]}",
+                            ],
+                        ),
+                    )
+                    issue_state = self._backoff_or_fail(
+                        issue_id=issue.issue_id,
+                        attempt_no=attempt_no,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                    )
+                    return
+                logger.info(
+                    "Issue #%s attempt %s plan gate passed: %s",
+                    issue.issue_id,
+                    attempt_no,
+                    str(plan_result.plan.get("approach") or "")[:120],
                 )
             native_multi_agent_profile = self._codex_native_multi_agent_profile_for_task(
                 selected_backend=selected_backend,

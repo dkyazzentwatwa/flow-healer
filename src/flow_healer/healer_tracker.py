@@ -521,6 +521,123 @@ query FindPRForIssue($q: String!, $first: Int!) {
             html_url=str(payload.get("html_url") or ""),
         )
 
+    # ------------------------------------------------------------------
+    # GitHub Check Runs (structured machine-readable status)
+    # ------------------------------------------------------------------
+
+    def create_check_run(
+        self,
+        *,
+        name: str,
+        head_sha: str,
+        status: str = "in_progress",
+        conclusion: str = "",
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int:
+        """Create a GitHub Check Run on head_sha.  Returns check_run_id or 0 on failure.
+
+        Requires the token to have checks:write permission (GitHub App or fine-grained PAT).
+        On 403/422 (e.g. classic PAT without checks scope) logs a warning and returns 0.
+        """
+        if not self.enabled or not head_sha.strip() or not name.strip():
+            return 0
+        body: dict[str, Any] = {
+            "name": name.strip(),
+            "head_sha": head_sha.strip(),
+            "status": status.strip() or "in_progress",
+        }
+        if conclusion.strip():
+            body["conclusion"] = conclusion.strip()
+            body["status"] = "completed"
+        output: dict[str, str] = {}
+        if title.strip():
+            output["title"] = title.strip()[:255]
+        if summary.strip():
+            output["summary"] = summary.strip()[:65535]
+        if output:
+            body["output"] = output
+        if details_url.strip():
+            body["details_url"] = details_url.strip()
+        try:
+            payload = self._request_json(
+                f"/repos/{self.repo_slug}/check-runs",
+                method="POST",
+                body=body,
+            )
+            return int(payload.get("id") or 0) if isinstance(payload, dict) else 0
+        except Exception as exc:
+            logger.warning(
+                "create_check_run failed for %s on %s: %s",
+                name,
+                head_sha[:12],
+                exc,
+            )
+            return 0
+
+    def update_check_run(
+        self,
+        *,
+        check_run_id: int,
+        status: str = "",
+        conclusion: str = "",
+        title: str = "",
+        summary: str = "",
+    ) -> bool:
+        """Update an existing check run.  Returns True on success."""
+        if not self.enabled or check_run_id <= 0:
+            return False
+        body: dict[str, Any] = {}
+        if status.strip():
+            body["status"] = status.strip()
+        if conclusion.strip():
+            body["conclusion"] = conclusion.strip()
+            body["status"] = "completed"
+        output: dict[str, str] = {}
+        if title.strip():
+            output["title"] = title.strip()[:255]
+        if summary.strip():
+            output["summary"] = summary.strip()[:65535]
+        if output:
+            body["output"] = output
+        if not body:
+            return True
+        try:
+            self._request_json(
+                f"/repos/{self.repo_slug}/check-runs/{check_run_id}",
+                method="PATCH",
+                body=body,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("update_check_run %d failed: %s", check_run_id, exc)
+            return False
+
+    def publish_check_run(
+        self,
+        *,
+        name: str,
+        head_sha: str,
+        conclusion: str,
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int:
+        """Convenience: create a completed check run in one call.
+        conclusion must be one of: success, failure, neutral, cancelled, skipped, timed_out, action_required.
+        Returns check_run_id or 0 on failure.
+        """
+        return self.create_check_run(
+            name=name,
+            head_sha=head_sha,
+            status="completed",
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+            details_url=details_url,
+        )
+
     def publish_artifact_files(
         self,
         *,
