@@ -54,6 +54,8 @@ These documents define current repo behavior and should be updated in the same c
 
 ## Supporting References
 
+- [haiku.md](haiku.md): concise Haiku configuration guide
+- [agentic-coding.md](agentic-coding.md): AI agent capabilities, connectors, and task specifications
 - [automated-coding-with-claude-haiku.md](automated-coding-with-claude-haiku.md): how Claude Haiku powers automated healing and code generation in Flow Healer
 - [contributing.md](contributing.md): contributor expectations
 - [harness-reliability-runbook.md](harness-reliability-runbook.md): focused browser-harness operations guidance
