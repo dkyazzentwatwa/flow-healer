@@ -85,6 +85,8 @@ The TUI shows a **Review Queue** of draft PRs ready to approve, a **Blocked** ta
 ## Documentation
 
 - [docs/onboarding.md](docs/onboarding.md) — 15-minute setup guide
+- [docs/haiku.md](docs/haiku.md) — Claude Haiku configuration and usage
+- [docs/agentic-coding.md](docs/agentic-coding.md) — AI agent capabilities and connectors
 - [docs/mvp.md](docs/mvp.md) — what's in scope at MVP
 - [docs/safe-scope.md](docs/safe-scope.md) — file scope rules and examples
 - [docs/operator-workflow.md](docs/operator-workflow.md) — TUI / CLI operator guide
