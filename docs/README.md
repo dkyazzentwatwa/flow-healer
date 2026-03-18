@@ -9,6 +9,10 @@ This index is the canonical entrypoint for Flow Healer documentation. Use it to 
 - [operations.md](operations.md): live-service runbooks, incident handling, and maintenance
 - [test-strategy.md](test-strategy.md): testing pyramid and which regression to add when behavior escapes
 
+## Guides
+
+- [automated-coding-with-claude-haiku.md](automated-coding-with-claude-haiku.md): how Claude Haiku enables automated code generation and repair in Flow Healer
+
 ## Canonical Docs
 
 These documents define current repo behavior and should be updated in the same change when that behavior changes.
