@@ -53,6 +53,7 @@ These documents define current repo behavior and should be updated in the same c
 
 ## Supporting References
 
+- [automated-coding-with-claude-haiku.md](automated-coding-with-claude-haiku.md): how Claude Haiku powers automated healing and code generation in Flow Healer
 - [contributing.md](contributing.md): contributor expectations
 - [harness-reliability-runbook.md](harness-reliability-runbook.md): focused browser-harness operations guidance
 - [harness-smoke-checklist.md](harness-smoke-checklist.md): smoke validation checklist
