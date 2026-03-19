@@ -1,27 +1,27 @@
 # Automated Code Reviews with GPT Codex
 
-This guide covers how to use GPT Codex for automated code reviews when you want a focused second pass over a diff, not a rewrite of the implementation. The goal is to get concrete findings that a human reviewer can act on quickly.
+Use GPT Codex as a second-pass reviewer when you already have a bounded diff and want concrete findings a human can act on quickly. This guide stays focused on review prompts, output quality, and practical review habits for automated code review runs.
 
-## When to Use Codex for Review
+## When To Use Codex
 
-Use Codex when the change is already scoped and you want help answering questions like:
+Use Codex when the question is narrow and evidence-based:
 
-- Did this patch introduce a correctness bug?
-- Does the change miss validation, error handling, or compatibility checks?
-- Are there missing tests for the behavior that changed?
-- Is the diff too broad, risky, or hard to reason about?
+- Did this patch introduce a correctness or compatibility bug?
+- Are validation, error handling, or edge cases missing?
+- Did the change add behavior without tests?
+- Is the diff too broad or risky for the intended issue scope?
 
-Codex works best when the prompt is tied to one PR or one diff. It is a poor fit for open-ended architecture debates, broad refactors without boundaries, or prompts that ask for both implementation and review at the same time.
+Codex works best on one PR, one diff, or one small patch set. It is a poor fit for open-ended architecture debates, broad refactors without boundaries, or prompts that ask for both implementation and review in the same pass.
 
-## What A Good Prompt Includes
+## Good Review Prompts
 
-A strong review prompt gives Codex the minimum context it needs to judge the patch:
+A good prompt gives Codex only the context it needs to judge the patch:
 
-- the repo or issue being reviewed
-- the exact diff or changed files
-- the validation results or verifier summary
-- the review goal, such as "find actionable issues only"
-- the required output format
+- the repo, issue, or PR being reviewed
+- the exact changed files or diff
+- the validation command and result
+- the review goal, such as `find actionable issues only`
+- the output format you want back
 
 Example:
 
@@ -46,15 +46,15 @@ Context:
 
 ### Include
 
-- a single diff or PR
-- the review objective in one sentence
-- the validation command or test summary
+- one diff or PR at a time
+- a one-sentence review objective
+- validation output or test summary
 - a clear output contract
-- file names or line references if you already know the suspicious area
+- file names or line references when you already know the risky area
 
 ### Avoid
 
-- "review this code" with no scope
+- `review this code` with no scope
 - asking for a summary when you need findings
 - mixing implementation instructions into a review prompt
 - pasting unrelated policy text or old issue threads into the prompt
@@ -62,13 +62,13 @@ Context:
 
 ### Ask For Structured Output
 
-If the result feeds another automation step, ask for a format that is easy to parse:
+If the result feeds another automation step, ask for a parseable format:
 
 - JSON for machine-readable findings
 - a short Markdown report for human review
 - a table with `severity`, `location`, `description`, and `next_step`
 
-Example structured prompt:
+Example:
 
 ```text
 Return a Markdown review with:
@@ -79,26 +79,26 @@ Return a Markdown review with:
 Keep the review under 300 words.
 ```
 
-## Review Quality Checklist
+## Review Checklist
 
-Before you trust the output, check that the review:
+Before you trust the output, confirm the review:
 
-- stays inside the requested scope
-- calls out only actionable findings
-- mentions missing tests when behavior changed
-- distinguishes real risks from style preferences
-- gives a clear next step for each finding
-- avoids generic praise or restating the diff
+- stayed inside the requested scope
+- called out only actionable findings
+- mentioned missing tests when behavior changed
+- distinguished real risks from style preferences
+- gave a clear next step for each finding
+- avoided generic praise or restating the diff
 
 ## Practical Pattern
 
-The most reliable pattern is:
+The most reliable workflow is:
 
-1. validate the change
+1. validate the change first
 2. summarize the diff and changed files
 3. ask Codex for concrete findings only
 4. require structured output
-5. keep the result narrow enough that a human can verify it fast
+5. keep the result narrow enough that a human can verify it quickly
 
 That pattern matches Flow Healer's review flow: the review pass should add signal, not noise.
 
