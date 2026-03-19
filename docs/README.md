@@ -58,6 +58,7 @@ These documents define current repo behavior and should be updated in the same c
 - [agentic-coding.md](agentic-coding.md): AI agent capabilities, connectors, and task specifications
 - [automated-code-reviews-with-gpt-codex.md](automated-code-reviews-with-gpt-codex.md): practical prompt guidance for GPT Codex review passes
 - [automated-coding-with-claude-haiku.md](automated-coding-with-claude-haiku.md): how Claude Haiku powers automated healing and code generation in Flow Healer
+- [apple-reminders-project-management.md](apple-reminders-project-management.md): project-management notes for using Apple Reminders alongside Flow Healer
 - [contributing.md](contributing.md): contributor expectations
 - [harness-reliability-runbook.md](harness-reliability-runbook.md): focused browser-harness operations guidance
 - [harness-smoke-checklist.md](harness-smoke-checklist.md): smoke validation checklist
