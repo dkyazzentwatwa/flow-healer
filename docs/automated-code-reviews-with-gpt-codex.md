@@ -1,12 +1,12 @@
 # Automated Code Reviews with GPT Codex
 
-Use GPT Codex as a second-pass reviewer when you already have a bounded diff and want concrete findings a human can act on quickly. This guide stays focused on review prompts, output quality, and practical review habits for automated code review runs. The goal is to ask for findings, evidence, and next steps, not a rewrite of the patch.
+Use GPT Codex as a second-pass reviewer when you already have a bounded diff and want concrete findings a human can act on quickly. The goal is not to rewrite the patch. The goal is to surface evidence-backed issues, explain why they matter, and make the next step obvious.
 
-Codex can review pull requests automatically in GitHub when reviews are enabled, and you can also ask for a review explicitly with `@codex review`. That makes it useful for repeatable review passes, especially when you want the same review criteria applied across many PRs.
+Codex can review pull requests automatically in GitHub when reviews are enabled, and you can also ask for a review explicitly with `@codex review`. That makes it useful for repeatable review passes, especially when you want the same criteria applied across many PRs.
 
 ## When To Use Codex
 
-Use Codex when the question is narrow and evidence-based:
+Use Codex when the review question is narrow and evidence-based:
 
 - Did this patch introduce a correctness or compatibility bug?
 - Are validation, error handling, or edge cases missing?
@@ -27,9 +27,9 @@ A reliable review pass usually follows this sequence:
 
 That pattern matches Flow Healer's review flow: the review pass should add signal, not noise.
 
-## Good Review Prompts
+## Prompt Anatomy
 
-A good prompt gives Codex only the context it needs to judge the patch:
+A good review prompt gives Codex only the context it needs to judge the patch:
 
 - the repo, issue, or PR being reviewed
 - the exact changed files or diff
@@ -37,24 +37,7 @@ A good prompt gives Codex only the context it needs to judge the patch:
 - the review goal, such as `find actionable issues only`
 - the output format you want back
 
-Example:
-
-```text
-You are a strict code review findings engine.
-Review this diff for only concrete, non-obvious, actionable issues.
-Do not praise the code. Do not rewrite the patch. Do not give general advice.
-Focus on correctness bugs, compatibility risks, missing validation, missing error handling,
-meaningful maintainability risks, and missing tests for changed behavior.
-
-Return JSON only:
-{"verdict":"NO_ACTIONABLE_FINDINGS"|"ACTIONABLE_FINDINGS","findings":[...]}
-
-Context:
-- Issue: #1282
-- Changed files: src/example.py, tests/test_example.py
-- Validation: pytest tests/test_example.py -v
-- Verifier summary: all checks passed
-```
+If you have already identified a risky area, include the file and line range. If you do not, keep the scope at the PR or diff level and let Codex inspect from there.
 
 ## Prompt Tips
 
@@ -65,6 +48,7 @@ Context:
 - validation output or test summary
 - a clear output contract
 - file names or line references when you already know the risky area
+- an explicit ceiling on findings, such as `at most 5`
 
 ### Avoid
 
@@ -73,6 +57,7 @@ Context:
 - mixing implementation instructions into a review prompt
 - pasting unrelated policy text or old issue threads into the prompt
 - asking Codex to be exhaustive, brief, and speculative at the same time
+- asking for a fix and a review in the same pass
 
 ## Useful Prompt Patterns
 
@@ -145,6 +130,7 @@ Before you trust the output, confirm the review:
 - distinguished real risks from style preferences
 - gave a clear next step for each finding
 - avoided generic praise or restating the diff
+- matched the requested output format
 
 ## Do / Don't
 
@@ -168,3 +154,4 @@ Before you trust the output, confirm the review:
 
 - [issue-contracts.md](issue-contracts.md): how Flow Healer scopes work from issue text
 - [operator-workflow.md](operator-workflow.md): how review and draft PR states move through the queue
+- [OpenAI Codex Prompting Guide](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide): official prompt guidance for Codex-style tasks
