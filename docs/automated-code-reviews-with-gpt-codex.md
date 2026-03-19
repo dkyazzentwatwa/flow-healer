@@ -2,7 +2,7 @@
 
 Use GPT Codex as a second-pass reviewer when you already have a bounded diff and want concrete findings a human can act on quickly. The goal is not to rewrite the patch. The goal is to surface evidence-backed issues, explain why they matter, and make the next step obvious.
 
-Codex can review pull requests automatically in GitHub when reviews are enabled, and you can also ask for a review explicitly with `@codex review`. That makes it useful for repeatable review passes, especially when you want the same criteria applied across many PRs.
+OpenAI notes that Codex is effective for PR review work and that shorter prompts work well when the model already has code context available in the editor or repo. That fits Flow Healer's review pattern: keep the review narrow, give Codex the exact diff, and ask for actionable findings instead of a general critique.
 
 ## When To Use Codex
 
@@ -15,6 +15,18 @@ Use Codex when the review question is narrow and evidence-based:
 
 Codex works best on one PR, one diff, or one small patch set. It is a poor fit for open-ended architecture debates, broad refactors without boundaries, or prompts that ask for both implementation and review in the same pass.
 
+## What To Give It
+
+A useful review packet is small and explicit:
+
+- the repo, issue, or PR being reviewed
+- the exact changed files or diff
+- the validation command and result
+- the review goal, such as `find actionable issues only`
+- the output format you want back
+
+If you already know the risky area, include the file and line range. If not, keep the scope at the PR or diff level and let Codex inspect from there.
+
 ## Review Workflow
 
 A reliable review pass usually follows this sequence:
@@ -26,18 +38,6 @@ A reliable review pass usually follows this sequence:
 5. keep the review narrow enough that a human can verify it quickly
 
 That pattern matches Flow Healer's review flow: the review pass should add signal, not noise.
-
-## Prompt Anatomy
-
-A good review prompt gives Codex only the context it needs to judge the patch:
-
-- the repo, issue, or PR being reviewed
-- the exact changed files or diff
-- the validation command and result
-- the review goal, such as `find actionable issues only`
-- the output format you want back
-
-If you have already identified a risky area, include the file and line range. If you do not, keep the scope at the PR or diff level and let Codex inspect from there.
 
 ## Prompt Tips
 
@@ -63,7 +63,7 @@ If you have already identified a risky area, include the file and line range. If
 
 Use these patterns when you want repeatable review output.
 
-### Strict findings only
+### Strict Findings Only
 
 ```text
 Review this PR for actionable findings only.
@@ -73,7 +73,7 @@ For each finding, include file, line, evidence, why it matters, and the smallest
 If there are no actionable findings, say that explicitly.
 ```
 
-### Regression-focused review
+### Regression-Focused Review
 
 ```text
 Review this diff for regressions that could affect runtime behavior, validation, or test coverage.
@@ -81,15 +81,7 @@ Prioritize correctness, safety, and scope violations over style.
 Return at most 5 findings sorted by impact.
 ```
 
-### Security-aware review
-
-```text
-Review this change for security-relevant mistakes, unsafe assumptions, or missing guardrails.
-Call out only concrete issues that are grounded in the diff.
-If you need more context, say exactly what is missing.
-```
-
-### Machine-readable output
+### Automation-Friendly Output
 
 If the result feeds another automation step, ask for a parseable format:
 
@@ -107,18 +99,6 @@ Return a Markdown review with:
 - if there are no actionable findings, say so explicitly
 Keep the review under 300 words.
 ```
-
-## What Good Output Looks Like
-
-The strongest reviews are:
-
-- specific about file locations
-- grounded in the diff, not generic advice
-- explicit about why a behavior matters
-- small enough for a human to verify quickly
-- clear about whether there are actionable findings
-
-If a review starts drifting into broad commentary, tighten the prompt and remove any request that is not needed to decide whether the patch is safe to merge.
 
 ## Practical Checklist
 
@@ -155,3 +135,4 @@ Before you trust the output, confirm the review:
 - [issue-contracts.md](issue-contracts.md): how Flow Healer scopes work from issue text
 - [operator-workflow.md](operator-workflow.md): how review and draft PR states move through the queue
 - [OpenAI Codex Prompting Guide](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide): official prompt guidance for Codex-style tasks
+- [Introducing upgrades to Codex](https://openai.com/index/introducing-upgrades-to-codex/): product notes on Codex review use and prompt length
