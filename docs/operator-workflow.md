@@ -2,6 +2,8 @@
 
 This document explains the review queue, what each state means, and how to take action from the TUI or CLI.
 
+If you keep a personal task inbox in Apple Reminders, use it for planning and follow-up only. The authoritative queue and runtime states still live in Flow Healer. For a short project-management guide, see [apple-reminders-project-management.md](apple-reminders-project-management.md).
+
 ## The Review Queue
 
 Flow Healer maintains a queue of issues in SQLite. States visible in the TUI:
