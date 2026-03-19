@@ -1,6 +1,6 @@
 # Automated Code Reviews with GPT Codex
 
-Use GPT Codex as a second-pass reviewer when you already have a bounded diff and want concrete findings a human can act on quickly. This guide stays focused on review prompts, output quality, and practical review habits for automated code review runs.
+Use GPT Codex as a second-pass reviewer when you already have a bounded diff and want concrete findings a human can act on quickly. This guide stays focused on review prompts, output quality, and practical review habits for automated code review runs. The goal is to ask for findings, evidence, and next steps, not a rewrite of the patch.
 
 ## When To Use Codex
 
