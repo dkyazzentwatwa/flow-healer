@@ -45,6 +45,7 @@ config.yaml
 # Flow Healer local artifacts
 .apple-flow-healer/
 .superpowers/
+.kilo/
 .worktrees/
 .tmp-home/
 *.patch

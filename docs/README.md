@@ -60,6 +60,10 @@ These documents define current repo behavior and should be updated in the same c
 - [automated-coding-with-claude-haiku.md](automated-coding-with-claude-haiku.md): how Claude Haiku powers automated healing and code generation in Flow Healer
 - [apple-reminders-project-management.md](apple-reminders-project-management.md): project-management notes for using Apple Reminders alongside Flow Healer
 - [contributing.md](contributing.md): contributor expectations
+- [onboarding.md](onboarding.md): first-run setup guide for new operators
+- [operator-workflow.md](operator-workflow.md): review queue and operator actions
+- [mvp.md](mvp.md): product scope and acceptance boundary for the MVP release
+- [safe-scope.md](safe-scope.md): MVP-era scope contract retained for historical product context
 - [harness-reliability-runbook.md](harness-reliability-runbook.md): focused browser-harness operations guidance
 - [harness-smoke-checklist.md](harness-smoke-checklist.md): smoke validation checklist
 - [harness-repro-contract-examples.json](harness-repro-contract-examples.json): issue-contract examples used by validation helpers
